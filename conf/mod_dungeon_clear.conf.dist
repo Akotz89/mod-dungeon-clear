@@ -987,3 +987,22 @@ DungeonClear.SpectateEnable = 1
 #
 
 DungeonClear.SpectateSpeed = 2.5
+
+#
+#    DungeonClear.AllowAutonomousBotRuns
+#        Lets an EXTERNAL driver (e.g. mod-playerbot-dungeon-sim) start a
+#        dungeon-clear run on a fully bot-only party that has NO real-player
+#        owner, via DungeonClearControl::StartAutonomousClear(). The normal
+#        `.dc on` command always requires a real player in the bot's group (it
+#        self-authorizes), so bot-only parties can never start a clear on their
+#        own unless this is enabled. Every other guard still applies: a tank-spec
+#        bot must be present (it becomes the elected leader), the party must be
+#        inside the dungeon, the boss list must be known, and nobody may be dead.
+#        Leave this off unless you run such a driver — it does not change the
+#        behavior of the `.dc` command or the chat keywords in any way.
+#            0 = disabled (only real-player-owned `.dc on`/keywords can start a run)
+#            1 = enabled  (external drivers may start ownerless bot-only runs)
+#        Default: 0 (disabled)
+#
+
+DungeonClear.AllowAutonomousBotRuns = 0

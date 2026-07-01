@@ -87,7 +87,7 @@ float DcPartyState::RestMinMpPct(Player* bot)
     return std::min(75.0f, static_cast<float>(sPlayerbotAIConfig.highMana));
 }
 bool DcPartyState::IsPartyReady(Player* bot, float minHpPct, float minMpPct, float maxSpread,
-                                Position const* spreadAnchor, float maxTankGap)
+    Position const* spreadAnchor, float maxTankGap)
 {
     if (!bot)
         return false;
@@ -100,7 +100,7 @@ bool DcPartyState::IsPartyReady(Player* bot, float minHpPct, float minMpPct, flo
         Player* member = ref->GetSource();
         if (!member)
             continue;
-        if (member->GetMapId() != bot->GetMapId())
+        if (member->GetMapId() != bot->GetMapId() || member->GetInstanceId() != bot->GetInstanceId())
             continue;
         if (member->isDead())
             continue;  // Dead members handled by the party-died trigger.
@@ -108,7 +108,7 @@ bool DcPartyState::IsPartyReady(Player* bot, float minHpPct, float minMpPct, flo
         if (member != bot)
         {
             float const spread = spreadAnchor ? member->GetDistance(*spreadAnchor)
-                                              : bot->GetDistance(member);
+                : bot->GetDistance(member);
             if (spread > maxSpread)
                 return false;
             // Absolute tank<->member backstop (camp-anchored mode only): a stale
@@ -137,7 +137,7 @@ DcPartyState::SpreadGate DcPartyState::GetSpreadGate(Player* bot, AiObjectContex
     // Through DcSettings (NOT raw sConfigMgr) so a per-run addon override of
     // PartyMaxSpread actually takes effect — the registry marks it
     // player-facing, and reading conf directly here silently ignored it.
-    SpreadGate gate{DcSettings::GetFloat(bot, "PartyMaxSpread"), nullptr};
+    SpreadGate gate{ DcSettings::GetFloat(bot, "PartyMaxSpread"), nullptr };
     if (!context)
         return gate;
 
@@ -154,7 +154,10 @@ DcPartyState::SpreadGate DcPartyState::GetSpreadGate(Player* bot, AiObjectContex
     // the camp, so "caught up" must be measured against the camp, not the tank —
     // otherwise a camp standoff at/over PartyMaxSpread deadlocks the run (see
     // the header comment on SpreadGate). (0,0,0) camp = unset, fall back.
+
     if (context->GetValue<bool>(DcKey::PullMode)->Get() && pull.HasCamp())
+
+
     {
         gate.anchor = &pull.camp;
         // Camp-anchored backstop: members set at a live camp are by construction
@@ -178,7 +181,7 @@ bool DcPartyState::IsBetweenPullsReady(Player* bot, AiObjectContext* context, bo
         return false;
     SpreadGate const gate = GetSpreadGate(bot, context);
     return IsPartyReady(bot, RestMinHpPct(bot), RestMinMpPct(bot), gate.maxSpread, gate.anchor,
-                        gate.maxTankGap);
+        gate.maxTankGap);
 }
 bool DcPartyState::IsAnyPartyMemberLooting(Player* bot)
 {
@@ -195,7 +198,7 @@ bool DcPartyState::IsAnyPartyMemberLooting(Player* bot)
             continue;
         if (!member->IsAlive())
             continue;
-        if (member->GetMapId() != bot->GetMapId())
+        if (member->GetMapId() != bot->GetMapId() || member->GetInstanceId() != bot->GetInstanceId())
             continue;
 
         // Only bot members loot under our coordination; a real player has no
@@ -212,10 +215,10 @@ bool DcPartyState::IsAnyPartyMemberLooting(Player* bot)
     return false;
 }
 std::string DcPartyState::DescribePartyNotReady(Player* bot,
-                                                    float minHpPct, float minMpPct,
-                                                    float maxSpread,
-                                                    Position const* spreadAnchor,
-                                                    float maxTankGap)
+    float minHpPct, float minMpPct,
+    float maxSpread,
+    Position const* spreadAnchor,
+    float maxTankGap)
 {
     if (!bot)
         return "";
@@ -233,7 +236,7 @@ std::string DcPartyState::DescribePartyNotReady(Player* bot,
         Player* member = ref->GetSource();
         if (!member)
             continue;
-        if (member->GetMapId() != bot->GetMapId())
+        if (member->GetMapId() != bot->GetMapId() || member->GetInstanceId() != bot->GetInstanceId())
             continue;
         if (member->isDead())
             continue;  // Dead members handled by the party-died trigger.
@@ -244,8 +247,8 @@ std::string DcPartyState::DescribePartyNotReady(Player* bot,
         std::string reason;
         if (member != bot &&
             ((spreadAnchor ? member->GetDistance(*spreadAnchor)
-                           : bot->GetDistance(member)) > maxSpread ||
-             (maxTankGap > 0.0f && bot->GetDistance(member) > maxTankGap)))
+                : bot->GetDistance(member)) > maxSpread ||
+                (maxTankGap > 0.0f && bot->GetDistance(member) > maxTankGap)))
             reason = "out of range";
         else if (member->GetHealthPct() < minHpPct)
             reason = "low HP";
@@ -302,7 +305,7 @@ std::string DcPartyState::DescribePartyLooting(Player* bot)
             continue;
         if (!member->IsAlive())
             continue;
-        if (member->GetMapId() != bot->GetMapId())
+        if (member->GetMapId() != bot->GetMapId() || member->GetInstanceId() != bot->GetInstanceId())
             continue;
 
         PlayerbotAI* memberAI = GET_PLAYERBOT_AI(member);

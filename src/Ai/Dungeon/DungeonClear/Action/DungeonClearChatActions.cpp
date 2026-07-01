@@ -4,7 +4,11 @@
  */
 
 #include "DungeonClearChatActions.h"
+<<<<<<< HEAD
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
+=======
+#include "DungeonClearAutoStart.h"
+>>>>>>> 69bacb5 (cluade automoneous bots)
 
 #include <map>
 #include <optional>
@@ -155,8 +159,13 @@ namespace
         context->GetValue<bool>(DcKey::PullMode)->Set(active);
         DcLeaderSignal::SetLeaderDazeImmunity(bot, active);
         if (active)
+<<<<<<< HEAD
             context->GetValue<DcPullContext&>(DcKey::PullContext)->Get().camp =
                 Position(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
+=======
+            context->GetValue<DcPullContext&>("dungeon clear pull context")->Get().camp =
+            Position(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
+>>>>>>> 69bacb5 (cluade automoneous bots)
         else
             ResetPullTransient(context);
     }
@@ -190,6 +199,95 @@ namespace
     }
 }
 
+namespace DungeonClearControl
+{
+    // Shared leader-enable sequence — see DungeonClearAutoStart.h. This is the
+    // body that used to live inline in DcOnAction::Execute's leader path; both
+    // the `.dc on` command and the autonomous driver call it so the run-start
+    // semantics can never drift between the two entry points.
+    bool EnableClearOnLeader(Player* leader)
+    {
+        if (!leader)
+            return false;
+
+        PlayerbotAI* botAI = GET_PLAYERBOT_AI(leader);
+        if (!botAI)
+            return false;
+
+        AiObjectContext* context = botAI->GetAiObjectContext();
+        if (!context)
+            return false;
+
+        // Same pre-gates as `dc on`: in a dungeon, boss list known, nobody dead.
+        if (!leader->GetMap() || !leader->GetMap()->IsDungeon())
+            return false;
+
+        if (context->GetValue<std::vector<DungeonBossInfo>>("dungeon bosses")->Get().empty())
+            return false;
+
+        if (AnyPartyMemberDead(leader))
+            return false;
+
+        // Activate the driving strategies (safety net; the gate already installs
+        // them on dungeon entry). Without these the enabled flag below fires no
+        // triggers.
+        if (!botAI->HasStrategy("dungeon clear", BOT_STATE_NON_COMBAT))
+            botAI->ChangeStrategy("+dungeon clear", BOT_STATE_NON_COMBAT);
+        if (!botAI->HasStrategy("dungeon clear combat", BOT_STATE_COMBAT))
+            botAI->ChangeStrategy("+dungeon clear combat", BOT_STATE_COMBAT);
+
+        // Reset transient state and enable. (Mirrors DcOnAction's leader path.)
+        context->GetValue<bool>("dungeon clear enabled")->Set(true);
+        DcStatusPublisher::MarkActiveTank(leader->GetGUID());
+        context->GetValue<bool>("dungeon clear paused")->Set(false);
+        context->GetValue<std::string&>("dungeon clear pause reason")->Get().clear();
+        context->GetValue<ObjectGuid>("dungeon clear paused door")->Set(ObjectGuid::Empty);
+        ResetPullTransient(context);
+        ApplyPullSetting(leader, context, context->GetValue<uint32>("dungeon clear pull setting")->Get());
+        context->GetValue<uint32>("dungeon clear selected boss")->Set(0u);
+        context->GetValue<std::unordered_set<uint32>&>("dungeon clear skipped")->Get().clear();
+        context->GetValue<std::unordered_set<uint32>&>("dungeon clear cleared anchors")->Get().clear();
+        context->GetValue<std::unordered_set<uint32>&>("dungeon clear seen bosses")->Get().clear();
+        context->GetValue<std::unordered_set<uint32>&>("dungeon clear seen due events")->Get().clear();
+        context->GetValue<std::map<ObjectGuid, uint32>&>("dungeon clear loot skip")->Get().clear();
+        context->GetValue<DcApproachState&>("dungeon clear approach state")->Get().Reset();
+        context->GetValue<std::string&>("dungeon clear stall reason")->Get().clear();
+        context->GetValue<std::string&>("dungeon clear last said reason")->Get().clear();
+        context->GetValue<std::string&>("dungeon clear phase")->Get().clear();
+        context->GetValue<ObjectGuid>("dungeon clear fallback target")->Set(ObjectGuid::Empty);
+        context->GetValue<ObjectGuid>("dungeon clear engage trash target")->Set(ObjectGuid::Empty);
+        context->GetValue<uint32>("dungeon clear current hop")->Set(0u);
+        context->GetValue<ChunkedPathfinder::Result&>("dungeon clear long path")->Reset();
+        context->GetValue<DungeonFollowerState&>("dungeon clear follower state")->Get() = DungeonFollowerState{};
+        context->GetValue<DungeonClearSwimState&>("dungeon clear swim state")->Get().Reset();
+
+        std::optional<DungeonBossInfo> next =
+            context->GetValue<std::optional<DungeonBossInfo>>("next dungeon boss")->Get();
+        std::string const target = next.has_value() ? next->name : "the next boss";
+        DcStatusPublisher::SendAddonMessage(botAI, "CHAT\tDungeon clear enabled. Heading to " + target + ".");
+        return true;
+    }
+
+    bool StartAutonomousClear(Player* anyGroupMember)
+    {
+        if (!anyGroupMember)
+            return false;
+
+        // Gate: the human `.dc` model is untouched unless the server opts in.
+        if (!sConfigMgr->GetOption<bool>("DungeonClear.AllowAutonomousBotRuns", false))
+            return false;
+
+        // Elect the same leader the rest of the party will follow. Null when no
+        // tank-spec bot (PlayerbotAI::IsTank) is present on the map — the driver
+        // must ensure a tank, or the clear simply won't start (never stalls).
+        Player* leader = DcLeaderSignal::FindLeaderTank(anyGroupMember);
+        if (!leader)
+            return false;
+
+        return EnableClearOnLeader(leader);
+    }
+}
+
 bool DcOnAction::Execute(Event event)
 {
     if (!IsAuthorized(bot, event))
@@ -216,12 +314,20 @@ bool DcOnAction::Execute(Event event)
             botAI->ChangeStrategy("+dungeon clear combat", BOT_STATE_COMBAT);
         return true;
     }
-    if (!bot->GetMap() || !bot->GetMap()->IsDungeon())
+    if (!DungeonClearControl::EnableClearOnLeader(bot))
     {
-        botAI->TellError("Not in a dungeon.");
+        // EnableClearOnLeader only fails on the shared pre-gates; surface the
+        // same player-facing errors `dc on` always emitted for each one.
+        if (!bot->GetMap() || !bot->GetMap()->IsDungeon())
+            botAI->TellError("Not in a dungeon.");
+        else if (AI_VALUE(std::vector<DungeonBossInfo>, "dungeon bosses").empty())
+            botAI->TellError("No bosses found for this map.");
+        else if (AnyPartyMemberDead(bot))
+            botAI->TellError(FirstDeadName(bot) + " is dead — rez and try again.");
         return false;
     }
 
+<<<<<<< HEAD
     auto const& bosses = AI_VALUE(std::vector<DungeonBossInfo>, DcKey::DungeonBosses);
     if (bosses.empty())
     {
@@ -294,6 +400,8 @@ bool DcOnAction::Execute(Event event)
     std::string const target = next.has_value() ? next->name : "the next boss";
     DcStatusPublisher::SendAddonMessage(botAI, "CHAT\tDungeon clear enabled. Heading to " + target + ".");
 
+=======
+>>>>>>> 69bacb5 (cluade automoneous bots)
     // Trigger instant status addon message update
     botAI->DoSpecificAction("dc status", event, true);
     return true;
@@ -363,7 +471,7 @@ bool DcSkipAction::Execute(Event event)
     if (Map* map = bot->GetMap())
     {
         if (DungeonEvent const* ev =
-                DungeonEventExecutor::FindDueConditionalEvent(bot, context, map->GetId()))
+            DungeonEventExecutor::FindDueConditionalEvent(bot, context, map->GetId()))
         {
             uint32 const latchKey = DungeonEventExecutor::ConditionalLatchKey(ev->id);
             auto& cleared =
@@ -543,9 +651,9 @@ bool DcBossesAction::Execute(Event event)
     // faction would only ever see a row it can never act on.
     TeamId const myTeam = bot->GetTeamId();
     auto const hiddenForTeam = [myTeam](DungeonEvent const* ev)
-    {
-        return ev->panelTeam != TEAM_NEUTRAL && ev->panelTeam != myTeam;
-    };
+        {
+            return ev->panelTeam != TEAM_NEUTRAL && ev->panelTeam != myTeam;
+        };
 
     for (DungeonEvent const* ev : DungeonEventRegistry::Conditional(bot->GetMapId()))
     {
@@ -568,7 +676,7 @@ bool DcBossesAction::Execute(Event event)
             {
                 present = true;
                 gatedBossKilled = info.encounterIndex < 32 &&
-                                  (completedMask & (1u << info.encounterIndex)) != 0u;
+                    (completedMask & (1u << info.encounterIndex)) != 0u;
                 break;
             }
         if (!present)
@@ -616,7 +724,7 @@ bool DcBossesAction::Execute(Event event)
             std::string const objStatus =
                 cleared.count(info.entry) ? "dead"
                 : skipped.count(info.entry) ? "skipped"
-                                            : "alive";
+                : "alive";
             std::string const objName = "Objective: " + info.name;
             auto const annIt = eventAnnotation.find(info.entry);
             std::string const ann = annIt != eventAnnotation.end() ? annIt->second : "";
@@ -628,17 +736,17 @@ bool DcBossesAction::Execute(Event event)
             // note (e.g. the gong that gates this anchor).
             std::ostringstream objMsg;
             objMsg << "BOSS\t" << info.entry << "\t" << BossOrderKey(info) << "\t"
-                   << objName << "\t" << objStatus << "\t"
-                   << static_cast<int>(info.x) << "\t" << static_cast<int>(info.y) << "\t"
-                   << static_cast<int>(info.z) << "\t\t" << ann;
+                << objName << "\t" << objStatus << "\t"
+                << static_cast<int>(info.x) << "\t" << static_cast<int>(info.y) << "\t"
+                << static_cast<int>(info.z) << "\t\t" << ann;
             DcStatusPublisher::SendAddonMessage(botAI, objMsg.str());
 
             if (!silent)
             {
                 std::ostringstream line;
                 line << BossOrderKey(info) << ". " << objName << " @ ("
-                     << static_cast<int>(info.x) << ", " << static_cast<int>(info.y) << ", "
-                     << static_cast<int>(info.z) << ") [" << objStatus << "]";
+                    << static_cast<int>(info.x) << ", " << static_cast<int>(info.y) << ", "
+                    << static_cast<int>(info.z) << ") [" << objStatus << "]";
                 DcStatusPublisher::SendAddonMessage(botAI, "CHAT\t" + line.str());
             }
             continue;
@@ -687,14 +795,14 @@ bool DcBossesAction::Execute(Event event)
         // the panel renders under a boss whose gating event(s) fold into its row.
         std::ostringstream addonMsg;
         addonMsg << "BOSS\t"
-                 << info.entry << "\t"
-                 << BossOrderKey(info) << "\t"
-                 << info.name << "\t"
-                 << statusStr << "\t"
-                 << static_cast<int>(info.x) << "\t"
-                 << static_cast<int>(info.y) << "\t"
-                 << static_cast<int>(info.z) << "\t"
-                 << wing << "\t" << ann;
+            << info.entry << "\t"
+            << BossOrderKey(info) << "\t"
+            << info.name << "\t"
+            << statusStr << "\t"
+            << static_cast<int>(info.x) << "\t"
+            << static_cast<int>(info.y) << "\t"
+            << static_cast<int>(info.z) << "\t"
+            << wing << "\t" << ann;
 
         DcStatusPublisher::SendAddonMessage(botAI, addonMsg.str());
 
@@ -705,8 +813,8 @@ bool DcBossesAction::Execute(Event event)
             if (!wing.empty())
                 line << " [" << wing << "]";
             line << " @ (" << static_cast<int>(info.x) << ", "
-                 << static_cast<int>(info.y) << ", "
-                 << static_cast<int>(info.z) << ") [" << statusStr << "]";
+                << static_cast<int>(info.y) << ", "
+                << static_cast<int>(info.z) << ") [" << statusStr << "]";
 
             DcStatusPublisher::SendAddonMessage(botAI, "CHAT\t" + line.str());
         }
@@ -769,8 +877,8 @@ bool DcBossesAction::Execute(Event event)
         // without it the Gordok doors (anchored to North bosses) surfaced in the
         // Dire Maul East/West panels too.
         if (uint32 const wingBoss = ev->panelGatesBossEntry
-                                        ? ev->panelGatesBossEntry
-                                        : ev->panelSortAfterBossEntry)
+            ? ev->panelGatesBossEntry
+            : ev->panelSortAfterBossEntry)
         {
             bool inWing = false;
             for (DungeonBossInfo const& info : bosses)
@@ -787,7 +895,7 @@ bool DcBossesAction::Execute(Event event)
         std::string const evStatus =
             cleared.count(latchKey) ? "dead"
             : skipped.count(latchKey) ? "skipped"
-                                      : "alive";
+            : "alive";
         std::string const evName = "Event: " + ev->name;
 
         // Default off-path position; room-aggro pre-clears slot in ahead of their
@@ -796,8 +904,8 @@ bool DcBossesAction::Execute(Event event)
         std::string idxField = "99";
         if (DungeonEventRegistry::IsRoomAggroPreClear(*ev) && haveRoomAggroIndex)
             idxField = roomAggroBossIndex == 0
-                           ? "-0.5"
-                           : std::to_string(roomAggroBossIndex - 1) + ".5";
+            ? "-0.5"
+            : std::to_string(roomAggroBossIndex - 1) + ".5";
         else if (ev->panelGatesBossEntry)
         {
             // A prerequisite event (e.g. the gong before Tuten'kash) sorts just
@@ -826,7 +934,7 @@ bool DcBossesAction::Execute(Event event)
 
         std::ostringstream evMsg;
         evMsg << "BOSS\t" << latchKey << "\t" << idxField << "\t" << evName << "\t"
-              << evStatus << "\t0\t0\t0\t";
+            << evStatus << "\t0\t0\t0\t";
         DcStatusPublisher::SendAddonMessage(botAI, evMsg.str());
 
         if (!silent)
@@ -926,7 +1034,7 @@ bool DcGoAction::Execute(Event event)
             if (!matched)
             {
                 botAI->TellError(ev->name +
-                                 " happens on the way — there's no separate spot to send the tank to.");
+                    " happens on the way — there's no separate spot to send the tank to.");
                 return false;
             }
             break;
@@ -1153,14 +1261,14 @@ bool DcPullAction::Execute(Event event)
         // daze immunity so the drag-back can't be Daze-slowed.
         ApplyPullSetting(bot, context, setting);
         DC_PULL_INFO("[DC:{}] advanced-pull mode {} by {}", bot->GetName(),
-                     label, param.empty() ? "toggle" : param);
+            label, param.empty() ? "toggle" : param);
     }
     else
     {
         // Run not started — remember the preference only; `dc on` applies it.
         context->GetValue<uint32>(DcKey::PullSetting)->Set(setting);
         DC_PULL_INFO("[DC:{}] advanced-pull mode pre-set to {} by {} (applies on dc on)",
-                     bot->GetName(), label, param.empty() ? "toggle" : param);
+            bot->GetName(), label, param.empty() ? "toggle" : param);
     }
 
     std::string chat = "CHAT\tAdvanced pull ";
@@ -1175,4 +1283,3 @@ bool DcPullAction::Execute(Event event)
     botAI->DoSpecificAction("dc status", event, true);
     return true;
 }
-
