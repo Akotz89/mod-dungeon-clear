@@ -21,6 +21,28 @@ void DungeonClearStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
         "dungeon clear all cleared",
         { NextAction("dungeon clear disable on cleared", DcRel::AllCleared) }));
 
+    // Stranded-member recovery failsafe (leader-only, non-combat). When the run
+    // has frozen for the configured window with a bot member stuck out of range
+    // (fell under the world / wedged), teleport the strays to the tank. Relevance
+    // 42 sits above the whole leader driving ladder — which, by definition, has
+    // been failing to progress for minutes — so the rescue wins the tick its
+    // narrow trigger arms; it is inert otherwise. See DungeonClearRecoverStranded
+    // Trigger / DcStrandedRecovery.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear recover stranded",
+        { NextAction("dungeon clear recover stranded", DcRel::StrandedRecovery) }));
+
+    // Post-combat rez driver. Registered for ALL bots (the elected rezzer may
+    // be a follower or the leader itself — a prot paladin raising its healer);
+    // the trigger fires only on the one deterministically-elected rezzer.
+    // Relevance 31.5 outranks the leader's event/boss drivers (31/30) and every
+    // follower rung (<= 29) so the rezzer walks to the corpse instead of
+    // following/holding/pulling; the between-pulls + event-rest IsPending gates
+    // (DcRezRecovery) hold everyone else. See DungeonClearRezPartyTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear rez party",
+        { NextAction("dungeon clear rez party", DcRel::RezParty) }));
+
     // Advanced pull (LOS pull-to-camp). Sits ABOVE the engage triggers so, when
     // pull mode is on, the tank runs the pull-to-camp maneuver instead of the
     // normal walk-in — but it is trash-only (the pull-target scan vetoes dungeon
@@ -197,6 +219,54 @@ void DungeonClearStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
         "dungeon clear heal reposition",
         { NextAction("dungeon clear heal reposition", DcRel::HealReposition) }));
 
+    // Phantom-combat escape hatch, NON-COMBAT side — and this is the half that
+    // matters, because the state it recovers is one the bot can only be in HERE.
+    //
+    // Engine transitions are action-driven, not derived from IsInCombat: stock
+    // `drop target` (CombatStrategy, relevance 99 — above everything DC owns) fires
+    // on an invalid/dead/out-of-LOS target and runs ChangeEngine(BOT_STATE_NON_COMBAT)
+    // + AttackStop(), and it does NOT clear the core combat flag. Nothing puts the
+    // bot back: PlayerbotAI::DoNextAction only nulls `current target` when it finds a
+    // flagged bot on the non-combat engine, and the two ChangeEngine(BOT_STATE_COMBAT)
+    // call sites are AttackAction / PullActions — both zeroed by DungeonClearMultiplier
+    // for the whole duration of a run.
+    //
+    // So a flagged bot can sit on the non-combat engine forever, and DC's rungs are
+    // partitioned by the FLAG: the non-combat rungs bail on IsInCombat(), the combat
+    // rungs live on an engine it has left. Nothing is live on either side — including
+    // this hatch, which was registered in the combat strategy only and so was blind
+    // in exactly the state it exists for.
+    //
+    // Live (tr-20260803-154419-18): tank, healer and hunter dropped off the combat
+    // engine at Selin's camp fight and stood flagged with no attackers, no victims and
+    // full health for seven minutes; the two members that were never flagged kept
+    // running normally beside them. The signature (flagged, no victim, pull phase
+    // non-Idle >90s) is on 16 of 829 recorded runs across five dungeons, eight of
+    // which burned the full no-progress watchdog.
+    //
+    // Clearing the flag is enough to unwind all of it: IsInCombat() goes false and the
+    // ordinary non-combat rungs — including the pull FSM's own Engage cleanup — become
+    // reachable again on their existing gates. Same node as the combat side; all the
+    // guards (no attackers, no victim, no legitimate holder, sustained
+    // StuckCombatTimeout, never in a raid) live in the trigger, so registering it here
+    // only widens WHERE it can see, not WHEN it fires.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear break stuck combat",
+        { NextAction("dungeon clear break stuck combat", DcRel::BreakStuckCombat) }));
+
+    // Hazard vacate, NON-combat side — the essential half. After the party kills
+    // an Arcatraz Sentinel, the Destroyed Sentinel (21761) summon pulses 15yd/1s
+    // at the corpse and combat usually drops (it is NOT_SELECTABLE, so it does not
+    // hold anyone in combat) — so the bot idles ON the corpse in the non-combat
+    // engine, taking the pulse, until this walks it clear. Relevance 55 outranks
+    // the whole non-combat driving ladder (advance 15, rest, loot, follow) so the
+    // bot leaves before it loots/regroups on the death spot. Same node runs in the
+    // combat strategy for the case combat is still up. See
+    // DungeonClearHazardVacateTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear hazard vacate",
+        { NextAction("dungeon clear hazard vacate", DcRel::HazardVacate) }));
+
     // Rest-target override: top up to the run's chosen HP/mana before pulling.
     // Relevance 26.5 (DcRel::NeedsRest) — above advance (15) and follow-tank (25)
     // so a bot below target sits and rests instead of walking, and tie-broken just
@@ -271,6 +341,18 @@ void DungeonClearStrategy::InitMultipliers(std::vector<Multiplier*>& multipliers
 
 void DungeonClearCombatStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
 {
+    // Phantom-combat escape hatch (ANY member). A bot left flagged in combat by a
+    // mob that spawned far away / behind a gate — nothing meleeing it, no victim, no
+    // reachable holder — force-clears its combat after DungeonClear.StuckCombatTimeout
+    // seconds, breaking the deadlock a `dc off`/`on` cannot (the flag lives in the
+    // core CombatManager). Relevance 65 — the top of the combat band — so the
+    // recovery always wins the tick when it legitimately fires; it is inert whenever
+    // anything is fightable, so it never contends with a real fight or a scripted
+    // wave. See DungeonClearBreakStuckCombatTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear break stuck combat",
+        { NextAction("dungeon clear break stuck combat", DcRel::BreakStuckCombat) }));
+
     // The in-combat half of the advanced pull: once the tank aggros, run it back
     // to the camp before releasing the party. Relevance above the stock combat
     // movement/attack actions (MoveChase ~30, attack lines) so the maneuver owns
@@ -306,6 +388,19 @@ void DungeonClearCombatStrategy::InitTriggers(std::vector<TriggerNode*>& trigger
         "dungeon clear assist camp combat",
         { NextAction("dungeon clear assist camp combat", DcRel::AssistCampCombat) }));
 
+    // LEADER-only: combat-side driver for the KillCreature-engage objective. A
+    // stealthed sapper (Shattered Halls' Shattered Hand Assassins) can Sap the tank,
+    // flag the party into combat and stay stealthed — stock combat then has no
+    // detectable victim and the run wedges. This drives EngageDirect BY ENTRY on the
+    // undetected assassin to break stealth. Relevance 34 — above the stock combat
+    // movers (MoveChase ~30) so it owns the tick and walks the tank onto the sapper,
+    // below the camp owners / assist (35, follower-only) and Hakkar (62-64). Inert
+    // the instant the target is detectable (stock combat resumes the kill). See
+    // DungeonClearObjectiveEngageCombatTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear objective engage combat",
+        { NextAction("dungeon clear objective engage combat", DcRel::ObjectiveEngageCombat) }));
+
     // In-combat regroup for FOLLOWERS (contribution-gated, Option B): reconnect a
     // follower to the fight ONLY when the pure kernel says it can't contribute from
     // where it stands (a DPS with no visible attacker, a healer that can't heal the
@@ -336,6 +431,35 @@ void DungeonClearCombatStrategy::InitTriggers(std::vector<TriggerNode*>& trigger
         "dungeon clear heal reposition",
         { NextAction("dungeon clear heal reposition", DcRel::HealReposition) }));
 
+    // Survival: move out of an unfightable hazard's pulse — the Arcatraz Destroyed
+    // Sentinel (21761) summoned at a Sentinel's corpse, pulsing 15yd/1s until it
+    // despawns. Fires for EVERY bot in the pulse (nothing to tank — it is
+    // NOT_SELECTABLE). Relevance 55 — above every stock combat mover (MoveChase
+    // ~30) and the DC role repositions (heal 41 / assist 35 / regroup 29) so it
+    // owns the tick, below the camp owners (60) and Hakkar (62-64) which never
+    // contend. Also registered in the NON-combat strategy, because the summon
+    // ticks after the kill once combat has dropped. See
+    // DungeonClearHazardVacateTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear hazard vacate",
+        { NextAction("dungeon clear hazard vacate", DcRel::HazardVacate) }));
+
+    // Conditional-event driver, COMBAT side. Fires only for an event that opted in
+    // with DrivesInCombat() — a continuous WAVE encounter where the party is in
+    // combat from the first pull to the last, so the non-combat copy (relevance 31)
+    // runs only in the gaps between waves and stops running at all once the party
+    // falls behind and combat stops dropping.
+    //
+    // Black Morass is why this exists. Its 18 rifts each pump one add every 15s
+    // until their KEEPER dies — killing the keeper is the only shutoff — and with
+    // two rifts open the party never left combat, so nothing ever walked the tank
+    // to a portal and no rift ever closed. Same failure the Hakkar handlers below
+    // hit, generalised onto the events framework instead of hand-copied per
+    // encounter. See DungeonEvent::drivesInCombat / DcRel::EventDueCombat.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear event due combat",
+        { NextAction("dungeon clear run event combat", DcRel::EventDueCombat) }));
+
     // Sunken Temple Avatar of Hakkar orchestration, COMBAT side — THE place these
     // run. The encounter is a continuous wave fight, so every member is in combat
     // almost the whole time; with the handlers only in the non-combat strategy
@@ -355,4 +479,13 @@ void DungeonClearCombatStrategy::InitTriggers(std::vector<TriggerNode*>& trigger
     triggers.push_back(new TriggerNode(
         "dungeon clear hakkar loot blood",
         { NextAction("dungeon clear hakkar loot blood", DcRel::HakkarLootBloodCombat) }));
+}
+
+void DungeonClearCombatStrategy::InitMultipliers(std::vector<Multiplier*>& multipliers)
+{
+    // The one combat-engine multiplier: it suppresses ONLY the stock "drop target"
+    // for a follower closing on the tank's out-of-LOS fight, so the flip-early assist
+    // can hold the combat engine instead of ping-ponging back out. See
+    // DungeonClearCombatMultiplier.
+    multipliers.push_back(new DungeonClearCombatMultiplier(botAI));
 }

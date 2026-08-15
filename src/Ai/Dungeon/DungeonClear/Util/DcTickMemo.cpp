@@ -8,6 +8,8 @@
 #include "DcEngageGeometry.h"
 #include "DcPartyState.h"
 #include "DungeonClearTuning.h"   // DC_ENGAGE_RANGE
+#include "Ai/Dungeon/DungeonClear/Data/ScriptedPullRegistry.h"
+#include "Player.h"
 #include "Timer.h"
 #include "AiObjectContext.h"
 #include "Value.h"
@@ -64,4 +66,22 @@ bool DcTickMemoAccess::BetweenPullsReady(Player* bot, AiObjectContext* ctx,
     if (slot < 0)
         slot = DcPartyState::IsBetweenPullsReady(bot, ctx, requireNoLoot) ? 1 : 0;
     return slot == 1;
+}
+
+ScriptedPullStage const* DcTickMemoAccess::ScriptedStage(Player* bot, AiObjectContext* ctx)
+{
+    if (!bot || !ctx)
+        return nullptr;
+
+    DcTickMemo& m = Memo(ctx);
+    if (m.scriptedStage == -2)
+    {
+        ScriptedPullStage const* const due = ScriptedPullRegistry::DueStage(bot, ctx);
+        m.scriptedStage = due ? static_cast<std::int32_t>(due->order) : -1;
+        return due;
+    }
+    // Only the ORDER is memoised (the pointer would be just as stable, but storing
+    // an int keeps the memo a plain trivially-copyable POD that EnsureFresh can
+    // reset by assignment). Re-resolving it is a two-row table walk.
+    return ScriptedPullRegistry::Find(bot->GetMapId(), m.scriptedStage);
 }

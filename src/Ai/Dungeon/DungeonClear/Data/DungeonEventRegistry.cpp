@@ -58,6 +58,30 @@ EventBuilder& EventBuilder::Persistent()
     return *this;
 }
 
+EventBuilder& EventBuilder::DrivesInCombat()
+{
+    _ev.drivesInCombat = true;
+    return *this;
+}
+
+EventBuilder& EventBuilder::StepsOwnMovement()
+{
+    _ev.stepsOwnMovement = true;
+    return *this;
+}
+
+EventBuilder& EventBuilder::HeroicOnly()
+{
+    _ev.gate = DcDifficultyGate::HeroicOnly;
+    return *this;
+}
+
+EventBuilder& EventBuilder::NormalOnly()
+{
+    _ev.gate = DcDifficultyGate::NormalOnly;
+    return *this;
+}
+
 EventBuilder& EventBuilder::PanelBeforeBoss(uint32 bossEntry)
 {
     _ev.panelGatesBossEntry = bossEntry;
@@ -140,6 +164,13 @@ EventBuilder& EventBuilder::MoveToHoldUntilInstanceData(float x, float y, float 
     s.radius = radius;
     s.instanceDataId = static_cast<int32>(dataId);  // >= 0 => instance-data gate
     s.instanceDataMin = minValue;
+    return *this;
+}
+
+EventBuilder& EventBuilder::WhileHolding(uint32 hookId)
+{
+    if (!_ev.steps.empty())
+        _ev.steps.back().hookId = hookId;
     return *this;
 }
 
@@ -231,6 +262,13 @@ EventBuilder& EventBuilder::ClearRadius(float x, float y, float z, float radius,
     return *this;
 }
 
+EventBuilder& EventBuilder::OnlyEntries(std::vector<uint32> entries)
+{
+    if (!_ev.steps.empty())
+        _ev.steps.back().entryFilter = std::move(entries);
+    return *this;
+}
+
 EventBuilder& EventBuilder::Wait(uint32 durationMs)
 {
     EventStep& s = Add(EventStepKind::Wait);
@@ -248,7 +286,8 @@ EventBuilder& EventBuilder::Custom(uint32 hookId)
 EventBuilder& EventBuilder::EscortCreature(uint32 escortee, int32 startGossipOption,
                                            uint32 doneEntry, int32 doneBit,
                                            float standoff, float threatRadius,
-                                           float threatZBand, float searchRadius)
+                                           float threatZBand, float searchRadius,
+                                           int32 doneDataId, uint32 doneDataMin)
 {
     EventStep& s = Add(EventStepKind::EscortCreature);
     s.creatureEntry = escortee;
@@ -259,6 +298,24 @@ EventBuilder& EventBuilder::EscortCreature(uint32 escortee, int32 startGossipOpt
     s.escortThreatRadius = threatRadius;
     s.zBand = threatZBand;
     s.radius = searchRadius;
+    // Reuse the shared instance-data fields as the alternative completion gate:
+    // the EscortCreature RunStep/driver read GetData(instanceDataId) >= min.
+    s.instanceDataId = doneDataId;
+    s.instanceDataMin = doneDataMin;
+    return *this;
+}
+
+EventBuilder& EventBuilder::UseItemOnGO(uint32 itemId, uint32 spellId, uint32 goEntry,
+                                        float x, float y, float z, float radius)
+{
+    EventStep& s = Add(EventStepKind::UseItemOnGO);
+    s.itemId = itemId;
+    s.spellId = spellId;
+    s.goEntry = goEntry;
+    s.x = x;
+    s.y = y;
+    s.z = z;
+    s.radius = radius;
     return *this;
 }
 
@@ -325,6 +382,13 @@ namespace
             RegisterBloodFurnaceEvents(t);
             RegisterSlavePensEvents(t);
             RegisterUnderbogEvents(t);
+            RegisterOldHillsbradEvents(t);
+            RegisterMechanarEvents(t);
+            RegisterShatteredHallsEvents(t);
+            RegisterSteamvaultEvents(t);
+            RegisterArcatrazEvents(t);
+            RegisterSethekkHallsEvents(t);
+            RegisterBlackMorassEvents(t);
             return t;
         }();
         return kEvents;
@@ -359,6 +423,16 @@ std::vector<DungeonEvent const*> DungeonEventRegistry::Conditional(uint32 mapId)
     std::vector<DungeonEvent const*> out;
     for (DungeonEvent const& e : EventTable())
         if (e.mapId == mapId && e.activation == EventActivation::Conditional)
+            out.push_back(&e);
+    return out;
+}
+
+std::vector<DungeonEvent const*> DungeonEventRegistry::Conditional(uint32 mapId, Difficulty difficulty)
+{
+    std::vector<DungeonEvent const*> out;
+    for (DungeonEvent const& e : EventTable())
+        if (e.mapId == mapId && e.activation == EventActivation::Conditional &&
+            DcGateMatches(e.gate, difficulty))
             out.push_back(&e);
     return out;
 }

@@ -70,6 +70,36 @@ void RegisterHellfireRampartsEvents(std::vector<DungeonEvent>& out);
 void RegisterBloodFurnaceEvents(std::vector<DungeonEvent>& out);
 void RegisterSlavePensEvents(std::vector<DungeonEvent>& out);
 void RegisterUnderbogEvents(std::vector<DungeonEvent>& out);
+void RegisterOldHillsbradEvents(std::vector<DungeonEvent>& out);
+void RegisterMechanarEvents(std::vector<DungeonEvent>& out);
+void RegisterShatteredHallsEvents(std::vector<DungeonEvent>& out);
+void RegisterSteamvaultEvents(std::vector<DungeonEvent>& out);
+void RegisterArcatrazEvents(std::vector<DungeonEvent>& out);
+void RegisterSethekkHallsEvents(std::vector<DungeonEvent>& out);
+void RegisterBlackMorassEvents(std::vector<DungeonEvent>& out);
+// Everything in the Black Morass wave that DRAINS Medivh's shield rather than
+// fighting the party: the nine trash adds (smart_scripts SMART_EVENT_RESET ->
+// CAST 'Corrupt Medivh' 31326 on SELF) AND AEONUS, whose boss_aeonus::
+// IsSummonedBy does the same thing in C++ and whose 37853 drains at DOUBLE the
+// rate. All of them spawn REACT_DEFENSIVE and park at a home 14yd from Medivh, so
+// they never aggro the party and the engage pipeline's natural pull never reaches
+// them — the wave driver (ObjectiveHookRegistry hook 12) force-pulls them and
+// counts them to decide when Medivh's ring needs cleaning. Excludes the Rift
+// Lords / Keepers and the wave-6/12 bosses, which all fight normally.
+std::vector<uint32> const& BlackMorassDrainEntries();
+
+// The Black Morass RIFT KEEPERS — the mob each Time Rift summons 6s after it
+// opens, and the ONLY thing whose death closes the rift
+// (npc_time_rift::SummonedCreatureDies -> DespawnOrUnsummon). Shared with the
+// wave driver (ObjectiveHookRegistry hook 12), which selects and pulls by it.
+// Disjoint from BlackMorassDrainEntries() on purpose: keepers fight normally and
+// never channel Corrupt, so they are never sweep targets — and the drainers never
+// close a rift, so they are never selection targets.
+//
+// AEONUS IS NOT HERE despite being the wave-18 boss: it walks off to Medivh the
+// instant it spawns (so it is never at the rift to select on) and it is not its
+// rift's _riftKeeperGUID (so killing it closes nothing). It is a drainer.
+std::vector<uint32> const& BlackMorassKeeperEntries();
 
 // --- roster patches (one appender per dungeon that corrects the boss list) -
 // Each relocates that dungeon's BossRosterPatch out of BossRosterRegistry.cpp
@@ -91,6 +121,13 @@ void RegisterUldamanRoster(std::vector<BossRosterPatch>& t);
 void RegisterHellfireRampartsRoster(std::vector<BossRosterPatch>& t);
 void RegisterSlavePensRoster(std::vector<BossRosterPatch>& t);
 void RegisterUnderbogRoster(std::vector<BossRosterPatch>& t);
+void RegisterOldHillsbradRoster(std::vector<BossRosterPatch>& t);
+void RegisterMechanarRoster(std::vector<BossRosterPatch>& t);
+void RegisterShatteredHallsRoster(std::vector<BossRosterPatch>& t);
+void RegisterSteamvaultRoster(std::vector<BossRosterPatch>& t);
+void RegisterArcatrazRoster(std::vector<BossRosterPatch>& t);
+void RegisterSethekkHallsRoster(std::vector<BossRosterPatch>& t);
+void RegisterBlackMorassRoster(std::vector<BossRosterPatch>& t);
 
 // --- wing layouts (one appender per split map) ---------------------------
 // Records which boss credit-entries belong to which wing of a multi-wing map;

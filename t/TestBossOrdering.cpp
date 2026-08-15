@@ -132,14 +132,14 @@ TEST(DcBossOrderingTest, AdvancesPastIndexOnceSiblingsExhausted)
 
 TEST(DcBossOrderingTest, AdvanceUsesOrderKeyNotRawEncounterIndex)
 {
-    // Barthilas carries DBC bit 10 but an orderOverride of 6 so it clears BEFORE
-    // the ziggurats. We just left orderKey 5. `cands` is in ORDER-KEY order, and
-    // the advance must key on BossOrderKey (6 -> Barthilas), not the raw
-    // encounterIndex (which would rank the ziggurat's 7 below Barthilas's 10).
+    // Barthilas carries DBC bit 10 but an orderOverride of 8 so it clears BEFORE
+    // the ziggurats. We just left orderKey 7. `cands` is in ORDER-KEY order, and
+    // the advance must key on BossOrderKey (8 -> Barthilas), not the raw
+    // encounterIndex (which would rank the ziggurat's 9 below Barthilas's 10).
     std::vector<DungeonBossInfo> cands{
-        B(/*entry*/ 100, /*encIdx*/ 10, /*order*/ 6),   // Barthilas: order key 6
-        B(/*entry*/ 200, /*encIdx*/ 7,  /*order*/ 7)};  // ziggurat:  order key 7
-    auto pick = Held(cands, /*stickyEntry*/ 50, /*orderKey*/ 5);
+        B(/*entry*/ 100, /*encIdx*/ 10, /*order*/ 8),   // Barthilas: order key 8
+        B(/*entry*/ 200, /*encIdx*/ 9,  /*order*/ 9)};  // ziggurat:  order key 9
+    auto pick = Held(cands, /*stickyEntry*/ 50, /*orderKey*/ 7);
     ASSERT_TRUE(pick.has_value());
     EXPECT_EQ(pick->entry, 100u) << "advance must key on BossOrderKey, not encounterIndex";
 }

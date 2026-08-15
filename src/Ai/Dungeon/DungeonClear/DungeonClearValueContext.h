@@ -11,11 +11,13 @@
 #include "Ai/Dungeon/DungeonClear/Value/DungeonBossesValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearBlockingDoorValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearFarTargetsValue.h"
+#include "Ai/Dungeon/DungeonClear/Value/DungeonClearHazardsValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearLiveBossValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearLongPathValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearPartyTankValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearPullModeCurrentValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearHealTargetValue.h"
+#include "Ai/Dungeon/DungeonClear/Value/DungeonClearPartyMemberToHealValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearPullTargetValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearRoomTrashValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearStateValues.h"
@@ -45,6 +47,7 @@ public:
         creators[DcKey::LongPath] = &DungeonClearValueContext::dungeon_clear_long_path;
         creators[DcKey::CurrentHop] = &DungeonClearValueContext::dungeon_clear_current_hop;
         creators[DcKey::FarTargets] = &DungeonClearValueContext::dungeon_clear_far_targets;
+        creators[DcKey::Hazards] = &DungeonClearValueContext::dungeon_clear_hazards;
         creators[DcKey::RoomTrashRemaining] = &DungeonClearValueContext::dungeon_clear_room_trash_remaining;
         creators[DcKey::BlockingDoor] = &DungeonClearValueContext::dungeon_clear_blocking_door;
         creators[DcKey::EngageTrashTarget] = &DungeonClearValueContext::dungeon_clear_engage_trash_target;
@@ -58,6 +61,10 @@ public:
         creators[DcKey::PullModeCurrent] = &DungeonClearValueContext::dungeon_clear_pull_mode_current;
         creators[DcKey::PullTarget] = &DungeonClearValueContext::dungeon_clear_pull_target;
         creators[DcKey::HealTarget] = &DungeonClearValueContext::dungeon_clear_heal_target;
+        // Decorator over the stock heal-target value: registered under the STOCK
+        // name so it fronts it (last-wins merge; see the value's header). Diverts to
+        // the DC escortee only while an escort is active; else returns stock verbatim.
+        creators[DcKey::Stock::PartyToHeal] = &DungeonClearValueContext::dungeon_clear_party_member_to_heal;
         creators[DcKey::PullSetting] = &DungeonClearValueContext::dungeon_clear_pull_setting;
         creators[DcKey::PullContext] = &DungeonClearValueContext::dungeon_clear_pull_context;
         creators[DcKey::ApproachState] = &DungeonClearValueContext::dungeon_clear_approach_state;
@@ -85,6 +92,7 @@ private:
     static UntypedValue* dungeon_clear_long_path(PlayerbotAI* ai) { return new DungeonClearLongPathValue(ai); }
     static UntypedValue* dungeon_clear_current_hop(PlayerbotAI* ai) { return new DungeonClearCurrentHopValue(ai); }
     static UntypedValue* dungeon_clear_far_targets(PlayerbotAI* ai) { return new DungeonClearFarTargetsValue(ai); }
+    static UntypedValue* dungeon_clear_hazards(PlayerbotAI* ai) { return new DungeonClearHazardsValue(ai); }
     static UntypedValue* dungeon_clear_room_trash_remaining(PlayerbotAI* ai) { return new DungeonClearRoomTrashValue(ai); }
     static UntypedValue* dungeon_clear_blocking_door(PlayerbotAI* ai) { return new DungeonClearBlockingDoorValue(ai); }
     static UntypedValue* dungeon_clear_engage_trash_target(PlayerbotAI* ai) { return new DungeonClearEngageTrashTargetValue(ai); }
@@ -98,6 +106,7 @@ private:
     static UntypedValue* dungeon_clear_pull_mode_current(PlayerbotAI* ai) { return new DungeonClearPullModeCurrentValue(ai); }
     static UntypedValue* dungeon_clear_pull_target(PlayerbotAI* ai) { return new DungeonClearPullTargetValue(ai); }
     static UntypedValue* dungeon_clear_heal_target(PlayerbotAI* ai) { return new DungeonClearHealTargetValue(ai); }
+    static UntypedValue* dungeon_clear_party_member_to_heal(PlayerbotAI* ai) { return new DungeonClearPartyMemberToHealValue(ai); }
     static UntypedValue* dungeon_clear_pull_setting(PlayerbotAI* ai) { return new DungeonClearPullSettingValue(ai); }
     static UntypedValue* dungeon_clear_pull_context(PlayerbotAI* ai) { return new DungeonClearPullContextValue(ai); }
     static UntypedValue* dungeon_clear_approach_state(PlayerbotAI* ai) { return new DungeonClearApproachStateValue(ai); }

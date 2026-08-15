@@ -39,7 +39,7 @@ namespace DcRoster
     // (pass completionFrom = the boss's own entry to keep its real kill-bit).
     inline DungeonBossInfo MakeBoss(uint32 entry, uint32 mapId, char const* name,
                                     float x, float y, float z, uint32 completionFrom,
-                                    int32 orderOverride = -1)
+                                    int32 orderOverride = -1, int32 doneBossStateIndex = -1)
     {
         DungeonBossInfo b;
         b.entry = entry;
@@ -51,6 +51,14 @@ namespace DcRoster
         b.kind = DungeonAnchorKind::Boss;
         b.inheritCompletionFrom = completionFrom;
         b.orderOverride = orderOverride;
+        b.doneBossStateIndex = doneBossStateIndex;
+        // A boss completed via the instance boss-state slot has NO DungeonEncounter
+        // bit, so park its encounterIndex past bit 31 — the completedMask check
+        // (guarded by `encounterIndex < 32`) then never matches a real boss's bit
+        // (default 0 would collide with DBC bit 0). Ordering still uses the
+        // explicit orderOverride; completion uses doneBossStateIndex.
+        if (doneBossStateIndex >= 0)
+            b.encounterIndex = 64;
         return b;
     }
 

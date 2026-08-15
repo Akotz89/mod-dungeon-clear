@@ -22,12 +22,14 @@ TEST(DungeonClearRelevanceTest, NonCombatLadderStrictlyDescends)
     EXPECT_GT(DcRel::Chat,            DcRel::LootRollPending);
     EXPECT_GT(DcRel::LootRollPending, DcRel::DoorReopened);
     EXPECT_GT(DcRel::DoorReopened,    DcRel::AllCleared);
-    EXPECT_GT(DcRel::AllCleared,      DcRel::HealReposition);
+    EXPECT_GT(DcRel::AllCleared,      DcRel::StrandedRecovery);
+    EXPECT_GT(DcRel::StrandedRecovery, DcRel::HealReposition);
     EXPECT_GT(DcRel::HealReposition,  DcRel::HakkarSuppressor);
     EXPECT_GT(DcRel::HakkarSuppressor, DcRel::HakkarFlame);
     EXPECT_GT(DcRel::HakkarFlame,     DcRel::Pull);        // tie-broken (was ==)
     EXPECT_GT(DcRel::Pull,            DcRel::HakkarLootBlood);
-    EXPECT_GT(DcRel::HakkarLootBlood, DcRel::EventDue);
+    EXPECT_GT(DcRel::HakkarLootBlood, DcRel::RezParty);
+    EXPECT_GT(DcRel::RezParty,        DcRel::EventDue);
     EXPECT_GT(DcRel::EventDue,        DcRel::AtBoss);
     EXPECT_GT(DcRel::AtBoss,          DcRel::AssistCamp);
     EXPECT_GT(DcRel::AssistCamp,      DcRel::HoldAtCamp);
@@ -63,6 +65,75 @@ TEST(DungeonClearRelevanceTest, LeaderAssistFillsGapBelowOwnEngageScans)
     EXPECT_LT(DcRel::LeaderAssist, DcRel::AtBoss);
 }
 
+TEST(DungeonClearRelevanceTest, StrandedRecoveryOutranksTheFrozenDrivingLadder)
+{
+    // The failsafe fires only after the leader driving ladder has, by definition,
+    // been failing to make progress for minutes, so it must outrank every rung it
+    // could otherwise be starved beneath — the boss/event drivers, the rez rung,
+    // and the advance/stall fallbacks. Below AllCleared: a finished run should
+    // congratulate + disable, not teleport.
+    EXPECT_LT(DcRel::StrandedRecovery, DcRel::AllCleared);
+    EXPECT_GT(DcRel::StrandedRecovery, DcRel::RezParty);
+    EXPECT_GT(DcRel::StrandedRecovery, DcRel::EventDue);
+    EXPECT_GT(DcRel::StrandedRecovery, DcRel::AtBoss);
+    EXPECT_GT(DcRel::StrandedRecovery, DcRel::Pull);
+    EXPECT_GT(DcRel::StrandedRecovery, DcRel::Stalled);
+    EXPECT_GT(DcRel::StrandedRecovery, DcRel::Advance);
+}
+
+TEST(DungeonClearRelevanceTest, RezPartyOutranksEveryLadderItCanLandOn)
+{
+    // The elected rezzer may be the LEADER (a prot paladin raising its healer)
+    // or any FOLLOWER, so the rung must beat both ladders: the leader's event/
+    // boss drivers — recover the party before running a gate or pulling — and
+    // every follower rung. It deliberately does NOT tie EventDue (31): both are
+    // leader-armable on the same tick (a corpse plus a due conditional gate has
+    // no role/engine/map partition), so the ordering must be strict.
+    EXPECT_GT(DcRel::RezParty, DcRel::EventDue);
+    EXPECT_GT(DcRel::RezParty, DcRel::AtBoss);
+    EXPECT_GT(DcRel::RezParty, DcRel::AtObjective);
+    EXPECT_GT(DcRel::RezParty, DcRel::AssistCamp);
+    EXPECT_GT(DcRel::RezParty, DcRel::HoldAtCamp);
+    EXPECT_GT(DcRel::RezParty, DcRel::NeedsRest);   // rez first; OOM rezzer's
+                                                    // action defers, THEN drinks
+    EXPECT_GT(DcRel::RezParty, DcRel::FollowTank);
+    // Below the pull maneuver (inert during recovery via the readiness gate)
+    // and the map-partitioned Hakkar band; below the terminal bailouts.
+    EXPECT_LT(DcRel::RezParty, DcRel::HakkarLootBlood);
+    EXPECT_LT(DcRel::RezParty, DcRel::Pull);
+    EXPECT_LT(DcRel::RezParty, DcRel::PartyDied);
+}
+
+TEST(DungeonClearRelevanceTest, RezPartyRankAloneDoesNotProtectTheApproach)
+{
+    // A COMPANION WARNING TO THE TEST ABOVE, because reading that one on its own
+    // is what cost run tr-20260807-080834-115 its recovery: outranking the
+    // follower stack does NOT mean the follower stack cannot run during a
+    // recovery, and the rez approach is not safe merely because 31.5 > 25.
+    //
+    // Two holes, both real:
+    //
+    //  1. Engine::DoNextAction only stops walking the queue when an action
+    //     RETURNS TRUE. A rez rung that returns false — as it did on every tick
+    //     after the first, because DcMoveTo reports a duplicate destination while
+    //     its own glide is running — hands the tick straight down to scout-lag,
+    //     whose in-the-bubble branch stops the bot. Fix: the approach branch owns
+    //     the tick unconditionally (DcFollowerActions).
+    //
+    //  2. HealReposition sits ABOVE RezParty and is registered in the non-combat
+    //     engine too, so on a healer — the class the election PREFERS — it takes
+    //     the tick outright and walks toward the tank for line of sight while the
+    //     corpse lies the other way.
+    //
+    // This assertion pins hole 2 as a deliberate ordering rather than an
+    // oversight. Do not "fix" it by lifting RezParty over HealReposition: that
+    // ordering is load-bearing the rest of the time (a healer must reposition to
+    // heal), and StrandedRecovery/HazardVacate sit above it for the same reason.
+    // The stand-down gate — DcRezRecovery::IsElectedRezzer, consulted by the
+    // follower movers — is what makes the rez rung reachable, not the number.
+    EXPECT_GT(DcRel::HealReposition, DcRel::RezParty);
+}
+
 TEST(DungeonClearRelevanceTest, HakkarSuppressorOutranksFlameOutranksBlood)
 {
     EXPECT_GT(DcRel::HakkarSuppressor, DcRel::HakkarFlame);
@@ -76,12 +147,44 @@ TEST(DungeonClearRelevanceTest, HakkarSuppressorOutranksFlameOutranksBlood)
 
 TEST(DungeonClearRelevanceTest, CombatLadderStrictlyDescends)
 {
+    // Phantom-combat force-clear sits at the very top of the combat band so the
+    // recovery always wins the tick when it fires.
+    EXPECT_GT(DcRel::BreakStuckCombat,       DcRel::HakkarSuppressorCombat);
     EXPECT_GT(DcRel::HakkarSuppressorCombat, DcRel::HakkarFlameCombat);
     EXPECT_GT(DcRel::HakkarFlameCombat,      DcRel::HakkarLootBloodCombat);
+    // The wave-encounter event driver (Black Morass) sits between the Hakkar band
+    // and the camp owners. It has to outrank the camp owners and every stock
+    // combat mover, because its entire job is to take the tank OFF the pack it is
+    // tanking and walk it to the next rift — the thing the non-combat-only rung
+    // could never do, which is why two open rifts used to end the run. It stays
+    // below Hakkar (different map, can never contend) and below the phantom-combat
+    // hatch. See DungeonEvent::drivesInCombat.
+    EXPECT_GT(DcRel::HakkarLootBloodCombat,  DcRel::EventDueCombat);
+    EXPECT_GT(DcRel::EventDueCombat,         DcRel::PullManeuver);
+    EXPECT_GT(DcRel::EventDueCombat,         DcRel::AssistCampCombat);
     EXPECT_GT(DcRel::HakkarLootBloodCombat,  DcRel::PullManeuver);
-    EXPECT_GT(DcRel::PullManeuver,           DcRel::HealReposition);
+    // Hazard vacate (survival, any role) sits below the camp owners (60) and above
+    // the role repositions — it must win over normal combat movement but not fight
+    // the camp/Hakkar orchestration.
+    EXPECT_GT(DcRel::PullManeuver,           DcRel::HazardVacate);
+    EXPECT_GT(DcRel::HazardVacate,         DcRel::HealReposition);
     EXPECT_GT(DcRel::HealReposition,         DcRel::AssistCampCombat);
     EXPECT_GT(DcRel::AssistCampCombat,       DcRel::RegroupCombat);
+}
+
+// Hazard vacate is dual-engine. In the NON-combat engine it must outrank the whole
+// driving ladder (so a bot leaves the Destroyed Sentinel's pulse instead of
+// looting/resting/advancing on the death spot) but stay below the terminal death/
+// chat bailouts.
+TEST(DungeonClearRelevanceTest, HazardVacateOutranksNonCombatDrivers)
+{
+    EXPECT_GT(DcRel::HazardVacate, DcRel::AllCleared);
+    EXPECT_GT(DcRel::HazardVacate, DcRel::HealReposition);
+    EXPECT_GT(DcRel::HazardVacate, DcRel::Advance);
+    EXPECT_GT(DcRel::HazardVacate, DcRel::FilterLoot);
+    EXPECT_GT(DcRel::HazardVacate, DcRel::NeedsRest);
+    EXPECT_LT(DcRel::HazardVacate, DcRel::PartyDied);
+    EXPECT_LT(DcRel::HazardVacate, DcRel::Chat);
 }
 
 // Contribution-gated combat regroup (Option B) is pinned BELOW the stock combat
@@ -94,6 +197,15 @@ TEST(DungeonClearRelevanceTest, RegroupCombatSitsBelowStockMovers)
     EXPECT_LT(DcRel::RegroupCombat,    kStockMove);
     EXPECT_LT(kStockMove,              DcRel::AssistCampCombat);
     EXPECT_LT(DcRel::AssistCampCombat, DcRel::HealReposition);
+    // The hazard vacate must out-drive stock melee movement (else the bot chases
+    // its target right back into the pulse) and out-rank the role repositions.
+    EXPECT_LT(kStockMove,              DcRel::HazardVacate);
+    EXPECT_LT(DcRel::HealReposition,   DcRel::HazardVacate);
+    // The combat-side objective engage (stealthed-sapper break) sits ABOVE stock
+    // movers so it owns the tick and walks the tank onto the undetected sapper, and
+    // BELOW the follower assist / camp owners (35) which never contend (leader-only).
+    EXPECT_LT(kStockMove,                     DcRel::ObjectiveEngageCombat);
+    EXPECT_LT(DcRel::ObjectiveEngageCombat,   DcRel::AssistCampCombat);
     // And the whole documented chain: RegroupCombat < move < assist < heal-reposition.
     EXPECT_LT(DcRel::RegroupCombat, DcRel::AssistCampCombat);
     EXPECT_LT(DcRel::AssistCampCombat, DcRel::HealReposition);
@@ -122,6 +234,11 @@ TEST(DungeonClearRelevanceTest, HealRepositionAboveLeaderDriversIsRolePartitione
     // In BOTH engines heal-reposition (41, healer-only) sits above the leader-only
     // pull/hakkar/at-boss drivers. It never contends because of the healer-vs-leader
     // role split — asserted so a future non-healer trigger at 41 is caught.
+    //
+    // THE SPLIT DOES NOT COVER EVERYTHING BELOW 41. RezParty runs on ALL bots,
+    // healers first, so on the elected rezzer these two are the same bot and DO
+    // contend — see RezPartyRankAloneDoesNotProtectTheApproach. Role partitioning
+    // is a claim about the rungs listed here, not a general one.
     EXPECT_GT(DcRel::HealReposition, DcRel::Pull);
     EXPECT_GT(DcRel::HealReposition, DcRel::HakkarSuppressor);
     EXPECT_GT(DcRel::HealReposition, DcRel::AtBoss);

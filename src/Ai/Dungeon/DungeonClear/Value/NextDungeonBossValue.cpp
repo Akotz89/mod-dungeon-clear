@@ -138,6 +138,9 @@ std::optional<DungeonBossInfo> NextDungeonBossValue::Calculate()
                 else if (info.kind == DungeonAnchorKind::Boss &&
                          info.encounterIndex < 32 && (completedMask & (1u << info.encounterIndex)))
                     invalid = true;
+                else if (info.kind == DungeonAnchorKind::Boss && info.doneBossStateIndex >= 0 &&
+                         inst && inst->GetBossState(static_cast<uint32>(info.doneBossStateIndex)) == DONE)
+                    invalid = true;
 
                 if (!invalid)
                 {
@@ -202,6 +205,15 @@ std::optional<DungeonBossInfo> NextDungeonBossValue::Calculate()
         // collide with an unrelated boss's set bit and vanish prematurely).
         if (info.kind == DungeonAnchorKind::Boss &&
             info.encounterIndex < 32 && (completedMask & (1u << info.encounterIndex)))
+            continue;
+
+        // Non-DBC door-gating boss (e.g. the Mechanar Gatewatchers): no
+        // GetCompletedEncounterMask bit ever flips for it, so its completion is
+        // read from the instance script's own boss-state slot instead. Persistent
+        // for the instance's life, so a re-enable after the kill won't re-target
+        // a boss whose corpse has long despawned. See doneBossStateIndex.
+        if (info.kind == DungeonAnchorKind::Boss && info.doneBossStateIndex >= 0 &&
+            inst && inst->GetBossState(static_cast<uint32>(info.doneBossStateIndex)) == DONE)
             continue;
 
         BossLiveState const state = LookupLive(liveness, info.entry);

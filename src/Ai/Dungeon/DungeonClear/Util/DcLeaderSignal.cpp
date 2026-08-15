@@ -8,6 +8,7 @@
 #include "DungeonClearUtil.h"   // DC_PULL_* log macros
 #include "DungeonClearMath.h"
 #include "DungeonClearTuning.h"
+#include "DcZoneLine.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonEventExecutor.h"
 #include <algorithm>
@@ -49,9 +50,11 @@
 #include "PlayerbotAI.h"
 #include "Chat.h"
 #include "ServerFacade.h"
+#include "StringFormat.h"
 #include "Timer.h"
 #include "World.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
+#include "Ai/Dungeon/DungeonClear/Data/SealedEncounterRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcEngageGeometry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTargeting.h"
@@ -70,6 +73,19 @@ namespace
     inline bool IsNavReachable(Player* bot, Position const& p)
     {
         return DcEngageGeometry::IsNavReachable(bot, p);
+    }
+
+    // A trail hold point must clear the instance zone line, for the same reason a
+    // pull camp must (DcZoneLine): the tank walked IN through the entrance, so
+    // the oldest breadcrumbs of a run sit on the exit trigger, and a follower
+    // told to hold `lag` yards back at the start of a dungeon is told to stand on
+    // the way out. A headless bot shrugs that off — it sends no areatrigger
+    // packet — but a self-bot's client reports it and the player is teleported
+    // out of the instance.
+    inline bool TrailOverZoneLine(Player* bot, Position const& p)
+    {
+        return DcZoneLine::WouldCrossTheLine(bot, p.GetPositionX(), p.GetPositionY(),
+                                             p.GetPositionZ());
     }
 
     // Leader-election memo. FindLeaderTank is on the hot path: nearly every DC
@@ -160,16 +176,28 @@ namespace
         return run.leaderCombatSinceMs;
     }
 
-    // True if ANY living, same-map member of `bot`'s group (the bot itself
-    // included) is currently in combat. Used to release the dynamic scout-lag
-    // trail and arm the leader-fight assist off "someone in the party is
-    // fighting" rather than the elected leader's own combat flag alone: when the
-    // tank takes a pack before a verdict commits (dynamic Idle + surprise aggro,
-    // the "in combat with no pull state" case), the leader's IsInCombat() read
-    // can flicker as it tags/leashes — or a groupmate registers combat a tick
-    // first — and keying the whole "drop the trail and help" decision on the
-    // leader alone left the suppressed party parked at lag range watching the
-    // tank die. Any party member in combat is sufficient to collapse the party.
+    // True when the TANK's fight is live: the reference `bot` — always the elected
+    // leader/tank on the assist + scout-lag paths — is in combat, OR a BOT groupmate
+    // close enough to share that fight is in combat. Used to arm the leader-fight
+    // assist and release the dynamic scout-lag trail. It exists for the leader-flag
+    // flicker: when the tank takes a pack before a verdict commits (dynamic Idle +
+    // surprise aggro), its IsInCombat() read flickers as it tags/leashes, or a
+    // groupmate registers combat a tick first, and keying solely on the leader's own
+    // flag left the party parked at lag range watching the tank die.
+    //
+    // TWO exclusions, both learned from the "dps run to me, not the tank" failure —
+    // the signal must speak for THE TANK'S fight, not "anyone, anywhere":
+    //   * The HUMAN party leader is never counted. A human flagged in combat OUT OF
+    //     LOS of the tank's pull (their own straggler, a phantom flag, a mob across
+    //     the room) would otherwise arm the party assist for a fight the tank is not
+    //     in; the party then stampedes a tank with no resolvable target and stacks on
+    //     the human. Only bots — and the tank's own flag — speak for the tank.
+    //   * A bot beyond PartyMaxSpread of the tank is not counted: a lagging bot that a
+    //     far/gated spawn phantom-flagged (see the phantom-combat class) must not arm
+    //     the assist. The tank's OWN combat is distance 0, so a real pull always
+    //     registers regardless of where the stragglers trail.
+    // The caller latches the result for PartyCombatLatch seconds, so a one-tick tank
+    // flicker is still bridged by a nearby bot that already took a hit.
     bool AnyGroupMemberInCombat(Player* bot)
     {
         if (!bot)
@@ -178,6 +206,7 @@ namespace
         if (!group)
             return bot->IsInCombat();  // solo: only our own combat counts
 
+        float const spread = DcSettings::GetFloat(bot, "PartyMaxSpread");
         for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
         {
             Player* member = ref->GetSource();
@@ -185,7 +214,16 @@ namespace
                 continue;
             if (member->GetMapId() != bot->GetMapId())
                 continue;
-            if (member->IsInCombat())
+            if (!member->IsInCombat())
+                continue;
+            // The tank's own flag is the primary anchor (distance 0 — always in).
+            if (member == bot)
+                return true;
+            // Otherwise only a BOT close enough to share the tank's fight counts —
+            // never the human master, never a far/phantom-flagged straggler.
+            if (!GET_PLAYERBOT_AI(member))
+                continue;
+            if (bot->GetExactDist2d(member) <= spread)
                 return true;
         }
         return false;
@@ -368,6 +406,88 @@ bool DcLeaderSignal::IsDungeonClearLeader(Player* bot)
 {
     return bot && FindLeaderTank(bot) == bot;
 }
+Player* DcLeaderSignal::FindRunOwner(Player* bot)
+{
+    auto owns = [](Player* p) -> bool
+    {
+        if (!p)
+            return false;
+        PlayerbotAI* ai = GET_PLAYERBOT_AI(p);
+        return ai && DcRun::Of(ai).enabled;
+    };
+
+    // The living leader is the owner in every healthy case, and resolving it first
+    // keeps this on the leader cache's fast path rather than walking the group.
+    if (Player* leader = FindLeaderTank(bot))
+        if (owns(leader))
+            return leader;
+
+    if (!bot)
+        return nullptr;
+
+    Group* group = bot->GetGroup();
+    if (!group)
+        return owns(bot) ? bot : nullptr;
+
+    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+    {
+        Player* member = ref->GetSource();
+        if (!member || member->GetMapId() != bot->GetMapId())
+            continue;
+        if (owns(member))
+            return member;
+    }
+    return nullptr;
+}
+
+Player* DcLeaderSignal::FindTerminalDriver(Player* bot)
+{
+    Player* owner = FindRunOwner(bot);
+    if (!owner)
+        return nullptr;
+
+    PlayerbotAI* ownerAI = GET_PLAYERBOT_AI(owner);
+    if (!ownerAI)
+        return nullptr;
+    DcRunState const& run = DcRun::Of(ownerAI);
+    if (!run.enabled || run.paused)
+        return nullptr;  // a pause holds the terminal rungs exactly as it holds the rest
+
+    // Healthy case first: an elected leader exists, so it drives, and this is
+    // byte-for-byte the old behaviour.
+    if (Player* leader = FindLeaderTank(owner))
+        return leader;
+
+    Group* group = owner->GetGroup();
+    if (!group)
+        return owner;  // solo tank: it is the only candidate either way
+
+    // No leader — the tank is dead. Elect deterministically so every member agrees
+    // and exactly one fires. Living members outrank corpses (a living member can
+    // actually act on the verdict); the all-dead pass is what lets a full wipe
+    // still reach the party-died bailout.
+    Player* bestAlive = nullptr;
+    Player* bestAny = nullptr;
+    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+    {
+        Player* member = ref->GetSource();
+        if (!member || member->GetMapId() != owner->GetMapId())
+            continue;
+        if (!GET_PLAYERBOT_AI(member))
+            continue;  // a real player has no AI to run the rung
+        if (!bestAny || member->GetGUID() < bestAny->GetGUID())
+            bestAny = member;
+        if (member->IsAlive() && (!bestAlive || member->GetGUID() < bestAlive->GetGUID()))
+            bestAlive = member;
+    }
+    return bestAlive ? bestAlive : bestAny;
+}
+
+bool DcLeaderSignal::IsTerminalDriver(Player* bot)
+{
+    return bot && FindTerminalDriver(bot) == bot;
+}
+
 bool DcLeaderSignal::IsInPausedDungeonClearRun(Player* bot)
 {
     if (!bot)
@@ -428,6 +548,54 @@ bool DcLeaderSignal::IsLeaderDroppingInHole(Player* bot)
     // hold releases exactly when the followers are already down on the landing.
     return ev->steps[prog.stepIndex].kind == EventStepKind::DropInHole;
 }
+
+Creature* DcLeaderSignal::GetLeaderEscortee(Player* bot)
+{
+    if (!bot)
+        return nullptr;
+
+    Player* leader = FindLeaderTank(bot);
+    if (!leader)
+        return nullptr;
+
+    PlayerbotAI* leaderAI = GET_PLAYERBOT_AI(leader);
+    if (!leaderAI)
+        return nullptr;
+
+    // Only while the leader's clear is actively running and unpaused — mirrors the
+    // party-tank / follow semantics so a paused run stops treating the escortee as
+    // a heal target too.
+    AiObjectContext* ctx = leaderAI->GetAiObjectContext();
+    if (!DcRun::Of(ctx).enabled || DcRun::Of(ctx).paused)
+        return nullptr;
+
+    // The leader's active anchored-event step must be an EscortCreature.
+    std::optional<DungeonBossInfo> const next =
+        ctx->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)->Get();
+    if (!next.has_value() || next->kind != DungeonAnchorKind::Objective || !next->eventId)
+        return nullptr;
+
+    DungeonEvent const* ev = DungeonEventRegistry::Find(next->mapId, next->eventId);
+    if (!ev)
+        return nullptr;
+
+    DungeonEventProgress const& prog =
+        ctx->GetValue<DungeonEventProgress&>(DcKey::EventProgress)->Get();
+    if (prog.eventId != ev->id || prog.stepIndex >= ev->steps.size())
+        return nullptr;
+
+    EventStep const& step = ev->steps[prog.stepIndex];
+    if (step.kind != EventStepKind::EscortCreature || !step.creatureEntry)
+        return nullptr;
+
+    // Find the escortee near the REQUESTING bot (the would-be healer): the caller
+    // still range/LOS-gates it, but scanning from `bot` keeps the reposition mover
+    // working off a creature it can actually path to. Generous radius so a healer
+    // trailing the mounted Tarren Mill ride still resolves him.
+    float const searchR = step.radius > 0.0f ? step.radius : 100.0f;
+    return bot->FindNearestCreature(step.creatureEntry, searchR, /*alive*/ true);
+}
+
 bool DcLeaderSignal::IsPullPhaseHolding(uint32 phase)
 {
     return phase == static_cast<uint32>(DcPullPhase::Forming) ||
@@ -457,11 +625,15 @@ bool DcLeaderSignal::GetLeaderPullInfo(Player* bot, uint32& phaseOut, Position& 
     // from camp — and ReapStrandedPassives would strip their passive — while
     // the tank is still dragging the pack home. Once the phase resolves to
     // Engage/Idle the paused gate takes over and the run holds as usual.
+    DcPullContext const& pull = ctx->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+    // `bossPullback` substitutes for the pull-mode bool: a BossPullbackRegistry
+    // drag runs at any pull setting (see DungeonClearPullTrigger), and the party
+    // MUST hold at the anchor through it — that hold is what keeps everyone but
+    // the tank out of the water while the tank fetches the boss.
     if (!DcRun::Of(ctx).enabled ||
-        !ctx->GetValue<bool>(DcKey::PullMode)->Get())
+        (!ctx->GetValue<bool>(DcKey::PullMode)->Get() && !pull.bossPullback))
         return false;
 
-    DcPullContext const& pull = ctx->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
     if (pull.phase == DcPullPhase::Idle)
         return false;
     if (!IsPullPhaseHolding(static_cast<uint32>(pull.phase)) &&
@@ -486,11 +658,12 @@ bool DcLeaderSignal::GetLeaderCampHold(Player* bot, Position& campOut, bool& pas
         return false;
 
     AiObjectContext* ctx = leaderAI->GetAiObjectContext();
+    DcPullContext const& pull = ctx->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+    // `bossPullback` substitutes for the pull-mode bool — see GetLeaderPullInfo.
     if (!DcRun::Of(ctx).enabled ||
-        !ctx->GetValue<bool>(DcKey::PullMode)->Get())
+        (!ctx->GetValue<bool>(DcKey::PullMode)->Get() && !pull.bossPullback))
         return false;
 
-    DcPullContext const& pull = ctx->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
     // Honor `paused` only while NO maneuver phase is holding: a pause mid-drag
     // lets the drag finish (see DungeonClearPullManeuverTrigger), and the party
     // must stay pinned at camp until it resolves to Engage — releasing them
@@ -506,8 +679,45 @@ bool DcLeaderSignal::GetLeaderCampHold(Player* bot, Position& campOut, bool& pas
     if (!pull.HasCamp())
         return false;
 
+    // SEALED ENCOUNTER, final approach: stop holding at the camp and FOLLOW THE TANK
+    // IN. Only between maneuvers — a live maneuver still owns the party.
+    //
+    // In pull mode the camp survives between pulls by design, so after the last trash
+    // stage retires the followers are still pinned at it. For an ordinary boss that is
+    // harmless: they get released and run in when the fight starts. For a boss whose
+    // room LOCKS on engage (SealedEncounterRegistry) it is the whole bug — Selin's camp
+    // is 71.6yd behind his door, so the party is pinned outside a door that shuts the
+    // moment the tank engages, and spends the fight at it.
+    //
+    // Standing the hold down here is also what makes the approach clump satisfiable
+    // (DcPartyState::GetSpreadGate) and the muster reachable
+    // (DungeonClearAtBossTrigger) rather than a pair of gates asking the party to be
+    // somewhere it has been ordered not to go.
+    if (!IsPullPhaseHolding(static_cast<uint32>(pull.phase)) && pull.scriptedStage < 0)
+    {
+        if (std::optional<DungeonBossInfo> const next =
+                ctx->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)->Get())
+        {
+            if (next->kind == DungeonAnchorKind::Boss)
+            {
+                if (SealedEncounterRow const* const sealed =
+                        SealedEncounterRegistry::Find(leader->GetMapId(), next->entry))
+                {
+                    if (SealedEncounterRegistry::InApproachRange(
+                            *sealed, leader->GetPositionX(), leader->GetPositionY(),
+                            leader->GetPositionZ(), next->x, next->y, next->z))
+                        return false;
+                }
+            }
+        }
+    }
+
     campOut = camp;
-    passiveOut = IsPullPhaseHolding(static_cast<uint32>(pull.phase));
+    // A standing camp-safety release keeps the maneuver (the tank is still
+    // dragging) but frees the party: still camped, no longer passive — the same
+    // posture as holding at camp between pulls.
+    passiveOut = IsPullPhaseHolding(static_cast<uint32>(pull.phase)) &&
+                 !pull.partyReleased;
     return true;
 }
 bool DcLeaderSignal::IsLeaderCampFightActive(Player* bot)
@@ -529,6 +739,44 @@ bool DcLeaderSignal::IsLeaderCampFightActive(Player* bot)
     // while merely scouting (Idle) is handled by the drag-back maneuver, which
     // flips the phase out of Idle before any party member would assist.
     return phase == static_cast<uint32>(DcPullPhase::Engage) && leader->IsInCombat();
+}
+namespace
+{
+    // The leader's scripted-pull context, or nullptr when `bot` has no leader, is
+    // the leader, or the run isn't live. Shared by the two scripted-pull signals.
+    DcPullContext const* LeaderScriptedPull(Player* bot)
+    {
+        if (!bot || bot->isDead())
+            return nullptr;
+
+        Player* leader = DcLeaderSignal::FindLeaderTank(bot);
+        if (!leader || leader == bot)
+            return nullptr;  // the leader has its own leash inside the maneuver
+
+        PlayerbotAI* leaderAI = GET_PLAYERBOT_AI(leader);
+        if (!leaderAI)
+            return nullptr;
+
+        AiObjectContext* ctx = leaderAI->GetAiObjectContext();
+        if (!DcRun::Of(ctx).enabled)
+            return nullptr;
+
+        DcPullContext const& pull = ctx->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+        if (pull.scriptedStage < 0 || !pull.HasCamp())
+            return nullptr;
+        return &pull;
+    }
+}
+
+bool DcLeaderSignal::IsLeaderScriptedPullActive(Player* bot)
+{
+    return LeaderScriptedPull(bot) != nullptr;
+}
+
+bool DcLeaderSignal::IsLeaderScriptedCampFight(Player* bot)
+{
+    DcPullContext const* const pull = LeaderScriptedPull(bot);
+    return pull && pull->phase == DcPullPhase::Engage;
 }
 bool DcLeaderSignal::IsLeaderFightAssistWanted(Player* bot)
 {
@@ -604,14 +852,34 @@ bool DcLeaderSignal::IsLeaderFightAssistWanted(Player* bot)
         uint32 const latchMs =
             uint32(DcSettings::GetFloat(leader, "PartyCombatLatch") * 1000.0f);
         bool const groupInCombat = IsPartyEngagedLatched(leader, latchMs);
-        // Diagnostic for the spiral death: fires only in the exact divergence we
-        // are fixing — a party fight is live but the elected leader's own flag reads
-        // out of combat. With the old leader-only gate this returned false here and
-        // the party stayed passive; this line proves the new path now engages.
+        // Diagnostic for the spiral death: fires in the divergence this gate fixes —
+        // a party fight reads live while the elected leader's own flag reads out of
+        // combat. With the old leader-only gate this returned false here and the
+        // party stayed passive; this line proves the new path engages.
+        //
+        // IT PRINTS ITS OWN INPUTS, AND IT HAS TO. The two terms are sampled on
+        // DIFFERENT CLOCKS — `group` is latched for PartyCombatLatch seconds past
+        // the last positive read, `leader` is instantaneous — so this fires for the
+        // whole latch tail after EVERY fight ends, when the leader has legitimately
+        // dropped combat. Read as a state ("the tank walked off mid-fight") it is
+        // pure artifact: across tp-20260808-162331-1 it covered 2173 seconds in 621
+        // episodes, 93% of them <= 4s, piled on the 3.0s latch value. That reading
+        // cost a designed, tested and merged feature that then had to be reverted.
+        // The stale-ms and the latch window below are what stop the next reader
+        // making the same mistake.
         if (groupInCombat && !leaderInCombat)
             DC_PULL_DEBUG("[DC:{}] assist: groupmate in combat while leader reads "
-                          "out-of-combat -> assisting (was the no-pull-state stall)",
-                          bot->GetName());
+                          "out-of-combat -> assisting (was the no-pull-state stall) "
+                          "[leader flag=0 instant | group=1 {} | latch {:.1f}s]",
+                          bot->GetName(),
+                          AnyGroupMemberInCombat(leader)
+                              ? "live"
+                              : Acore::StringFormat(
+                                    "LATCH TAIL, {}ms since live",
+                                    getMSTimeDiff(DcRun::Of(GET_PLAYERBOT_AI(leader))
+                                                      .partyEngagedLatchMs,
+                                                  getMSTime())),
+                          latchMs / 1000.0f);
         wanted = groupInCombat;
     }
 
@@ -625,14 +893,17 @@ bool DcLeaderSignal::IsLeaderFightAssistWanted(Player* bot)
     // PullPlayerReleaseDelay — the same knob that delays DPS release on the
     // advanced-pull camp path — so both follower-release paths share one "threat
     // lead" value. Healers bypass (a withheld heal is a wipe), as does a tank below
-    // PullThreatLeadPanicHp (it is losing the fight — pile in). Regroup is NOT
-    // gated here: it is positioning, not damage, and a healer running for LOS
-    // during the lead is desirable.
+    // PullThreatLeadPanicHp (it is losing the fight — pile in). The `alreadyInCombat`
+    // bypass is the key one for the "dps run to me" fix: a follower already flagged
+    // in combat with the pack out of its line of sight is released ONTO the tank's
+    // fight at once, instead of being stranded through the lead where stock follow-
+    // master would drift it to the human. Regroup is NOT gated here: it is
+    // positioning, not damage, and a healer running for LOS during the lead is fine.
     uint32 const leadMs =
         uint32(DcSettings::GetFloat(leader, "PullPlayerReleaseDelay") * 1000.0f);
     float const panicHp = DcSettings::GetFloat(leader, "PullThreatLeadPanicHp");
     return DungeonClearMath::ShouldReleaseFollower(
-        PlayerbotAI::IsHeal(bot), combatSince, getMSTime(), leadMs,
+        PlayerbotAI::IsHeal(bot), bot->IsInCombat(), combatSince, getMSTime(), leadMs,
         leader->GetHealthPct(), panicHp);
 }
 bool DcLeaderSignal::IsLeaderShouldAssistFight(Player* bot)
@@ -832,13 +1103,13 @@ bool DcLeaderSignal::GetLeaderScoutTrailPoint(Player* bot, float lag, Position& 
             // the map. The interpolated point sits on a contiguous walked segment,
             // so it is reachable whenever the bracketing crumb is; fall back to the
             // crumb if the snap missed, else keep walking back.
-            if (IsNavReachable(bot, target))
+            if (IsNavReachable(bot, target) && !TrailOverZoneLine(bot, target))
             {
                 out = target;
                 found = true;
                 return false;
             }
-            if (IsNavReachable(bot, s.crumb))
+            if (IsNavReachable(bot, s.crumb) && !TrailOverZoneLine(bot, s.crumb))
             {
                 out = s.crumb;
                 found = true;
@@ -854,7 +1125,7 @@ bool DcLeaderSignal::GetLeaderScoutTrailPoint(Player* bot, float lag, Position& 
     // closer until more trail accrues).
     for (auto it = preLag.rbegin(); it != preLag.rend(); ++it)
     {
-        if (IsNavReachable(bot, it->second))
+        if (IsNavReachable(bot, it->second) && !TrailOverZoneLine(bot, it->second))
         {
             out = it->second;
             return true;
@@ -1027,6 +1298,55 @@ void DcLeaderSignal::AbortLeaderPull(Player* bot)
         DC_PULL_INFO("[DC:{}] advanced-pull: leader pull aborted (forced to Engage) "
                      "-> party released", leader->GetName());
     }
+}
+void DcLeaderSignal::ReleaseLeaderPullHold(Player* bot)
+{
+    if (!bot)
+        return;
+    Player* leader = FindLeaderTank(bot);
+    if (!leader)
+        return;
+    PlayerbotAI* leaderAI = GET_PLAYERBOT_AI(leader);
+    if (!leaderAI)
+        return;
+    AiObjectContext* ctx = leaderAI->GetAiObjectContext();
+    DcPullContext& pull = ctx->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+    DcPullPhase const before = pull.phase;
+    bool const aborted = pull.SafetyRelease(getMSTime());
+    if (aborted)
+        DC_PULL_INFO("[DC:{}] advanced-pull: safety release during Advancing -> "
+                     "pull aborted (forced to Engage), party released",
+                     leader->GetName());
+    else if (pull.partyReleased && IsPullPhaseHolding(static_cast<uint32>(before)))
+        DC_PULL_INFO("[DC:{}] advanced-pull: safety release -> party freed to "
+                     "fight, tank keeps the drag (phase {})",
+                     leader->GetName(), static_cast<uint32>(before));
+}
+bool DcLeaderSignal::IsLeaderPullHoldReleased(Player* bot)
+{
+    if (!bot)
+        return false;
+    Player* leader = FindLeaderTank(bot);
+    if (!leader)
+        return false;
+    PlayerbotAI* leaderAI = GET_PLAYERBOT_AI(leader);
+    if (!leaderAI)
+        return false;
+    AiObjectContext* ctx = leaderAI->GetAiObjectContext();
+    return ctx->GetValue<DcPullContext&>(DcKey::PullContext)->Get().partyReleased;
+}
+ObjectGuid DcLeaderSignal::GetLeaderPullTarget(Player* bot)
+{
+    if (!bot)
+        return ObjectGuid::Empty;
+    Player* leader = FindLeaderTank(bot);
+    if (!leader)
+        return ObjectGuid::Empty;
+    PlayerbotAI* leaderAI = GET_PLAYERBOT_AI(leader);
+    if (!leaderAI)
+        return ObjectGuid::Empty;
+    AiObjectContext* ctx = leaderAI->GetAiObjectContext();
+    return ctx->GetValue<DcPullContext&>(DcKey::PullContext)->Get().pullTarget;
 }
 void DcLeaderSignal::SetLeaderDazeImmunity(Player* leader, bool apply)
 {

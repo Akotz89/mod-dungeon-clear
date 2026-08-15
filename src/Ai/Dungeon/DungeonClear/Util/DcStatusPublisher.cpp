@@ -56,6 +56,9 @@
 #include "Ai/Dungeon/DungeonClear/DcApproachState.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcCombatFlag.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRezRecovery.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcSmartRest.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonEventExecutor.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
 #include "Ai/Dungeon/DungeonClear/Util/NavmeshSnap.h"
@@ -78,6 +81,10 @@ namespace
 
     std::map<ObjectGuid, DcPushState> g_dcActiveTanks;
     std::mutex g_dcActiveTanksMutex;
+
+    // Server-side observer for changed STATUS frames (the `.dc test` harness).
+    // Registered once at module startup, before any run exists — not guarded.
+    DcStatusPublisher::StatusObserver g_dcStatusObserver;
 
     // Throttle accumulator for the world-tick detector (ms).
     uint32 g_dcPushAccumMs = 0;
@@ -252,7 +259,17 @@ std::string DcStatusPublisher::BuildStatusPayload(PlayerbotAI* botAI)
     }
     else if (enabled && bot)
     {
-        if (bot->IsInCombat())
+        // The floors the between-pulls gate is actually holding for (0/0 under
+        // Smart Rest or a phantom flag) — read once, used by the rest arm below.
+        DcPartyState::RestGate const rest = DcPartyState::GetRestGate(bot, context);
+
+        // "In combat" alone is not a fight. Under a phantom flag (a 45yd hostile
+        // area aura, nothing aggroed) this arm reported "fighting_trash —
+        // Clearing trash from the path" for the twelve minutes a frozen party
+        // stood in the Arcatraz Eredar room's aura doing nothing at all
+        // (tr-20260801-194932-20), hiding the real state — which is the rest /
+        // spread wait further down. Require an actual engagement to claim a fight.
+        if (bot->IsInCombat() && !DcCombatFlag::IsPhantomFlag(bot, context))
         {
             Unit* currentTarget = context->GetValue<Unit*>(DcKey::Stock::CurrentTarget)->Get();
             if (currentTarget && next.has_value() && currentTarget->GetEntry() == next->entry)
@@ -282,6 +299,16 @@ std::string DcStatusPublisher::BuildStatusPayload(PlayerbotAI* botAI)
             stateStr = "door_blocked";
             // The stall reason already rides in its own field; leave detail empty.
         }
+        // Post-combat rez recovery: a corpse is being handled (or waiting on
+        // the player). Reported ahead of loot/rest — the run is parked for the
+        // recovery, whatever else is also pending. Read-only (DescribeWait
+        // never touches the recovery clock).
+        else if (DcRezRecovery::IsPending(bot))
+        {
+            stateStr = "resting";
+            std::string const who = DcRezRecovery::DescribeWait(bot);
+            detail = who.empty() ? "Recovering a fallen party member." : who;
+        }
         else if (AI_VALUE(bool, DcKey::Stock::HasAvailableLoot) || AI_VALUE(bool, DcKey::Stock::CanLoot) ||
                  DcPartyState::IsAnyPartyMemberLooting(bot))
         {
@@ -289,18 +316,29 @@ std::string DcStatusPublisher::BuildStatusPayload(PlayerbotAI* botAI)
             std::string const who = DcPartyState::DescribePartyLooting(bot);
             detail = who.empty() ? "Collecting loot." : (who + ".");
         }
+        // Smart Rest: the latch IS the recovery wait — read it (never update;
+        // the between-pulls gate owns updates) and name who is still short of
+        // full. The spread-only wait falls through to the next arm.
+        else if (DcSmartRest::Enabled(bot) && DcSmartRest::IsLatched(bot))
+        {
+            stateStr = "resting";
+            std::string const who = DcSmartRest::DescribeWait(bot);
+            detail = who.empty() ? "Resting the party." : (who + ".");
+        }
         // Status display must use the SAME spread the advance gate enforces, or
         // the tank parks at the limit while still reporting "En route" instead
         // of "Waiting on". GetSpreadGate is the one shared body (per-run
         // PartyMaxSpread override, mid-maneuver waiver, camp anchor in pull
         // mode), so the panel can never report a different wait than the gate.
+        // Under Smart Rest the hp/mana thresholds are 0 (the latch above owns
+        // recovery), leaving this arm the spread-only "out of range" waits —
+        // exactly mirroring the between-pulls gate.
         else if (DcPartyState::SpreadGate const gate = DcPartyState::GetSpreadGate(bot, context);
-                 !DcPartyState::IsPartyReady(bot, DcPartyState::RestMinHpPct(bot), DcPartyState::RestMinMpPct(bot),
-                                             gate.maxSpread, gate.anchor, gate.maxTankGap))
+                 !DcPartyState::IsPartyReady(bot, rest.minHp, rest.minMp,
+                     gate.maxSpread, gate.anchor, gate.maxTankGap))
         {
             stateStr = "resting";
-            std::string const who = DcPartyState::DescribePartyNotReady(bot, DcPartyState::RestMinHpPct(bot),
-                                                                            DcPartyState::RestMinMpPct(bot),
+            std::string const who = DcPartyState::DescribePartyNotReady(bot, rest.minHp, rest.minMp,
                                                                             gate.maxSpread, gate.anchor,
                                                                             gate.maxTankGap);
             detail = who.empty() ? "Waiting for the party to recover." : (who + ".");
@@ -418,6 +456,10 @@ void DcStatusPublisher::UnmarkActiveTank(ObjectGuid tank)
     std::lock_guard<std::mutex> lock(g_dcActiveTanksMutex);
     g_dcActiveTanks.erase(tank);
 }
+void DcStatusPublisher::SetStatusObserver(StatusObserver observer)
+{
+    g_dcStatusObserver = std::move(observer);
+}
 void DcStatusPublisher::TickStatusPushes(uint32 diff)
 {
     // Throttle: detect at most every DC_PUSH_INTERVAL_MS. Status transitions are
@@ -497,7 +539,11 @@ void DcStatusPublisher::TickStatusPushes(uint32 diff)
         }
 
         if (emitStatus)
+        {
             SendAddonMessage(botAI, payload);
+            if (g_dcStatusObserver)
+                g_dcStatusObserver(guid, payload);
+        }
         if (emitBosses)
             // Reuse the existing boss-list action (silent) so the BOSS_START /
             // BOSS* / BOSS_END framing and per-boss status logic live in one

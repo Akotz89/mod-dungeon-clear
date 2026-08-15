@@ -48,6 +48,7 @@ namespace DcKey
     inline constexpr char const* LongPath                = "dungeon clear long path";
     inline constexpr char const* CurrentHop              = "dungeon clear current hop";
     inline constexpr char const* FarTargets              = "dungeon clear far targets";
+    inline constexpr char const* Hazards                 = "dungeon clear hazards";
     inline constexpr char const* RoomTrashRemaining      = "dungeon clear room trash remaining";
     inline constexpr char const* BlockingDoor            = "dungeon clear blocking door";
     inline constexpr char const* EngageTrashTarget       = "dungeon clear engage trash target";
@@ -87,6 +88,11 @@ namespace DcKey
         inline constexpr char const* SelfTarget        = "self target";
         inline constexpr char const* Health            = "health";
         inline constexpr char const* BagSpace          = "bag space";
+        // The negative dynamic-object aura the bot is standing in RIGHT NOW (null
+        // when it is on clean ground). AreaDebuffValue only returns an aura the bot
+        // actually has, so it is an "am I in it", not an "is one nearby" — which is
+        // exactly the question a camp leash has to ask before hauling anyone home.
+        inline constexpr char const* AreaDebuff        = "area debuff";
     }
 }
 

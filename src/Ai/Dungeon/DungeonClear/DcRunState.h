@@ -69,6 +69,23 @@ struct DcRunState
     // Set by DcGoAction, cleared by dc on / dc off / dc skip.
     uint32      selectedBossEntry = 0;
 
+    // Wait at Boss (DungeonClear.WaitAtBoss): GUID of the last boss the run
+    // auto-paused at for the human's go-ahead, stamped AT PAUSE TIME by the
+    // engage-boss gate so each boss waits exactly once per run. Deliberately
+    // NOT part of OnResume's pause-cluster clear — the stamp is what stops the
+    // gate from re-pausing the instant the human resumes. Cleared only by the
+    // full Reset() (a fresh run earns a fresh heads-up at every boss).
+    // See DcWaitAtBossDecision.h for the whole design.
+    ObjectGuid  waitedBossGuid;
+
+    // getMSTime() at which the SEALED-ENCOUNTER muster began holding the boss engage
+    // (0 = not mustering). See SealedEncounterRegistry: for a boss whose room locks
+    // on encounter start, the engage waits until no member is still outside the room,
+    // and this is the clock that bounds that wait so a member who cannot path in
+    // can't hold the run open. Re-armed to 0 whenever the tank leaves the boss's
+    // approach range, so each attempt gets a fresh budget.
+    uint32      sealedMusterSince = 0;
+
     // === cross-bot leader-fight signals (were the g_* file-static maps) ============
     // Both are keyed, in the old design, by the LEADER's GUID and only ever read/
     // written for the resolved leader — i.e. they are facets of the leader's run.
@@ -88,6 +105,50 @@ struct DcRunState
     // gap so the party doesn't snap out of "assist" mode mid-fight). 0 = never seen
     // engaged. Was g_partyEngagedLatch.
     uint32 partyEngagedLatchMs = 0;
+
+    // === Smart Rest hysteresis latch (leader-owned, read cross-bot) ================
+    // Maintained by DcSmartRest::UpdateLatch from the leader's between-pulls gate;
+    // followers read it through the party tank (DcSmartRest::IsLatched). Combat does
+    // NOT clear it — a patrol interrupting the rest goes inert (out-of-combat
+    // triggers), then the still-set latch resumes the rest afterwards. The timeout
+    // clock deliberately spans such interruptions.
+    bool   smartRestLatched   = false;  // party is in a full-rest cycle
+    uint32 smartRestSinceMs   = 0;      // getMSTime() when latched (timeout clock)
+    uint32 smartRestRearmAtMs = 0;      // after a timeout release: no re-latch before this
+
+    // === post-combat rez recovery (leader-owned, written cross-bot) ===============
+    // Maintained by DcRezRecovery::Evaluate — called from the (alive) leader's
+    // relaxed party-died trigger and from every bot's rez-party trigger, so the
+    // clocks stay live even when the leader itself is the corpse (a follower
+    // writes them cross-bot, the same access pattern as the latches above).
+    uint32 rezPendingSinceMs = 0;  // getMSTime() recovery went pending OUT of combat;
+                                   // 0 = not pending (cleared while the party fights,
+                                   // so combat never burns the timeout budget)
+    uint32 rezAnnounceMs     = 0;  // getMSTime() of the episode's start announcement
+                                   // (dedup: one announce per recovery episode; also
+                                   // marks the episode so the "party restored" resume
+                                   // line fires exactly once when deaths clear)
+    // The NoRezzer floor's two clocks — see the branch in DcRezDecision.h. Stamped
+    // off the PREVIOUS tick's verdict (the kernel is the thing that decides whether
+    // a rezzer is left, so the glue cannot know before calling it); a tick of lag is
+    // immaterial against graces measured in seconds.
+    uint32 noRezzerSinceMs      = 0;  // getMSTime() the party first had no rezzer
+    uint32 noRezzerQuietSinceMs = 0;  // ...and first read unengaged AND unflagged
+
+    // === stranded-member recovery failsafe (leader-owned) =========================
+    // The no-progress clock + last-seen progress snapshot, ticked live on the
+    // leader by DcStrandedRecovery::Evaluate (the single clock-owner site).
+    // progressMs re-stamps whenever the run shows a sign of life — a boss/objective
+    // completed, or the tank closing on the next anchor — and combat re-arms it too
+    // (a fight is progress), so a legitimately slow pull/rest never trips it. When
+    // it goes stale past StrandedRecoveryNoProgressSecs while a bot member is stuck
+    // out of range (fell under the world / wedged), the leader teleports the strays
+    // to itself. See Util/DcStrandedDecision.h + DcStrandedRecovery.
+    uint32 progressMs        = 0;       // getMSTime() of the last sign of progress (0 = unarmed)
+    uint32 progressMask      = 0;       // completed-encounter mask last seen
+    uint32 progressAnchors   = 0;       // cleared-anchor count last seen
+    float  progressBestDist  = -1.0f;   // closest tank approach to the current anchor (<0 = unset)
+    uint32 progressAnchorEntry = 0;     // anchor entry progressBestDist is keyed to (re-arm on change)
 
     // Full run teardown: every session + signal field. Used on dc on / dc off /
     // death / all-cleared. (The pull preference/bool are NOT here — see the header

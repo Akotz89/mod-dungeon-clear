@@ -5,6 +5,7 @@
 
 #include "DungeonClearActions.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
+#include "TestRun/DcTestRunManager.h"
 
 #include <algorithm>
 #include <cmath>
@@ -27,12 +28,18 @@
 #include "MotionMaster.h"
 #include "MoveSplineInitArgs.h"
 #include "ObjectAccessor.h"
+#include "ObjectMgr.h"
 #include "PathGenerator.h"
+#include "Item.h"
+#include "ItemTemplate.h"
 #include "Player.h"
 #include "PlayerbotAIConfig.h"
 #include "Position.h"
 #include "ServerFacade.h"
 #include "SharedDefines.h"
+#include "SpellAuras.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
 #include "Ai/Dungeon/DungeonClear/DcApproachState.h"
 #include "Ai/Dungeon/DungeonClear/Data/DcEventDoorRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
@@ -49,6 +56,7 @@
 #include "Ai/Dungeon/DungeonClear/Util/DcDoorPolicy.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcMovement.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcPathWorker.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcSocialQuarantine.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTargeting.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTickMemo.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearTuning.h"
@@ -97,26 +105,156 @@ namespace DcActionShared
     }
 
 
-    // Resolve PickPullSpell to a usable spell id, but ONLY if the tank itself
-    // trained it. botAI->CastSpell(name) is NOT a sufficient gate on its own:
-    // the "spell id" value falls back to the bot's PET spellbook when the bot
-    // doesn't know the spell, and CastSpell then builds the spell on the bot
-    // regardless of knowledge — i.e. the server quietly FORCES the tank to "cast"
-    // a pull it never learned. Resolving the id here and requiring
-    // bot->HasSpell(id) (player-only; never the pet) means an untrained tank
-    // returns nullopt and just walks in to body-tag instead.
+    // The EQUIPPED RANGED WEAPON as an opener, when the class ability isn't
+    // available. Mirrors playerbots' own CastShootAction: read the ranged slot and
+    // use the auto-shot for what is in it — 3018 "Shoot" for a bow/gun/crossbow,
+    // 2764 "Throw" for a thrown weapon.
+    //
+    // This is not a nicety. A warrior's class opener is HEROIC THROW, which is
+    // learned at level 71 — so at the level dungeons are run, EVERY warrior tank
+    // falls through the class table and body-tags. That is tolerable in a corridor
+    // and not tolerable at all for a plan whose entire premise is tagging from a
+    // measured spot without moving off it. A thrown/ranged auto-shot covers exactly
+    // that gap, at real range, for any class whose ability is missing or untrained.
+    std::optional<ResolvedPullSpell> ResolveRangedWeaponPull(PlayerbotAI* botAI, Player* bot)
+    {
+        if (!botAI || !bot)
+            return std::nullopt;
+        Item const* const ranged =
+            bot->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_RANGED);
+        if (!ranged || !ranged->GetTemplate())
+            return std::nullopt;
+
+        uint32 shootId = 0;
+        uint32 ammoSubClass = 0;
+        bool needsAmmo = false;
+        switch (ranged->GetTemplate()->SubClass)
+        {
+            case ITEM_SUBCLASS_WEAPON_GUN:
+                shootId = 3018;
+                needsAmmo = true;
+                ammoSubClass = ITEM_SUBCLASS_BULLET;
+                break;
+            case ITEM_SUBCLASS_WEAPON_BOW:
+            case ITEM_SUBCLASS_WEAPON_CROSSBOW:
+                shootId = 3018;
+                needsAmmo = true;
+                ammoSubClass = ITEM_SUBCLASS_ARROW;
+                break;
+            case ITEM_SUBCLASS_WEAPON_THROWN:
+                shootId = 2764;
+                break;
+            default: return std::nullopt;   // wand/relic/idol — not a pull
+        }
+
+        // DELIBERATELY NO HasSpell GATE HERE, unlike the class opener above.
+        //
+        // "Shoot" (3018) and "Throw" (2764) are not learned spells in 3.3.5 — they
+        // come with the equipped weapon, and nothing puts them in a spellbook. So
+        // HasSpell is false for them on EVERY character: a query across this realm's
+        // whole `character_spell` table returns zero rows for 3018, 2764, 75 and
+        // 5019. This function carried that gate from the day it was written, which
+        // made the entire ranged fallback dead code — it could never once have fired,
+        // and the level-70 warrior it exists for went on body-tagging (live: prot
+        // warrior Ushkuk, tr-20260803-124151-3, with The Boomstick equipped and 1000
+        // rounds in the bag).
+        //
+        // The gate is right for the class opener and wrong here, and the difference
+        // is the name lookup. There, the id comes from the "spell id" VALUE resolved
+        // from a name, which falls through to the bot's PET spellbook when the bot
+        // doesn't know it — so without HasSpell the server is asked to force a pull
+        // the tank never learned. Here the id is a literal, there is no name and no
+        // pet to confuse it with, and the real precondition is the WEAPON. Which is
+        // exactly how playerbots' own CastShootAction does it: shootSpellId straight
+        // to CanCastSpell/CastSpell, no HasSpell anywhere.
+        //
+        // What DOES have to be checked is ammunition. A gun, bow or crossbow with an
+        // empty ammo slot cannot fire, and the failure would land on the caller as a
+        // silently-failed cast — which for a scripted pull means a body-tag walk into
+        // the room the plan exists to stay out of. A thrown weapon needs none.
+        //
+        // AND IT HAS TO BE THE RIGHT AMMUNITION. "Is the slot non-empty" was the
+        // obvious reading and it is not the condition the server checks: a gun takes
+        // BULLETS and a bow or crossbow takes ARROWS, and loading one into the other
+        // is not a partial success but an outright SPELL_FAILED_NO_AMMO. Because the
+        // slot is occupied, every "do I have ammo" test upstream passes and the only
+        // symptom is a cast that quietly returns false.
+        //
+        // Live (tr-20260803-154419-13 and -17): both prot warriors carried Rifle of
+        // the Stoic Guardian — a gun — with Timeless Arrows loaded, so the whole
+        // ranged fallback resolved happily and then failed at the cast every tick. A
+        // warrior has no class opener at 70 either (Heroic Throw is 71), so the tank
+        // had nothing at all: it stood on Selin's east stand spot for the full 47s leg
+        // budget without pulling and then walked into the room. Every druid and
+        // paladin tank in the same plan pulled normally, which is exactly why it read
+        // as random rather than as a gear bug.
+        //
+        // Rejecting the mismatch here is what turns that into an honest fall-through:
+        // no pull spell resolves, so the caller stops waiting on a tag that can never
+        // land. (The provisioning side of the same bug — InitAmmo re-run only for
+        // hunters after the spec re-gear swapped the weapon — is fixed in
+        // DcTestRunJob; this is the guard for a real player's mismatched slot.)
+        if (needsAmmo)
+        {
+            uint32 const ammoId = bot->GetUInt32Value(PLAYER_AMMO_ID);
+            if (!ammoId)
+                return std::nullopt;
+            ItemTemplate const* const ammo = sObjectMgr->GetItemTemplate(ammoId);
+            if (!ammo || ammo->Class != ITEM_CLASS_PROJECTILE ||
+                ammo->SubClass != ammoSubClass)
+                return std::nullopt;
+        }
+
+        // THE SPELL'S OWN RANGE, from the spell store — the second reason this
+        // fallback never worked.
+        //
+        // It used to ask botAI->GetRange("shoot"), described here as the "real weapon
+        // range". It is nothing of the sort: PlayerbotAI::GetRange maps "shoot"
+        // straight to sPlayerbotAIConfig.shootDistance, a config knob for how close a
+        // bot likes to stand when shooting, which defaults to 5.0 and is not set in
+        // this deployment. So the pick came back as min 8 / max 5 — an empty interval.
+        // Even with the HasSpell gate gone, the caller's `d >= minRange && d <=
+        // maxRange` could never be satisfied at any distance.
+        //
+        // The number that governs is the one the server will check, and Spell::Check
+        // Range uses GetSpellMaxRangeForTarget — the spell's range, full stop.
+        // ItemTemplate::RangedModRange is loaded but only ever sent to the client, so
+        // the weapon does not scale it. Both auto-shots are 0-30yd, which is why the
+        // 8yd floor from the class table carries over unchanged: every entry there is
+        // 8/30 too, and this is the same reach by a different route.
+        SpellInfo const* const info = sSpellMgr->GetSpellInfo(shootId);
+        if (!info)
+            return std::nullopt;
+        float const maxRange = info->GetMaxRange(/*positive*/ false);
+        if (maxRange <= 0.0f)
+            return std::nullopt;
+        return ResolvedPullSpell{shootId, 8.0f, maxRange};
+    }
+
+    // Resolve the opener to a usable spell id, but ONLY one the tank itself
+    // trained — a rule that applies to the CLASS OPENER and not to the ranged-weapon
+    // fallback below it; see ResolveRangedWeaponPull for why the distinction matters
+    // and what it cost to conflate them.
+    // botAI->CastSpell(name) is NOT a sufficient gate on its own: the
+    // "spell id" value falls back to the bot's PET spellbook when the bot doesn't
+    // know the spell, and CastSpell then builds the spell on the bot regardless of
+    // knowledge — i.e. the server quietly FORCES the tank to "cast" a pull it never
+    // learned. Requiring bot->HasSpell(id) (player-only; never the pet) means an
+    // untrained tank falls through to the ranged weapon, and only then walks in.
     std::optional<ResolvedPullSpell> ResolvePullSpell(PlayerbotAI* botAI, Player* bot)
     {
         if (!botAI || !bot)
             return std::nullopt;
-        auto pick = PickPullSpell(bot);
-        if (!pick)
-            return std::nullopt;
-        uint32 const spellId =
-            botAI->GetAiObjectContext()->GetValue<uint32>(DcKey::Stock::SpellId, pick->name)->Get();
-        if (!spellId || !bot->HasSpell(spellId))
-            return std::nullopt;
-        return ResolvedPullSpell{spellId, pick->minRange, pick->maxRange};
+        if (auto pick = PickPullSpell(bot))
+        {
+            uint32 const spellId =
+                botAI->GetAiObjectContext()->GetValue<uint32>(DcKey::Stock::SpellId, pick->name)->Get();
+            if (spellId && bot->HasSpell(spellId))
+                return ResolvedPullSpell{spellId, pick->minRange, pick->maxRange};
+        }
+        // No class opener, or the tank never trained it (the level-70 warrior case).
+        // Fall back to whatever is in the ranged slot before giving up and walking in.
+        return ResolveRangedWeaponPull(botAI, bot);
     }
 
 
@@ -131,7 +269,16 @@ namespace DcActionShared
         // are deliberately separate (their pre-run lifetime differs).
         DcRun::Of(ctx).Reset();
         if (bot)
+        {
             DcStatusPublisher::UnmarkActiveTank(bot->GetGUID());
+            // Hand the room back. The social quarantine is the one piece of run
+            // state that lives OUTSIDE the bot — it is stored as react state on the
+            // creatures themselves — so a reset that only clears context values
+            // would leave a wing of the instance permanently unable to call for
+            // help behind a party that has stopped clearing it. See
+            // DcSocialQuarantine.h.
+            DcSocialQuarantine::ReleaseAll(bot);
+        }
         ctx->GetValue<ObjectGuid>(DcKey::EngageTrashTarget)->Set(ObjectGuid::Empty);
         ctx->GetValue<std::string&>(DcKey::StallReason)->Get().clear();
         ctx->GetValue<std::string&>(DcKey::LastSaidReason)->Get().clear();
@@ -158,8 +305,34 @@ namespace DcActionShared
         ctx->GetValue<bool>(DcKey::PullMode)->Set(false);
         if (bot)
             DcLeaderSignal::SetLeaderDazeImmunity(bot, false);
+        // Escort mounted-ride safety net: the escort driver speed-matches party
+        // BOTS to a mounted escortee (Old Hillsbrad's Thrall, 1.6x) and restores
+        // them when the leg ends — but a `dc off` / party-death disable mid-ride
+        // routes through HERE, after which the driver never runs again and the
+        // boost would be stranded until some aura recalc happens to rewrite the
+        // rate. Mirror the daze-immunity revoke above: recompute every party bot's
+        // run speed from its real auras (UpdateSpeed drops the non-aura escort
+        // boost and is a no-op when the rate is already correct).
+        if (bot)
+        {
+            auto unboost = [](Player* p)
+            {
+                if (p && p->IsInWorld() && GET_PLAYERBOT_AI(p))
+                    p->UpdateSpeed(MOVE_RUN, /*forced*/ true);
+            };
+            unboost(bot);
+            if (Group* group = bot->GetGroup())
+                for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+                    if (Player* member = ref->GetSource(); member && member != bot &&
+                                                           member->GetMapId() == bot->GetMapId())
+                        unboost(member);
+        }
         DcStatusPublisher::SendAddonMessage(botAI, "CHAT\t" + reason);
         botAI->DoSpecificAction("dc status", Event(), true);
+
+        // Run-end observer for the `.dc test` harness — cheap GUID compare,
+        // no-op unless this leader is the monitored test run's tank.
+        DcTestRunManager::Instance().OnRunDisabled(bot, reason);
     }
 
 
@@ -274,6 +447,13 @@ namespace DcActionShared
         uint32& pendingSince = appr.pendingPathSinceMs;
         uint32 const now = getMSTime();
 
+        // Mid-teleport (NearTeleportTo ack still pending), the bot's readable
+        // position is the PRE-teleport one — any route submitted or built from it
+        // starts in the wrong place (the post-Brazen wrong-direction sprint).
+        // Wait the tick or two until the ack lands and the position is real.
+        if (bot->IsBeingTeleported())
+            return;
+
         bool const asyncEnabled = DcSettings::GetBool(bot, "AsyncPathfinding");
 
         // ---- 1. Drain a completed async build ----
@@ -313,9 +493,15 @@ namespace DcActionShared
             pendingJob = 0;
             pendingSince = 0;
 
-            // Discard a result the world has moved past (boss changed, or the
-            // bot zoned) — installing it would route toward the wrong target.
-            bool const stale = (jobEntry != target.entry) || (jobMap != bot->GetMapId());
+            // Discard a result the world has moved past: boss changed, the bot
+            // zoned, or the bot was RELOCATED since submit (TeleportParty / event
+            // repositioning) so the route's start is no longer where the bot is —
+            // installing that one re-enters the polyline with a straight opening
+            // spline back toward the old start and the tank sprints the wrong way.
+            bool const startDrifted =
+                bot->GetExactDist(&appr.pendingPathStartPos) > DC_ASYNC_PATH_START_DRIFT_MAX;
+            bool const stale = (jobEntry != target.entry) || (jobMap != bot->GetMapId()) ||
+                               startDrifted;
             if (!stale)
             {
                 ChunkedPathfinder::Result built = LongRangePathfinder::Finalize(bot, raw);
@@ -336,8 +522,10 @@ namespace DcActionShared
                 return;
             }
             LOG_DEBUG("playerbots.dungeonclear",
-                      "[DC:{}] discarded stale async path (built for boss {} map {}, now boss {} map {})",
-                      bot->GetName(), jobEntry, jobMap, target.entry, bot->GetMapId());
+                      "[DC:{}] discarded stale async path (built for boss {} map {}, now boss {} "
+                      "map {}, start drift {:.0f}yd)",
+                      bot->GetName(), jobEntry, jobMap, target.entry, bot->GetMapId(),
+                      bot->GetExactDist(&appr.pendingPathStartPos));
             // fall through to re-evaluate need and maybe resubmit
         }
 
@@ -440,6 +628,7 @@ namespace DcActionShared
             bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(),
             target.x, target.y, target.z);
         pendingSince = now;
+        appr.pendingPathStartPos = bot->GetPosition();  // drain-time start-drift baseline
 
         LOG_DEBUG("playerbots.dungeonclear",
                   "[DC:{}] async path submitted job={} -> {} ({})",
@@ -467,6 +656,53 @@ namespace DcActionShared
         ServerFacade::instance().SetFacingTo(bot, unit);
     }
 
+    // See the header for why a recall has to ask this before it hauls anyone home.
+    bool DcInGroundEffect(AiObjectContext* ctx)
+    {
+        if (!ctx)
+            return false;
+
+        Aura* const aura = ctx->GetValue<Aura*>(DcKey::Stock::AreaDebuff)->Get();
+        // Same staleness guard AvoidAoeAction applies to the same value: the read is
+        // cached for a tick and the dynamic object can be gone inside it.
+        return aura && !aura->IsRemoved() && !aura->IsExpired();
+    }
+
+    // See the header for why a rung whose destination is the ROUTE has to re-ask
+    // this after its own trigger already answered it.
+    bool PullOwnsTheTank(Player* bot, AiObjectContext* ctx, char const* rung)
+    {
+        if (!bot || !ctx)
+            return false;
+
+        DcPullContext const& pull = ctx->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+
+        // A latched scripted row owns the tank outright, with no timing window:
+        // the plan decides where it stands, walks and drags, and its destination
+        // is never the boss. Unbounded is safe because the maneuver retires the
+        // row as soon as its pack is off the party, whatever the combat flag says.
+        bool const scriptedLatched = pull.scriptedStage >= 0;
+        // Any other maneuver owns it for the bounded valve — long enough to cover
+        // the legs, short enough that a wedged phase can never silence the run's
+        // only driver forever.
+        bool const midManeuver =
+            pull.phase != DcPullPhase::Idle &&
+            getMSTimeDiff(pull.phaseSince, getMSTime()) < DC_PULL_ADVANCE_STANDDOWN_MAX_MS;
+
+        if (!scriptedLatched && !midManeuver)
+            return false;
+
+        // Logged because REACHING this line is itself the diagnosis: the trigger
+        // stood this rung down and the engine ran it anyway off a stale basket.
+        // If this line never appears again the race is closed; if it does, it names
+        // the rung that would have driven the tank.
+        DC_PULL_DEBUG("[DC:{}] {} stood down: a pull owns the tank (phase {}, "
+                      "scripted stage {}) — already-queued basket",
+                      bot->GetName(), rung ? rung : "route rung",
+                      static_cast<uint32>(pull.phase), pull.scriptedStage);
+        return true;
+    }
+
 }  // namespace DcActionShared
 
 // Arbiter-funneled point move. The single seam through which DC actions issue a
@@ -481,8 +717,100 @@ bool DcMovementAction::DcMoveTo(uint32 mapId, float x, float y, float z, bool id
     if (!DcMovement::DcMovementAllowed(botAI))
         return false;
     DcMovement::ResolveEscortConflict(bot);
-    return MoveTo(mapId, x, y, z, idle, react, normal_only, exact_waypoint, priority, lessDelay,
-                  backwards);
+
+    // (1) GROUND-SNAP THE DESTINATION Z.
+    // Stock SearchForBestPath only takes its fast path when the requested z is within
+    // 0.5yd of GetMapHeight at that xy (MovementActions.cpp:1734). Miss that window and
+    // it drops into a z-search that samples just THREE candidates
+    // (AiPlayerbot.MaxMovementSearchTime = 3, a count despite the name) — so a
+    // destination whose z is merely a yard off the local floor can fail outright. DC
+    // hands out exactly such points: the heal-reposition fallback interpolates x/y
+    // toward the target but keeps the TARGET's z (DcFollowerActions.cpp), which is not
+    // the ground height at the interpolated xy. Snap here, once, so every DC caller
+    // gets a well-formed destination instead of each fixing it by hand.
+    //
+    // Take only the SNAPPED Z, and only when the snap landed essentially under the
+    // requested point — this must correct height, never relocate the destination. A
+    // caller that asked for an exact waypoint gets its literal point untouched.
+    //
+    // The Z delta is capped deliberately. NavmeshSnap searches a 10yd VERTICAL extent,
+    // so in stacked geometry (Steamvault's walkways over the pump room, any multi-level
+    // instance) the nearest poly can belong to a different FLOOR — applying that would
+    // silently retarget the move one storey off. The miss we are correcting is the
+    // 0.5yd fast-path window, so real corrections are small; anything larger means the
+    // caller's z is probably the honest one and we leave it alone.
+    constexpr float kMaxSnapZCorrection = 3.0f;
+    float destZ = z;
+    if (!exact_waypoint)
+    {
+        NavmeshSnap::Result const snap = NavmeshSnap::Snap(bot, x, y, z, /*maxRadius*/ 5.0f);
+        if (snap.ok && std::fabs(snap.x - x) < 1.0f && std::fabs(snap.y - y) < 1.0f &&
+            std::fabs(snap.z - z) < kMaxSnapZCorrection)
+            destZ = snap.z;
+    }
+
+    bool moved = MoveTo(mapId, x, y, destZ, idle, react, normal_only, exact_waypoint, priority,
+                        lessDelay, backwards);
+
+    // (2) BYPASS THE Z-SEARCH ON REFUSAL.
+    // SearchForBestPath seeds `min_length` from its FIRST path attempt whether or not
+    // that attempt succeeded, then only accepts a later candidate that is STRICTLY
+    // SHORTER (MovementActions.cpp:1755). Once that seed is a short degenerate path,
+    // no genuine route can ever beat it: `found` stays false, `modified_z` keeps its
+    // INVALID_HEIGHT initialiser, and MoveTo returns false on that destination
+    // forever. Live, this froze bots for thousands of consecutive ticks — including
+    // Xomja refused 45x on a destination 1.7yd away, which is how we know it is not
+    // route length or connectivity. The map-545 nav probe
+    // (t/fixtures/nav/steamvault_stranded_origin.json) confirms the mesh under every
+    // one of those strand origins is walkable and routable.
+    //
+    // exact_waypoint routes stock to DoMovePoint and skips SearchForBestPath entirely
+    // (MovementActions.cpp:215), so one retry defeats the ratchet whatever seeded it.
+    // Gated on "refused AND standing still" so healthy movement never reaches here: a
+    // refusal mid-walk is the ordinary duplicate/last-move guard and must stay a no-op.
+    // Path generation is still on inside DoMovePoint — this trades stock's z-search for
+    // MotionMaster's own pathing, it does not straight-line the bot through geometry.
+    if (!moved && !bot->isMoving() && !exact_waypoint)
+    {
+        moved = MoveTo(mapId, x, y, destZ, idle, react, normal_only, /*exact_waypoint*/ true,
+                       priority, lessDelay, backwards);
+        if (moved)
+            DC_PULL_TRACE("[DC:{}] move refused by the z-search -> exact-waypoint retry "
+                          "RESCUED it (dest {:.1f},{:.1f},{:.1f} at {:.1f}yd)",
+                          bot->GetName(), x, y, destZ, bot->GetExactDist(x, y, destZ));
+    }
+
+    // A refused move that leaves the bot STANDING STILL is the signature behind every
+    // "follower stranded at a fixed spot" deadlock we have chased, and the logs never
+    // said which of stock MoveTo's several early-outs did the refusing — so the cause
+    // stayed a guess across multiple fix attempts. Name it. A refusal while the bot is
+    // already walking is normal (the duplicate/last-move guards reject a re-issue), so
+    // only the standing-still case is worth a line. These are protected members of
+    // MovementAction, which we derive from, so no core change is needed. Note the
+    // guards are re-evaluated here: cheap, but they are a SECOND read, so treat a
+    // disagreement with the real call as a timing artifact rather than a lie.
+    if (!moved && !bot->isMoving())
+    {
+        char const* why;
+        if (!IsMovingAllowed())
+            why = "IsMovingAllowed=false (CanMove: rooted/charmed/frozen/stunned, a "
+                  "CONTROLLED motion slot, or being teleported)";
+        else if (IsDuplicateMove(x, y, destZ))
+            why = "IsDuplicateMove (same destination re-issued inside maxWaitForMove)";
+        else if (IsWaitingForLastMove(priority))
+            why = "IsWaitingForLastMove (an equal-or-higher priority move still holds "
+                  "the delay window — this one is being starved)";
+        else
+            why = "path/other — and the exact-waypoint retry ALSO failed, so this is "
+                  "not the SearchForBestPath z-search ratchet";
+        // Report the z actually attempted (post-snap) plus the raw request, so a
+        // destination the snap moved is still traceable back to its caller.
+        DC_PULL_TRACE("[DC:{}] move REFUSED and not moving -> {} (dest {:.1f},{:.1f},{:.1f} "
+                      "[requested z {:.1f}] at {:.1f}yd, prio={})",
+                      bot->GetName(), why, x, y, destZ, z, bot->GetExactDist(x, y, destZ),
+                      static_cast<uint32>(priority));
+    }
+    return moved;
 }
 
 bool DcMovementAction::FindStandoffPoint(Map* map, Position const& center, float ringRadius,
