@@ -469,6 +469,58 @@ TEST(BossRosterRegistryTest, IronCladDoorSortsBetweenGilnidAndMrSmite)
     EXPECT_EQ(out[doorIdx].eventId, 1u);
 }
 
+// Deadmines: Sneed (643, bit 1) has no creature row — Sneed's Shredder (642)
+// ejects him on death — so BossSpawnIndex never derives him. The patch anchors
+// the Shredder with Sneed's bit, between Rhahk'zor (0) and Gilnid (2).
+TEST(BossRosterRegistryTest, DeadminesAnchorsSneedOnTheShredder)
+{
+    std::vector<DungeonBossInfo> base = {
+        Boss(644, 0, "Rhahk'zor", 36),
+        Boss(1763, 2, "Gilnid", 36),
+        Boss(646, 3, "Mr. Smite", 36),
+    };
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(36, DcDiffKey::Dungeon(DUNGEON_DIFFICULTY_NORMAL), base);
+
+    int rhahkIdx = -1, shredderIdx = -1, gilnidIdx = -1;
+    for (int i = 0; i < (int)out.size(); ++i)
+    {
+        if (out[i].entry == 644)
+            rhahkIdx = i;
+        if (out[i].entry == 642)
+            shredderIdx = i;
+        if (out[i].entry == 1763)
+            gilnidIdx = i;
+    }
+    ASSERT_GE(shredderIdx, 0) << "Sneed's Shredder anchor missing";
+    ASSERT_GE(rhahkIdx, 0);
+    ASSERT_GE(gilnidIdx, 0);
+    EXPECT_EQ(out[shredderIdx].kind, DungeonAnchorKind::Boss);
+    EXPECT_EQ(out[shredderIdx].encounterIndex, 1u) << "carries Sneed's DBC bit";
+    EXPECT_LT(rhahkIdx, shredderIdx);
+    EXPECT_LT(shredderIdx, gilnidIdx);
+}
+
+// A roster that already derives the Shredder (a fork whose encounter row credits
+// 642 for bit 1) must still list it exactly once.
+TEST(BossRosterRegistryTest, DeadminesShredderIsNeverListedTwice)
+{
+    std::vector<DungeonBossInfo> base = {
+        Boss(644, 0, "Rhahk'zor", 36),
+        Boss(642, 1, "Sneed's Shredder", 36),
+        Boss(1763, 2, "Gilnid", 36),
+    };
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(36, DcDiffKey::Dungeon(DUNGEON_DIFFICULTY_HEROIC), base);
+
+    int shredders = 0;
+    for (DungeonBossInfo const& b : out)
+        if (b.entry == 642)
+            ++shredders;
+    EXPECT_EQ(shredders, 1);
+    DungeonBossInfo const* shredder = Find(out, 642);
+    ASSERT_NE(shredder, nullptr);
+    EXPECT_EQ(shredder->encounterIndex, 1u);
+}
+
 // The Slave Pens (547): the post-Mennu drop-down objective shares Rokmar's bit
 // (1); the objective-before-boss tie-break must order it after Mennu (bit 0) and
 // before Rokmar, so the party is teleported across the navmesh break before
