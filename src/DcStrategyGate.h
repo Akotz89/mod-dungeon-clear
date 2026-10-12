@@ -116,6 +116,13 @@ namespace DcStrategyGate
     // from a DC trigger/action.
     void Reconcile(Player* bot);
 
+    // One-shot consumable defaults applied when a bot enters (or logs in on) a
+    // dungeon/raid map: `food` everywhere, `worldbuff` in raids. Install-only and
+    // deliberately NOT part of Reconcile() — the sweep would otherwise undo any
+    // manual `nc -food` / `nc -worldbuff` within one interval. Call only from the
+    // login / map-changed hooks.
+    void ApplyEntryDefaults(Player* bot);
+
     // Re-assert the invariant for every online bot. Cheap per bot; call on a
     // throttled cadence from the world tick. This is the correctness net for the
     // reset-while-in-dungeon case described above.

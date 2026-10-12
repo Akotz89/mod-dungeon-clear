@@ -80,29 +80,6 @@ namespace DcStrategyGate
         bool const hasNon = botAI->HasStrategy(kNonCombat, BOT_STATE_NON_COMBAT);
         bool const hasCmb = botAI->HasStrategy(kCombat, BOT_STATE_COMBAT);
 
-        // RAID consumables (raid-support Plan C): playerbots' opt-in `worldbuff`
-        // strategy is the v1 consumable stand-in — a level-banded simulated
-        // flask/food aura matrix (conf-shipped, AddAura-applied). Bots never
-        // stock real flasks, so on raid maps the strategy is installed for
-        // every bot and stripped again on any non-raid instance map, keeping
-        // the simulated buffs a raid-run behavior rather than a global one. A
-        // bot in the open world is left alone either way.
-        bool const hasWorldbuff = botAI->HasStrategy("worldbuff", BOT_STATE_NON_COMBAT);
-        if (inDungeon && map->IsRaid() && !hasWorldbuff)
-            botAI->ChangeStrategy("+worldbuff", BOT_STATE_NON_COMBAT);
-        else if (inDungeon && !map->IsRaid() && hasWorldbuff)
-            botAI->ChangeStrategy("-worldbuff", BOT_STATE_NON_COMBAT);
-
-        // Eat/drink. A bot inside a dungeon that is missing playerbots' `food`
-        // non-combat strategy never consumes between pulls: it stands at the
-        // rest spot and regens at the passive tick rate, which stretches a run
-        // from minutes to hours. The strategy is a stock default but can be
-        // lost (manual `nc -food`, a reset that rebuilt the engine without it,
-        // or a bot whose saved strategy list predates it). Install it, never
-        // strip it — outside a dungeon the bot's own defaults own that choice.
-        if (inDungeon && !botAI->HasStrategy("food", BOT_STATE_NON_COMBAT))
-            botAI->ChangeStrategy("+food", BOT_STATE_NON_COMBAT);
-
         // Each strategy in the engine it does NOT belong to. Never correct; see
         // the Plan comment in the header for how a bot gets into that state and
         // why it is otherwise permanent.
@@ -140,6 +117,38 @@ namespace DcStrategyGate
             botAI->ChangeStrategy("-dungeon clear", BOT_STATE_COMBAT);
         if (plan.stripStrayInNonCombat)
             botAI->ChangeStrategy("-dungeon clear combat", BOT_STATE_NON_COMBAT);
+    }
+
+    void ApplyEntryDefaults(Player* bot)
+    {
+        if (!DcModule::IsEnabled() || !bot)
+            return;
+
+        PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
+        if (!botAI)
+            return;
+
+        Map* map = bot->GetMap();
+        if (!map || !map->IsDungeon())
+            return;
+
+        // Eat/drink. A bot inside a dungeon that is missing playerbots' `food`
+        // non-combat strategy never consumes between pulls: it stands at the
+        // rest spot and regens at the passive tick rate, which stretches a run
+        // from minutes to hours. The strategy is a stock default but can be
+        // missing (a bot whose saved strategy list predates it). Install it on
+        // entry only — a manual `nc -food` afterwards is the player's choice
+        // and sticks until the next entry.
+        if (!botAI->HasStrategy("food", BOT_STATE_NON_COMBAT))
+            botAI->ChangeStrategy("+food", BOT_STATE_NON_COMBAT);
+
+        // RAID consumables (raid-support Plan C): playerbots' opt-in `worldbuff`
+        // strategy is the v1 consumable stand-in — a level-banded simulated
+        // flask/food aura matrix (conf-shipped, AddAura-applied). Bots never
+        // stock real flasks, so it is installed on raid entry. Never stripped:
+        // whether a bot carries it anywhere else is the player's choice.
+        if (map->IsRaid() && !botAI->HasStrategy("worldbuff", BOT_STATE_NON_COMBAT))
+            botAI->ChangeStrategy("+worldbuff", BOT_STATE_NON_COMBAT);
     }
 
     void ReconcileAllBots()

@@ -319,11 +319,13 @@ public:
     void OnPlayerLogin(Player* player) override
     {
         DcStrategyGate::Reconcile(player);
+        DcStrategyGate::ApplyEntryDefaults(player);
     }
 
     void OnPlayerMapChanged(Player* player) override
     {
         DcStrategyGate::Reconcile(player);
+        DcStrategyGate::ApplyEntryDefaults(player);
     }
 };
 
