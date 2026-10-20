@@ -1004,6 +1004,20 @@ public:
     bool Execute(Event event) override;
 };
 
+// BLACKROCK DEPTHS' IRON HALL ONLY, every member, both engines: walk to a
+// fire-free stop rather than stand in the Ironhand Guardians' fire — in a fight,
+// the nearest one it can still hit its target from. Driven by
+// DungeonClearIronHallSafeSpotTrigger; the decision is DcIronHall::Decide.
+class DungeonClearIronHallSafeSpotAction : public DcMovementAction
+{
+public:
+    DungeonClearIronHallSafeSpotAction(PlayerbotAI* botAI)
+        : DcMovementAction(botAI, "dungeon clear iron hall safe spot")
+    {
+    }
+    bool Execute(Event event) override;
+};
+
 // BLACKROCK DEPTHS' LYCEUM ONLY, every member but the tank, combat engine: walk
 // back inside DcLyceumCloseUp::CLOSE_TO of the tank. Driven by
 // DungeonClearLyceumCloseUpTrigger; the decision is DcLyceumCloseUp::Decide.
@@ -1016,6 +1030,11 @@ public:
     }
     bool Execute(Event event) override;
 };
+
+// The Iron Hall's follow-tank clamp: true while `bot` should hold the stop the hop
+// put it on (or is still walking to it) rather than follow `tank`. Inert off map
+// 230. Implemented with the rung, in DcIronHallSafeSpotAction.cpp.
+bool DcIronHallHoldsFollow(Player* bot, PlayerbotAI* botAI, Player* tank);
 
 // THE OCULUS ONLY, every member, both engines: the rider rung — an essence from
 // the givers, the mount, this member's drake on its lane, the landing, the

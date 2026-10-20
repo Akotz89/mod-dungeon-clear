@@ -500,6 +500,7 @@ TEST(DcDoorPolicyTest, BlackrockBarDoorIsScriptOnly)
     // The Golem Room doors open on both braziers lit (map-230 events 7/8).
     EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(170573));   // Golem Room North
     EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(170574));   // Golem Room South
+    EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(170575));   // Throne Room (Magmus's death)
     // The Lyceum door stays a keyed traversal gate the walker opens.
     EXPECT_FALSE(DcEventDoorRegistry::IsScriptOnly(170558));
     EXPECT_TRUE(DcEventDoorRegistry::IsKeyExempt(170558));

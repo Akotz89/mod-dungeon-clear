@@ -355,6 +355,15 @@ bool DungeonClearFollowTankAction::Execute(Event /*event*/)
         return false;
     }
 
+    // BLACKROCK DEPTHS' IRON HALL: a follower parked clear of the fire in the stop
+    // its tank holds stays parked, and one still walking to a stop is not turned
+    // round. The golden-angle follow slot below is as likely as not inside a
+    // Guardian's circle in a gap 8yd wide, so following there would only hand
+    // the bot back to the safe-spot hop to walk out again (DcIronHallHoldsFollow).
+    // Yield, don't claim: drinking and looting on the stop still get the tick.
+    if (DcIronHallHoldsFollow(bot, botAI, tank))
+        return false;
+
     // ON FOOT THROUGH THE JOUST: the lance and the horse are mod-playerbots' walk,
     // not ours. `toc mount` (64) outranks this rung but only keeps the ticks it
     // SUCCEEDS on, and its MoveTo fails every tick the walk to the horse is still

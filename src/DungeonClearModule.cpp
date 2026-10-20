@@ -91,6 +91,7 @@
 #include "Ai/Dungeon/DungeonClear/DungeonClearTriggerContext.h"
 #include "Ai/Dungeon/DungeonClear/DungeonClearValueContext.h"
 #include "Ai/Dungeon/DungeonClear/Data/Events/BlackrockDepthsLyceum.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcCombatPurge.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcPathWorker.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcFirstContact.h"
@@ -709,6 +710,51 @@ public:
     }
 };
 
+// WORKAROUND for Blackrock Depths' (map 230) Ironhand Guardians holding the party
+// in combat for the rest of the run. Stock AC's statue (8982) carries
+// CREATURE_FLAG_EXTRA_CANNOT_ENTER_COMBAT (0x2000): CombatManager::CanBeginCombat
+// refuses any combat involving it, so its Gout of Flame burns without flagging
+// anyone. mod-individual-progression replaces all six with 108982 (SmartAI,
+// casting out of combat forever — IP PR #890) whose flags_extra is 2 (CIVILIAN)
+// and has lost the 0x2000. So every statue that burns a member enters combat with
+// it, and an unattackable, rooted creature in an instance never leaves: the bot
+// stays combat-flagged long after the hall (live: refs held from 130-240yd), the
+// rest gates never let a healer drink, and the DC driver goes blind (combat with
+// no attackers). As a side effect the IP statue stops firing once it is in
+// combat, because its only cast is an out-of-combat event.
+//
+// Put the stock flag back on the live creature and end whatever combat it already
+// holds. Both entries, in case a data set restores the stock one without the
+// flag. Per-update rather than on add-to-world so a respawn (UpdateEntry resets
+// the flag from the template) and a statue spawned before the module came up are
+// covered too; past the first update it costs a map compare.
+class DungeonClearIronHallGuardianScript : public AllCreatureScript
+{
+public:
+    DungeonClearIronHallGuardianScript() : AllCreatureScript("DungeonClearIronHallGuardianScript") {}
+
+    void OnAllCreatureUpdate(Creature* creature, uint32 /*diff*/) override
+    {
+        if (!creature || creature->GetMapId() != DcBlackrockDepths::MAP_ID)
+            return;
+        uint32 const entry = creature->GetEntry();
+        if (entry != DcBlackrockDepths::NPC_IRONHAND_GUARDIAN &&
+            entry != DcBlackrockDepths::NPC_IRONHAND_GUARDIAN_IP)
+            return;
+        if (creature->IsCombatDisallowed() || !DcModule::IsEnabled())
+            return;
+
+        bool const wasInCombat = creature->IsInCombat();
+        creature->SetIsCombatDisallowed(true);
+        creature->GetCombatManager().EndAllCombat();
+        LOG_INFO("playerbots.dungeonclear",
+                 "[DC] Ironhand Guardian {} (entry {}) set CANNOT_ENTER_COMBAT{} "
+                 "(IP 108982 data lost stock 8982's flags_extra 0x2000)",
+                 creature->GetGUID().ToString(), entry,
+                 wasInCombat ? ", its combat ended" : "");
+    }
+};
+
 // WORKAROUND for the Sunken Temple (map 109) Shade of Eranikus event holding the
 // party in combat forever — the same class of bug as the Zul'Farrak stray-summon
 // hook above, and likewise unfixable for us in core. instance_sunken_temple.cpp's
@@ -794,6 +840,7 @@ void AddSC_dungeon_clear_module()
     new DungeonClearReaperScript();
     new DungeonClearZfStraySummonScript();
     new DungeonClearStratFallenCritterScript();
+    new DungeonClearIronHallGuardianScript();
     new DungeonClearEranikusCombatReleaseScript();
 
     // `.dc test` harness: receive each changed STATUS frame for the monitored

@@ -646,6 +646,21 @@ public:
     bool IsActive() override;
 };
 
+// BLACKROCK DEPTHS' IRON HALL ONLY: active for a member of a running clear that
+// is standing still in an Ironhand Guardian's fire (or whose spline ends in it),
+// and for as long as the hop to a fire-free stop is in flight. See DcIronHall
+// (Util/DcIronHallDecision.h). Free on every other map — the first test is an
+// integer compare on the map id.
+class DungeonClearIronHallSafeSpotTrigger : public Trigger
+{
+public:
+    DungeonClearIronHallSafeSpotTrigger(PlayerbotAI* botAI)
+        : Trigger(botAI, "dungeon clear iron hall safe spot", 1)
+    {
+    }
+    bool IsActive() override;
+};
+
 // BLACKROCK DEPTHS' LYCEUM ONLY, combat engine: active for any member of a
 // running clear but the tank, fighting inside the room, that stands more than
 // DcLyceumCloseUp::LEASH from the tank — and for as long as its walk back is in

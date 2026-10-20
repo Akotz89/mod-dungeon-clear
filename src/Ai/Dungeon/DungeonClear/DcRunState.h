@@ -404,6 +404,18 @@ struct DcRunState
     // is walked back onto the add it left.
     bool   horFollowAdvancing = false;
 
+    // --- Blackrock Depths: the Iron Hall's safe-spot hop (map 230) -------------
+    //
+    // The hop in flight (DungeonClearIronHallSafeSpot): where this bot is going
+    // and when it set off (0 = none). While it is set the rung keeps the tick and
+    // the follow-tank clamp holds, so neither MoveChase nor the follow can turn
+    // the bot round halfway and park it back in the fire.
+    float  ironHallHopX = 0.0f;
+    float  ironHallHopY = 0.0f;
+    uint32 ironHallHopMs = 0;
+    // When this bot was first seen standing still in the fire (0 = it is not).
+    uint32 ironHallStillMs = 0;
+
     // --- Blackrock Depths: the Lyceum close-up (map 230) ----------------------
     //
     // When this bot started walking back inside DcLyceumCloseUp::CLOSE_TO of its

@@ -47,6 +47,7 @@ enum class DcThrottle : uint8
     DtkCampIssue,        // the Drak'Tharon camp-return point move (time only)
     HosTravelIssue,      // HosTravelTo — the Halls of Stone Tribunal arena
     HorStayAheadIssue,   // the HoR escape's per-follower forward step
+    IronHallHopIssue,    // the BRD Iron Hall's hop to a fire-free stop
     LyceumCloseUpIssue,  // the BRD Lyceum close-up walk back to the tank
     TocMoveIssue,        // the ToC driver's point move (the horse, or the tank on foot)
     OcMoveIssue,         // the Oculus rider's drake move (the vehicle base) and its giver walk

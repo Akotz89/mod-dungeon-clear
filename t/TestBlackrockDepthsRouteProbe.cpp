@@ -192,6 +192,9 @@ TEST(BlackrockDepthsRouteProbe, UpperCityEventSpotsAreOnTheNavmesh)
         { B::FLAME_KEEPER_POINTS[3].x, B::FLAME_KEEPER_POINTS[3].y, B::FLAME_KEEPER_POINTS[3].z, "keeper pt 3" },
         { B::BRAZIER_N_X, B::BRAZIER_N_Y, B::BRAZIER_N_Z, "N brazier stand" },
         { 1389.55f, -555.85f, -92.01f, "Golem door N" },
+        { B::MAGMUS_X, B::MAGMUS_Y, B::MAGMUS_Z, "Magmus" },
+        { 1380.12f, -710.48f, -92.01f, "Throne door" },
+        { 1380.18f, -831.65f, -87.59f, "Thaurissan" },
     };
 
     std::printf("Blackrock Depths — Upper City event spots\n");
@@ -216,6 +219,41 @@ TEST(BlackrockDepthsRouteProbe, UpperCityEventSpotsAreOnTheNavmesh)
         std::printf("      from %-16s reachable=%d complete=%d len2d=%.1f %s\n", from.name, r.reachable,
                     r.corridorComplete, r.routeLength2d, r.failureReason.c_str());
         EXPECT_TRUE(r.reachable) << from.name << " -> " << want.name;
+    }
+}
+
+// The Iron Hall's safe-spot stops (DcIronHall): every slot on the hall floor,
+// and each stop walkable from the one before — the hop only ever walks between
+// neighbours.
+TEST(BlackrockDepthsRouteProbe, IronHallStopsAreOnTheFloorAndChained)
+{
+    std::shared_ptr<dtNavMesh> mesh = LoadOrSkip();
+    if (!mesh)
+        GTEST_SKIP() << "DC_PROBE_MMAPS unset or map 230 mmaps missing";
+
+    namespace B = DcBlackrockDepths;
+    for (uint32_t z = 0; z < B::IRON_HALL_ZONE_COUNT; ++z)
+        for (uint32_t s = 0; s < B::IRON_HALL_SLOT_COUNT; ++s)
+        {
+            float const x = B::IRON_HALL_ZONES[z].x + B::IRON_HALL_SLOT_OFFSETS[s].x;
+            float const y = B::IRON_HALL_ZONES[z].y + B::IRON_HALL_SLOT_OFFSETS[s].y;
+            G3D::Vector3 p;
+            bool const snapped = DcNavHarness::NearestPoint(mesh.get(), x, y, B::IRON_HALL_FLOOR_Z, 4.0f, 6.0f, p);
+            std::printf("  Iron Hall stop %u slot %u (%.1f, %.1f) -> snapped=%d off2d=%.2f z=%.2f\n", z, s, x, y,
+                        snapped, snapped ? std::hypot(p.x - x, p.y - y) : -1.0f, p.z);
+            ASSERT_TRUE(snapped) << "stop " << z << " slot " << s;
+            EXPECT_LT(std::hypot(p.x - x, p.y - y), 0.5f) << "stop " << z << " slot " << s;
+            EXPECT_LT(std::fabs(p.z - B::IRON_HALL_FLOOR_Z), 1.5f) << "stop " << z << " slot " << s;
+        }
+    for (uint32_t z = 1; z < B::IRON_HALL_ZONE_COUNT; ++z)
+    {
+        B::HallPoint const& a = B::IRON_HALL_ZONES[z - 1];
+        B::HallPoint const& b = B::IRON_HALL_ZONES[z];
+        DcNavHarness::RouteResult const r = DcNavHarness::Route(mesh.get(), BRD, a.x, a.y, B::IRON_HALL_FLOOR_Z,
+                                                                b.x, b.y, B::IRON_HALL_FLOOR_Z);
+        std::printf("  stop %u -> %u reachable=%d len2d=%.1f\n", z - 1, z, r.reachable, r.routeLength2d);
+        EXPECT_TRUE(r.reachable) << z - 1 << " -> " << z;
+        EXPECT_LT(r.routeLength2d, 1.2f * std::hypot(b.x - a.x, b.y - a.y)) << "a straight walk down the hall";
     }
 }
 

@@ -213,6 +213,26 @@ TEST(DungeonClearRelevanceTest, HazardVacateOutranksNonCombatDrivers)
     EXPECT_LT(DcRel::HazardVacate, DcRel::Chat);
 }
 
+// Blackrock Depths' Iron Hall: the safe-spot hop has to beat every mover that can
+// park a bot in a Guardian's circle — the follow, the role repositions, stock
+// MoveChase — and stays under the camp owners, which never contend there (the
+// hall is a fight-in-place zone). Map-partitioned from the HoR step and the
+// vacate, so sitting a rung above them is order, not a tie.
+TEST(DungeonClearRelevanceTest, TheIronHallHopOutranksEveryMoverThatParksInTheFire)
+{
+    EXPECT_GT(DcRel::IronHallSafeSpot, DcRel::HealReposition);
+    EXPECT_GT(DcRel::IronHallSafeSpot, DcRel::AssistCampCombat);
+    EXPECT_GT(DcRel::IronHallSafeSpot, DcRel::RegroupCombat);
+    EXPECT_GT(DcRel::IronHallSafeSpot, DcRel::FollowTank);
+    EXPECT_GT(DcRel::IronHallSafeSpot, 30.0f) << "stock MoveChase";
+    EXPECT_GT(DcRel::IronHallSafeSpot, DcRel::HorStayAhead) << "no tie";
+    EXPECT_GT(DcRel::IronHallSafeSpot, DcRel::HazardVacate);
+    EXPECT_LT(DcRel::IronHallSafeSpot, DcRel::PullManeuver);
+    EXPECT_LT(DcRel::IronHallSafeSpot, DcRel::StayAtCamp);
+    EXPECT_LT(DcRel::IronHallSafeSpot, DcRel::PartyDied);
+    EXPECT_LT(DcRel::IronHallSafeSpot, DcRel::Chat);
+}
+
 // Blackrock Depths' Lyceum close-up: the walk back to the tank has to beat every
 // mover that holds a member out at range — stock MoveChase / reach, the reach-heal
 // (40), the heal reposition, the DC assist / regroup — and lose to the hazard

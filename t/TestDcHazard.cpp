@@ -4,11 +4,14 @@
  */
 
 #include "gtest/gtest.h"
+#include "Ai/Dungeon/DungeonClear/Data/FightInPlaceRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
 
 #include <cmath>
 #include <vector>
 #include "Ai/Dungeon/DungeonClear/Data/DcHazardRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DcNavPenaltyRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcIronHallDecision.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearTuning.h"
 
 // Pure tests for the hazard-emitter table and its geometry predicates. No map
@@ -851,4 +854,200 @@ TEST(DcHazardRegistry, DrakTharonTimedPoolsKeepTheStandardShape)
         // vertically of either.
         EXPECT_FLOAT_EQ(g->zBand, 6.0f);
     }
+}
+
+// --- Blackrock Depths (230) — the Iron Hall -------------------------------
+//
+// The hall is wall-to-wall Gout of Flame at three y-bands; the fight with Magmus
+// is only fire-free because he spawns in the one gap. Pin the geometry the rows
+// and the fight-in-place zone rely on, against the six statues' own positions.
+TEST(DcHazardBlackrockDepthsTest, IronHallFireRowsCoverBothGuardianEntries)
+{
+    namespace B = DcBlackrockDepths;
+    for (uint32 entry : { B::NPC_IRONHAND_GUARDIAN_IP, B::NPC_IRONHAND_GUARDIAN })
+    {
+        DcHazardEmitter const* e = DcHazardRegistry::Find(B::MAP_ID, entry);
+        ASSERT_NE(e, nullptr) << entry;
+        EXPECT_FLOAT_EQ(e->radius, B::IRONHAND_FIRE_RADIUS) << "the raw 15538 circle";
+        EXPECT_FLOAT_EQ(e->vacateRadius, 0.0f) << "avoided, never fled: the walk has to cross the strips";
+    }
+    EXPECT_EQ(DcHazardRegistry::Find(B::MAP_ID, B::NPC_MAGMUS), nullptr);
+}
+
+TEST(DcHazardBlackrockDepthsTest, MagmusFightsInTheOneFireFreeGap)
+{
+    namespace B = DcBlackrockDepths;
+    DcHazardEmitter const* e = DcHazardRegistry::Find(B::MAP_ID, B::NPC_IRONHAND_GUARDIAN_IP);
+    ASSERT_NE(e, nullptr);
+    auto const hot = [&](float x, float y)
+    {
+        for (B::HallPoint const& g : B::IRONHAND_GUARDIANS)
+            if (DcHazardRegistry::PointInside(*e, g.x, g.y, B::MAGMUS_Z, x, y, B::MAGMUS_Z))
+                return true;
+        return false;
+    };
+
+    EXPECT_FALSE(hot(B::MAGMUS_X, B::MAGMUS_Y)) << "Magmus's spawn";
+    for (B::HallPoint const& p : B::IRON_HALL_SAFE)
+        EXPECT_FALSE(hot(p.x, p.y)) << "safe-gap point (" << p.x << ", " << p.y << ")";
+    // The doors in and out are clear of every circle.
+    EXPECT_FALSE(hot(1389.55f, -555.85f)) << "Golem Room North";
+    EXPECT_FALSE(hot(1370.65f, -555.85f)) << "Golem Room South";
+    EXPECT_FALSE(hot(1380.12f, -710.48f)) << "Throne Room doors";
+
+    // And the gap really is that small: the plan's first-draft band corner is in
+    // the fire, which is why the safe set is a diamond and not a rectangle.
+    EXPECT_TRUE(hot(1372.0f, -648.0f));
+    // The centre line is covered at each statue pair's own y.
+    for (float y : { -587.3f, -632.6f, -677.5f })
+        EXPECT_TRUE(hot(1380.5f, y)) << "y " << y;
+
+    // Magmus is fought where he stands: the whole gap is inside the no-pull zone.
+    EXPECT_TRUE(FightInPlaceRegistry::IsNoPullZone(B::MAP_ID, B::MAGMUS_X, B::MAGMUS_Y));
+    for (B::HallPoint const& p : B::IRON_HALL_SAFE)
+        EXPECT_TRUE(FightInPlaceRegistry::IsNoPullZone(B::MAP_ID, p.x, p.y));
+    for (B::HallPoint const& g : B::IRONHAND_GUARDIANS)
+        EXPECT_TRUE(FightInPlaceRegistry::IsNoPullZone(B::MAP_ID, g.x, g.y)) << "the zone spans the hall";
+    // ...and stops at the Golem doors and the throne door.
+    EXPECT_FALSE(FightInPlaceRegistry::IsNoPullZone(B::MAP_ID, 1389.55f, -555.85f));
+    EXPECT_FALSE(FightInPlaceRegistry::IsNoPullZone(B::MAP_ID, 1380.12f, -710.48f));
+    EXPECT_FALSE(FightInPlaceRegistry::IsNoPullZone(B::MAP_ID, B::BRAZIER_S_X, B::BRAZIER_S_Y)) << "the Lyceum";
+}
+
+// The safe-spot hop (DcIronHall): a member walks through the fire but stops only
+// on one of four fire-free stops. Pin the stops against the statues, then the
+// decision a bot gets in each situation the hall puts it in.
+TEST(DcHazardBlackrockDepthsTest, IronHallStopsAreClearOfEveryCircleWithAMargin)
+{
+    namespace B = DcBlackrockDepths;
+    // The keep-out is the raw circle plus the unit's reach — never smaller.
+    EXPECT_GE(B::IRON_HALL_FIRE_KEEPOUT, B::IRONHAND_FIRE_RADIUS + 1.5f);
+    for (uint32 z = 0; z < B::IRON_HALL_ZONE_COUNT; ++z)
+        for (uint32 s = 0; s < B::IRON_HALL_SLOT_COUNT; ++s)
+        {
+            DcIronHall::Spot const p = DcIronHall::SlotOf(z, s);
+            // A yard over the fire test, so a bot that lands cannot re-fire.
+            EXPECT_GE(DcIronHall::FireDistance(p.x, p.y), B::IRON_HALL_FIRE_KEEPOUT + 1.0f)
+                << "stop " << z << " slot " << s;
+            EXPECT_TRUE(DcIronHall::InHall(p.x, p.y, B::IRON_HALL_FLOOR_Z)) << "stop " << z << " slot " << s;
+            EXPECT_EQ(DcIronHall::ZoneOf(p.x, p.y), static_cast<int>(z)) << "stop " << z << " slot " << s;
+        }
+    // The stops run north to south.
+    for (uint32 z = 1; z < B::IRON_HALL_ZONE_COUNT; ++z)
+        EXPECT_LT(B::IRON_HALL_ZONES[z].y, B::IRON_HALL_ZONES[z - 1].y);
+    // Magmus stands in gap 2.
+    EXPECT_EQ(DcIronHall::ZoneOf(B::MAGMUS_X, B::MAGMUS_Y), 2);
+    // The centre line at each statue pair is fire, not a stop.
+    for (float y : { -587.3f, -632.6f, -677.5f })
+    {
+        EXPECT_TRUE(DcIronHall::InFire(1380.5f, y)) << "y " << y;
+        EXPECT_EQ(DcIronHall::ZoneOf(1380.5f, y), -1) << "y " << y;
+    }
+    // The doors at either end are inside the hop box; the next rooms are not.
+    EXPECT_TRUE(DcIronHall::InHall(1389.55f, -555.85f, -92.0f));
+    EXPECT_TRUE(DcIronHall::InHall(1380.12f, -710.48f, -92.0f));
+    EXPECT_FALSE(DcIronHall::InHall(B::BRAZIER_S_X, B::BRAZIER_S_Y, B::BRAZIER_S_Z)) << "the Lyceum";
+    EXPECT_FALSE(DcIronHall::InHall(1380.18f, -831.65f, -87.59f)) << "the throne room";
+}
+
+TEST(DcHazardBlackrockDepthsTest, IronHallHopOnlyWhenStoppedInTheFire)
+{
+    namespace B = DcBlackrockDepths;
+    DcIronHall::Inputs in;
+    in.goalX = B::MAGMUS_X;
+    in.goalY = B::MAGMUS_Y;
+
+    // Clear of the fire, stopped: nothing to do.
+    in.x = 1380.5f;
+    in.y = -609.6f;
+    EXPECT_FALSE(DcIronHall::Decide(in).hop);
+
+    // In the fire on the centre line of the middle band.
+    in.x = 1380.5f;
+    in.y = -632.6f;
+
+    // Moving with no known end, or an end clear of the fire: crossing.
+    in.moving = true;
+    EXPECT_FALSE(DcIronHall::Decide(in).hop) << "a follow / chase mid-crossing";
+    in.hasDest = true;
+    in.destX = 1380.5f;
+    in.destY = -655.7f;
+    EXPECT_FALSE(DcIronHall::Decide(in).hop) << "heading for gap 2";
+
+    // A follower whose spline ends in the fire is turned before it gets there...
+    in.destY = -677.5f;
+    DcIronHall::Verdict v = DcIronHall::Decide(in);
+    EXPECT_TRUE(v.hop);
+    EXPECT_TRUE(v.redirect);
+    // ...but never the leader: its route crosses the bands on purpose.
+    in.isLeader = true;
+    EXPECT_FALSE(DcIronHall::Decide(in).hop);
+
+    // Stopped in the fire: hop, toward the goal.
+    in.moving = false;
+    in.hasDest = false;
+    v = DcIronHall::Decide(in);
+    EXPECT_TRUE(v.hop);
+    EXPECT_FALSE(v.redirect);
+    EXPECT_EQ(v.zone, 2u) << "Magmus is south: gap 2, not gap 1";
+    EXPECT_FALSE(DcIronHall::InFire(v.spot.x, v.spot.y));
+
+    // Same spot, goal north (a follower whose tank waits at the Golem doors): gap 1.
+    in.isLeader = false;
+    in.goalX = 1380.5f;
+    in.goalY = -562.5f;
+    v = DcIronHall::Decide(in);
+    EXPECT_EQ(v.zone, 1u);
+}
+
+TEST(DcHazardBlackrockDepthsTest, IronHallHopInAFightKeepsTheTargetInReach)
+{
+    namespace B = DcBlackrockDepths;
+    DcIronHall::Inputs in;
+    in.hasTarget = true;
+    in.targetX = B::MAGMUS_X;
+    in.targetY = B::MAGMUS_Y;
+    in.goalX = 1380.5f;   // a tank far north — the target still wins
+    in.goalY = -562.5f;
+
+    // A melee bot that drifted south of Magmus into the south band's fire.
+    in.x = B::MAGMUS_X + 1.0f;
+    in.y = B::MAGMUS_Y - 5.0f;
+    ASSERT_TRUE(DcIronHall::InFire(in.x, in.y));
+    in.reach = 5.0f - 0.5f;
+    DcIronHall::Verdict v = DcIronHall::Decide(in);
+    ASSERT_TRUE(v.hop);
+    EXPECT_TRUE(v.inReach);
+    EXPECT_EQ(v.zone, 2u);
+    EXPECT_LE(std::hypot(v.spot.x - B::MAGMUS_X, v.spot.y - B::MAGMUS_Y), in.reach);
+
+    // A caster standing in the north band's fire, 28.5yd spells.
+    in.x = 1380.5f;
+    in.y = -637.0f;
+    ASSERT_TRUE(DcIronHall::InFire(in.x, in.y));
+    in.reach = 28.5f - 2.0f;
+    v = DcIronHall::Decide(in);
+    ASSERT_TRUE(v.hop);
+    EXPECT_TRUE(v.inReach);
+    EXPECT_EQ(v.zone, 2u) << "gap 1 is ~50yd from him";
+
+    // Nothing in reach (target out in the throne room): fall back to the goal.
+    in.targetX = 1380.18f;
+    in.targetY = -831.65f;
+    in.reach = 4.5f;
+    v = DcIronHall::Decide(in);
+    ASSERT_TRUE(v.hop);
+    EXPECT_FALSE(v.inReach);
+    EXPECT_EQ(v.zone, 1u) << "toward the tank";
+}
+
+TEST(DcHazardBlackrockDepthsTest, IronHallFollowerHoldsTheStopItsTankHolds)
+{
+    DcIronHall::Spot const g2a = DcIronHall::SlotOf(2, 0);
+    DcIronHall::Spot const g2b = DcIronHall::SlotOf(2, 3);
+    DcIronHall::Spot const g1 = DcIronHall::SlotOf(1, 0);
+    EXPECT_TRUE(DcIronHall::HoldFollow(g2a.x, g2a.y, g2b.x, g2b.y));
+    EXPECT_FALSE(DcIronHall::HoldFollow(g1.x, g1.y, g2b.x, g2b.y)) << "the tank moved on a stop";
+    EXPECT_FALSE(DcIronHall::HoldFollow(g2a.x, g2a.y, 1380.5f, -677.5f)) << "the tank is crossing";
+    EXPECT_FALSE(DcIronHall::HoldFollow(1380.5f, -632.6f, g2b.x, g2b.y)) << "a follower in the fire follows";
 }

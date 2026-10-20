@@ -316,6 +316,16 @@ void DungeonClearStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
         "dungeon clear hor stay ahead",
         { NextAction("dungeon clear hor stay ahead", DcRel::HorStayAhead) }));
 
+    // Blackrock Depths' Iron Hall only: never stop in the Ironhand Guardians'
+    // fire — hop to the next fire-free stop. BOTH engines: the walk is the
+    // non-combat engine, Magmus the combat one, and a combat-flagged bot with no
+    // attackers (the blind window) idles on the non-combat one. Inert
+    // everywhere else: the trigger's first test is the map id. See
+    // DungeonClearIronHallSafeSpotTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear iron hall safe spot",
+        { NextAction("dungeon clear iron hall safe spot", DcRel::IronHallSafeSpot) }));
+
     // The Oculus only: the rider rung. Registered in BOTH engines — a rider never
     // reaches the combat engine (the drake seat has no CAN_ATTACK), and a member
     // mustering on foot can be on either. Inert everywhere else: the trigger's
@@ -577,6 +587,16 @@ void DungeonClearCombatStrategy::InitTriggers(std::vector<TriggerNode*>& trigger
     triggers.push_back(new TriggerNode(
         "dungeon clear hor stay ahead",
         { NextAction("dungeon clear hor stay ahead", DcRel::HorStayAhead) }));
+
+    // Blackrock Depths' Iron Hall only: never stop in the Ironhand Guardians'
+    // fire — hop to the next fire-free stop. BOTH engines: the walk is the
+    // non-combat engine, Magmus the combat one, and a combat-flagged bot with no
+    // attackers (the blind window) idles on the non-combat one. Inert
+    // everywhere else: the trigger's first test is the map id. See
+    // DungeonClearIronHallSafeSpotTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear iron hall safe spot",
+        { NextAction("dungeon clear iron hall safe spot", DcRel::IronHallSafeSpot) }));
 
     // Blackrock Depths' Lyceum only, combat engine: in a fight inside the room,
     // every member but the tank stays within 15yd of the tank — how a real group

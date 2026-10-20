@@ -351,6 +351,10 @@ namespace DcEventDoorRegistry
             // party that never earned its way out. Map-230 events 7/8 own them.
             case 170573:  // Blackrock Depths — Golem Room North (opens on TYPE_LYCEUM DONE)
             case 170574:  // Blackrock Depths — Golem Room South (opens on TYPE_LYCEUM DONE)
+            // The Throne Room doors (empty-lock-85), opened only by TYPE_IRON_HALL
+            // DONE — Magmus's death. Clicking them would walk the party past
+            // Magmus to the Emperor.
+            case 170575:  // Blackrock Depths — Throne Room doors (opens on Magmus's death)
                 return true;
             default:
                 return false;

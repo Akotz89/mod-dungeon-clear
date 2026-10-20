@@ -277,7 +277,30 @@ namespace
     // stock `wotlk-occ`'s `avoid unstable sphere` (12yd, sitting spheres only)
     // runs alongside it. If a battery shows the vacate ping-ponging in a dense
     // field, this row is the lever.
-    constexpr std::array<DcHazardEmitter, 11> kEmitters = {{
+    // ---- Blackrock Depths (230): the Iron Hall's Ironhand Guardians ---------
+    //
+    // Six statues around Magmus, unselectable and unattackable, casting Gout of
+    // Flame (15529) — a 10s aura that triggers 15538 every second, a 30yd CIRCLE
+    // (TARGET_UNIT_SRC_AREA_ENEMY, EffectRadiusIndex 30yd) of ~160-200 fire per
+    // tick around the statue. Under mod-individual-progression the C++ 8982s are
+    // replaced by SmartAI 108982s that cast it out of combat too, forever, by
+    // design (IP PR #890); stock AC's 8982s only fire while Magmus is engaged.
+    // Both rows, so either data set is covered.
+    //
+    // Threat 1, the creature kind — keyed on the statue BEING THERE, not on the
+    // aura, because the aura is a 10s-on / ~5s-off cycle and the circle is unsafe
+    // whenever a cast can land. radius = the raw 30yd: that is the whole ask —
+    // keep camps, follower slots and skirt legs out of the circles — and the gap
+    // between them is too narrow for a margin (Magmus's own spawn is 32.6yd from
+    // the nearest two). No vacate: the walk in and out has to cross two covered
+    // strips on the centre line, and a retreat would only fight the walk. The
+    // statues are rooted, but the hall is wall-to-wall fire at three y-bands, so
+    // there is no DcNavPenaltyRegistry detour to give the route — it goes
+    // straight down x 1380. What keeps a bot from STOPPING in a circle is the
+    // safe-spot hop (DcIronHall, DungeonClearIronHallSafeSpot): four fire-free
+    // stops on the centre line, and every member hops to one rather than stand in
+    // the fire. See DcBlackrockDepths' Iron Hall block.
+    constexpr std::array<DcHazardEmitter, 13> kEmitters = {{
         //                    radius  zBand  vacate  hold  slack
         { 578, 28166, /*Unstable Sphere    (leave once)  */  6.0f,  8.0f,  8.0f, 2.0f, 6.0f },
         { 668, 36954, /*Lich King, Remorseless Winter    */ 12.0f, 10.0f,  0.0f, 2.0f, 6.0f },
@@ -290,6 +313,8 @@ namespace
         { 574, 23997, /*Ingvar Throw Dummy (leave once)  */  7.0f, 10.0f,  5.0f, 2.0f, 6.0f },
         { 599, 28265, /*Searing Gaze trig  (leave once)  */  8.0f,  8.0f,  5.0f, 2.0f, 6.0f },
         { 599, 28237, /*Dark Matter Target (leave once)  */  8.0f, 12.0f,  5.0f, 2.0f, 6.0f },
+        { 230, 108982, /*Ironhand Guardian (IP, avoided) */ 30.0f, 12.0f,  0.0f, 2.0f, 6.0f },
+        { 230,  8982, /*Ironhand Guardian (avoided)      */ 30.0f, 12.0f,  0.0f, 2.0f, 6.0f },
     }};
 
     // ---- the ground-pool table ------------------------------------------

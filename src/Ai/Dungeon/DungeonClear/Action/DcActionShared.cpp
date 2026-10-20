@@ -5,6 +5,7 @@
 
 #include "DungeonClearActions.h"
 #include "Ai/Dungeon/DungeonClear/Data/HealLeashRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcHazard.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 #include "TestRun/DcTestRunManager.h"
 
@@ -878,6 +879,12 @@ bool DcMovementAction::FindStandoffPoint(Map* map, Position const& center, float
         float const sdx = snap.x - cx;
         float const sdy = snap.y - cy;
         if (std::sqrt(sdx * sdx + sdy * sdy) > maxRadius)
+            continue;
+
+        // Never a standoff in a persistent hazard: a regroup or heal reposition
+        // is somewhere the bot will STAND, which is exactly what PointIsHot is
+        // for (the BRD Iron Hall's statues, where this used to park healers).
+        if (DcHazard::PointIsHot(bot, snap.x, snap.y, snap.z))
             continue;
 
         if (leashCenter &&
