@@ -7,7 +7,24 @@
 #include "Ai/Dungeon/DungeonClear/Data/Events/DungeonRosterBuilders.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonWingRegistry.h"
 
+#include <list>
 #include <unordered_map>
+
+#include "Creature.h"
+#include "CreatureAI.h"
+#include "GameObject.h"
+#include "InstanceScript.h"
+#include "Log.h"
+#include "ObjectMgr.h"
+#include "Player.h"
+#include "Playerbots.h"
+#include "QuestDef.h"
+#include "ScriptMgr.h"
+#include "WorldSession.h"
+#include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
+#include "Ai/Dungeon/DungeonClear/Overrides/ObjectiveHookRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcTargeting.h"
 
 // --- Blackrock Depths (map 230) — the RING OF LAW, ANCHORED + PERSISTENT ---
 // A sealed arena gauntlet that gates the way between Houndmaster Grebmar and
@@ -108,6 +125,322 @@ namespace
     // read, not a proximity gate.
     constexpr float BRD_GIANT_DOOR_SCAN = 200.0f;
     constexpr uint32 BRD_GIANT_DOOR_TIMEOUT_MS = 30000;
+
+    using namespace DcBlackrockDepths;
+
+    // --- the Grim Guzzler (events 3-5) -------------------------------------
+    // Three of the bar's four bosses cannot be fought until a player does
+    // something to them first, and a bot party does none of it. Runs -1..-5 of
+    // tp-20260928-214704-2 all died in here: three flapped fighting_boss /
+    // fighting_trash on an invisible Hurley for four minutes, two stood idle in
+    // front of a friendly Phalanx for two and a half.
+
+    // Search radii. The bar is one room ~80yd across; these reach its far side
+    // from any of the event anchors without reaching Flamelash's hall.
+    constexpr float BRD_BAR_SCAN = 80.0f;
+    // The kegs stand within 4.3yd of KEG_X/Y; the event's MoveTo puts the tank
+    // on that spot first.
+    constexpr float BRD_KEG_SCAN = 10.0f;
+    // All three kegs are needed (see WakeHurley); one per second keeps each
+    // use its own SmartAI chain without the party standing at the kegs.
+    constexpr uint32 BRD_KEG_FLOOR_MS = 1000;
+    // Rocknot's hold: generous, the escort is ~40s of walking and kicking
+    // (waypoint path 95030: a 4.7s and a 3.1s stop at the first two kegs, then
+    // the 5.1s final-keg sequence).
+    constexpr uint32 BRD_ROCKNOT_TIMEOUT_MS = 120000;
+    // The Bar Door goes to GO_STATE_ACTIVE_ALTERNATIVE when Rocknot breaks the
+    // last keg (npc_rocknot EVENT_ROCKNOT_BREAK_KEG). Phalanx is woken 7s LATER.
+    constexpr uint32 BRD_GO_STATE_ACTIVE_ALTERNATIVE = 2;
+    // Phalanx's wake-up: the 7s cork delay, then his run to the door, which his
+    // own 15s EVENT_PHALANX_FINISH_MOVEMENT caps. A minute is plenty, and a
+    // Phalanx who never turns is this step's timeout rather than a tank parked
+    // on a friendly golem.
+    constexpr uint32 BRD_PHALANX_WAKE_TIMEOUT_MS = 60000;
+    // Interaction reach for Plugger and Rocknot. The core's vendor and quest
+    // checks test INTERACTION_DISTANCE (5yd); stand a little inside it, because
+    // Plugger never stops walking behind his counter (path 477030, no delays).
+    constexpr float BRD_BAR_NPC_REACH = 4.0f;
+    // One hand-in at a time, so each is its own drink and "Ahhh!".
+    constexpr uint32 BRD_ALE_TURN_IN_FLOOR_MS = 1500;
+
+    // --- WakeHurley (hook 52) ----------------------------------------------
+    // Hurley Blackbreath (9537) and his three Blackbreath Cronies spawn
+    // INVISIBLE, passive and immune to players (SmartAI 9537 rows 0-2). What
+    // brings them in is the THIRD Thunderbrew Lager Keg (164911) used: each
+    // keg's state change sends data 1 1 to the other kegs, which advances their
+    // phase (164911 rows 0 and 2), and only a keg already in phase 2 — two used
+    // before it — sends data 1 1 to Hurley (row 1). He then turns visible,
+    // yells, and walks path 9537 to the bar floor, where he drops his immune
+    // flags (rows 8-10). Engaging him then pulls all four (rows 16-18).
+    //
+    // A WaitForSpawn gate on him would pass on the first tick — he EXISTS from
+    // spawn, he just can't be seen — so this hook is both the click and the
+    // gate, keyed on what the script actually changes:
+    //   * dead / gone                -> Done (nothing to wake)
+    //   * visible, no longer immune  -> Done (on the floor; the roster's Hurley
+    //                                   row engages him)
+    //   * visible, still immune      -> Running (walking his path)
+    //   * invisible                  -> use the next ready keg, then Running
+    // A used keg is consumed (43200s respawn) and skipped by the GO_READY test,
+    // so each tick reaches for the next one; Hurley's visibility ends it.
+    ObjectiveArriveResult WakeHurley(Player* bot, AiObjectContext* context,
+                                     DungeonBossInfo const& /*info*/)
+    {
+        Creature* hurley = bot->FindNearestCreature(NPC_HURLEY, BRD_BAR_SCAN, /*alive*/ true);
+        if (!hurley)
+            return ObjectiveArriveResult::Done;
+        if (hurley->IsVisible())
+            return hurley->IsImmuneToPC() ? ObjectiveArriveResult::Running
+                                          : ObjectiveArriveResult::Done;
+
+        if (DcRun::Of(context).Throttled(DcThrottle::BrdKegUse, BRD_KEG_FLOOR_MS))
+            return ObjectiveArriveResult::Running;
+
+        std::list<GameObject*> kegs;
+        bot->GetGameObjectListWithEntryInGrid(kegs, GO_THUNDERBREW_KEG, BRD_KEG_SCAN);
+        for (GameObject* keg : kegs)
+        {
+            if (!keg->isSpawned() || keg->getLootState() != GO_READY)
+                continue;
+            keg->Use(bot);
+            LOG_INFO("playerbots.dungeonclear",
+                     "[DC:{}] Blackrock Depths — used Thunderbrew Lager Keg {} to bring "
+                     "Hurley Blackbreath in (he spawns invisible until a keg is used)",
+                     bot->GetName(), keg->GetGUID().ToString());
+            return ObjectiveArriveResult::Running;
+        }
+        return ObjectiveArriveResult::Running;  // none in reach yet / all spent: the timeout surfaces it
+    }
+
+    // --- the Grim Guzzler's ale (hooks 54 and 47) --------------------------
+    // The Bar Door (170571) and Phalanx (9502, faction 35 — unattackable) are
+    // both released by ONE script: npc_rocknot. Each turn-in of "Rocknot's Ale"
+    // (quest 4295: two Dark Iron Ale Mugs, repeatable) bumps the instance's
+    // BarAleCount, and on the third Rocknot walks path 95030 kicking kegs. The
+    // last kick breaks the Keg Shotgun and the Bar Door goes to state 2; 7s later
+    // the Keg Trap fires, TYPE_BAR goes DONE and Phalanx is told to start: he RUNS
+    // from his corner to the door (path 95020, still faction 35 the whole way)
+    // and only turns hostile (faction 54) when he gets there.
+    //
+    // The player's part is what these two hooks do, for real: buy six mugs from
+    // Plugger Spazzring (hook 54), then hand the quest to Rocknot three times
+    // (hook 47) through the same calls the quest opcodes make. Nothing here
+    // writes the bar's state or touches Rocknot's walk.
+    //
+    // If the player's route is closed — Plugger dead, in combat or out of mugs,
+    // no gold, a full quest log — hook 47 drops to entering npc_rocknot's
+    // sQuestReward directly, which runs the identical walk, door and Phalanx. It
+    // says so at WARN; the bar has to open either way, the door is the only way
+    // on.
+
+    // Walk the leader to (x,y,z) unless a hop is already under way.
+    void HopToward(Player* bot, float x, float y, float z)
+    {
+        if (bot->isMoving())
+            return;
+        bot->GetMotionMaster()->MovePoint(0, x, y, z, FORCED_MOVEMENT_NONE, 0.0f, 0.0f,
+                                          /*generatePath*/ true, false);
+    }
+
+    // How close to the counter-end stand point counts as standing on it.
+    constexpr float BRD_PLUGGER_STAND_RADIUS = 1.5f;
+
+    uint32 AleMugsNeeded() { return ALE_TURN_INS * ALE_MUGS_PER_TURN_IN; }
+
+    // --- BuyRocknotAle (hook 54) -------------------------------------------
+    // Done once the leader carries six mugs, once the run is already under way,
+    // or once a purchase was attempted (success or not: hook 47 decides what a
+    // shortfall means).
+    ObjectiveArriveResult BuyRocknotAle(Player* bot, AiObjectContext* context,
+                                        DungeonBossInfo const& /*info*/)
+    {
+        InstanceScript* inst = DcTargeting::GetInstanceScript(bot);
+        if (!inst)
+            return ObjectiveArriveResult::Running;
+        uint32 const bar = inst->GetData(TYPE_BAR);
+        if (bar == STATE_DONE || bar == STATE_SPECIAL)
+            return ObjectiveArriveResult::Done;
+
+        uint32 const have = bot->GetItemCount(ITEM_DARK_IRON_ALE_MUG);
+        if (have >= AleMugsNeeded())
+            return ObjectiveArriveResult::Done;
+
+        Creature* plugger = bot->FindNearestCreature(NPC_PLUGGER, BRD_BAR_SCAN, /*alive*/ true);
+        if (!plugger || plugger->IsInCombat() || !plugger->HasNpcFlag(UNIT_NPC_FLAG_VENDOR))
+        {
+            LOG_WARN("playerbots.dungeonclear",
+                     "[DC:{}] Blackrock Depths — Plugger Spazzring is {}; no Dark Iron Ale to buy",
+                     bot->GetName(), !plugger ? "gone" : "not trading");
+            return ObjectiveArriveResult::Done;
+        }
+
+        // Wait at the counter's end for his patrol to bring him past (see
+        // PLUGGER_STAND_*): chasing him puts the leader across the counter from a
+        // bartender who is out of reach for most of his loop.
+        if (!bot->IsWithinDistInMap(plugger, BRD_BAR_NPC_REACH))
+        {
+            if (bot->GetExactDist2d(PLUGGER_STAND_X, PLUGGER_STAND_Y) > BRD_PLUGGER_STAND_RADIUS)
+                HopToward(bot, PLUGGER_STAND_X, PLUGGER_STAND_Y, PLUGGER_STAND_Z);
+            if (!DcRun::Of(context).Throttled(DcThrottle::BrdEventLog, 10000))
+                LOG_INFO("playerbots.dungeonclear",
+                         "[DC:{}] Grim Guzzler — at the bar for Dark Iron Ale; Plugger Spazzring is "
+                         "{:.1f}yd away", bot->GetName(), bot->GetExactDist(plugger));
+            return ObjectiveArriveResult::Running;
+        }
+
+        VendorItemData const* stock = plugger->GetVendorItems();
+        uint32 slot = 0;
+        bool found = false;
+        for (uint32 i = 0; stock && i < stock->GetItemCount(); ++i)
+            if (VendorItem const* vi = stock->GetItem(i); vi && vi->item == ITEM_DARK_IRON_ALE_MUG)
+            {
+                slot = i;
+                found = true;
+                break;
+            }
+        if (!found)
+        {
+            LOG_WARN("playerbots.dungeonclear",
+                     "[DC:{}] Blackrock Depths — Plugger Spazzring does not sell item {}",
+                     bot->GetName(), ITEM_DARK_IRON_ALE_MUG);
+            return ObjectiveArriveResult::Done;
+        }
+
+        // BuyItemFromVendorSlot reads the session's open vendor list first; a bot
+        // that last traded elsewhere would index someone else's stock.
+        bot->GetSession()->SetCurrentVendor(plugger->GetEntry());
+        uint32 const want = AleMugsNeeded() - have;
+        bool const bought = bot->BuyItemFromVendorSlot(plugger->GetGUID(), slot, ITEM_DARK_IRON_ALE_MUG,
+                                                       static_cast<uint8>(want), NULL_BAG, NULL_SLOT);
+        bot->GetSession()->SetCurrentVendor(0);
+        if (bought)
+            LOG_INFO("playerbots.dungeonclear",
+                     "[DC:{}] Grim Guzzler — bought {} Dark Iron Ale Mug(s) from Plugger Spazzring "
+                     "(now carrying {})", bot->GetName(), want, bot->GetItemCount(ITEM_DARK_IRON_ALE_MUG));
+        else
+            LOG_WARN("playerbots.dungeonclear",
+                     "[DC:{}] Blackrock Depths — could not buy {} Dark Iron Ale Mug(s) from Plugger "
+                     "(stock, gold or bag space)", bot->GetName(), want);
+        return ObjectiveArriveResult::Done;
+    }
+
+    // --- StartRocknotAleRun (hook 47) --------------------------------------
+    // Hand "Rocknot's Ale" in, one turn-in per BRD_ALE_TURN_IN_FLOOR_MS, until
+    // the bar reads SPECIAL (Rocknot is walking). Each turn-in is the quest
+    // opcodes' own sequence: accept, complete (the two mugs are taken), then the
+    // creature's sQuestReward, which is where npc_rocknot counts it.
+    //
+    // Idempotent: SPECIAL or DONE is Done at the top, so a rewind never starts a
+    // second escort, and a count a human already began is finished, not
+    // restarted (GetData reads IN_PROGRESS until the third).
+    //
+    // No forced end state. If the escort stalls TYPE_BAR stays SPECIAL, this is
+    // a no-op, and the door wait after it times out visibly.
+    ObjectiveArriveResult StartRocknotAleRun(Player* bot, AiObjectContext* context,
+                                             DungeonBossInfo const& /*info*/)
+    {
+        InstanceScript* inst = DcTargeting::GetInstanceScript(bot);
+        if (!inst)
+            return ObjectiveArriveResult::Running;
+
+        uint32 const bar = inst->GetData(TYPE_BAR);
+        if (bar == STATE_DONE || bar == STATE_SPECIAL)
+            return ObjectiveArriveResult::Done;
+
+        Creature* rocknot = bot->FindNearestCreature(NPC_ROCKNOT, BRD_BAR_SCAN, /*alive*/ true);
+        if (!rocknot || !rocknot->AI())
+            return ObjectiveArriveResult::Running;
+
+        Quest const* ale = sObjectMgr->GetQuestTemplate(QUEST_ALE);
+        if (!ale)
+        {
+            LOG_ERROR("playerbots.dungeonclear",
+                      "[DC:{}] Blackrock Depths — quest {} missing from the world DB; "
+                      "Rocknot's ale run cannot be started", bot->GetName(), QUEST_ALE);
+            return ObjectiveArriveResult::Blocked;
+        }
+
+        if (!bot->IsWithinDistInMap(rocknot, BRD_BAR_NPC_REACH))
+        {
+            HopToward(bot, rocknot->GetPositionX(), rocknot->GetPositionY(), rocknot->GetPositionZ());
+            return ObjectiveArriveResult::Running;
+        }
+
+        if (DcRun::Of(context).Throttled(DcThrottle::BrdAleTurnIn, BRD_ALE_TURN_IN_FLOOR_MS))
+            return ObjectiveArriveResult::Running;
+
+        bot->StopMoving();
+        bot->SetFacingToObject(rocknot);
+
+        bool handedIn = false;
+        if (bot->GetItemCount(ITEM_DARK_IRON_ALE_MUG) >= ALE_MUGS_PER_TURN_IN)
+        {
+            if (bot->GetQuestStatus(QUEST_ALE) == QUEST_STATUS_NONE && bot->CanTakeQuest(ale, false) &&
+                bot->CanAddQuest(ale, false))
+                bot->AddQuestAndCheckCompletion(ale, rocknot);
+            if (bot->CanRewardQuest(ale, 0, false))
+            {
+                bot->RewardQuest(ale, 0, rocknot);
+                if (!sScriptMgr->OnQuestReward(bot, rocknot, ale, 0))
+                    rocknot->AI()->sQuestReward(bot, ale, 0);
+                handedIn = true;
+            }
+        }
+
+        if (handedIn)
+            LOG_INFO("playerbots.dungeonclear",
+                     "[DC:{}] Grim Guzzler — handed Rocknot's Ale (quest {}) to Private Rocknot; "
+                     "{} mug(s) left", bot->GetName(), QUEST_ALE, bot->GetItemCount(ITEM_DARK_IRON_ALE_MUG));
+        else
+        {
+            // The player's route is closed (see the header): count this hand-in
+            // the script's own way so the bar still opens.
+            if (bot->GetQuestStatus(QUEST_ALE) == QUEST_STATUS_INCOMPLETE)
+                bot->RemoveActiveQuest(QUEST_ALE);
+            LOG_WARN("playerbots.dungeonclear",
+                     "[DC:{}] Blackrock Depths — no Dark Iron Ale to hand in ({} mug(s), quest status {}); "
+                     "counting the turn-in through npc_rocknot::sQuestReward", bot->GetName(),
+                     bot->GetItemCount(ITEM_DARK_IRON_ALE_MUG), static_cast<uint32>(bot->GetQuestStatus(QUEST_ALE)));
+            rocknot->AI()->sQuestReward(bot, ale, 0);
+        }
+
+        uint32 const now = inst->GetData(TYPE_BAR);
+        if (now == STATE_SPECIAL)
+            LOG_INFO("playerbots.dungeonclear",
+                     "[DC:{}] Blackrock Depths — Private Rocknot has his three ales and is off to the "
+                     "kegs; the Bar Door and Phalanx follow when he breaks the last one", bot->GetName());
+        return (now == STATE_SPECIAL || now == STATE_DONE) ? ObjectiveArriveResult::Done
+                                                           : ObjectiveArriveResult::Running;
+    }
+
+    // --- PhalanxAtDoor (hook 55) -------------------------------------------
+    // The door breaking is NOT the moment Phalanx can be fought: he is woken 7s
+    // later and spends up to 15s running from his corner to the door, faction 35
+    // throughout (npc_phalanx StartActivation -> Activate on PathEndReached).
+    // Latching the objective on the door sent the roster's Phalanx row after a
+    // friendly golem still dormant in his corner, the tank pursuing him across
+    // the doorway while he walked past it. Done once he can be fought — hostile
+    // to the leader — or is already dead.
+    ObjectiveArriveResult PhalanxAtDoor(Player* bot, AiObjectContext* context,
+                                        DungeonBossInfo const& /*info*/)
+    {
+        Creature* phalanx = bot->FindNearestCreature(NPC_PHALANX, BRD_BAR_SCAN, /*alive*/ true);
+        if (!phalanx || phalanx->IsHostileTo(bot))
+            return ObjectiveArriveResult::Done;
+        if (!DcRun::Of(context).Throttled(DcThrottle::BrdEventLog, 10000))
+            LOG_INFO("playerbots.dungeonclear",
+                     "[DC:{}] Grim Guzzler — Bar Door is broken; waiting for Phalanx to take the "
+                     "doorway ({:.1f}yd from it)", bot->GetName(), phalanx->GetExactDist2d(PHALANX_DOOR_X, PHALANX_DOOR_Y));
+        return ObjectiveArriveResult::Running;
+    }
+}
+
+void RegisterBlackrockDepthsHooks(ObjectiveHookRegistry::HookTable& out)
+{
+    ObjectiveHookRegistry::AddHook(out, HOOK_START_ROCKNOT_ALE_RUN, &StartRocknotAleRun);
+    ObjectiveHookRegistry::AddHook(out, HOOK_WAKE_HURLEY, &WakeHurley);
+    ObjectiveHookRegistry::AddHook(out, HOOK_BUY_ROCKNOT_ALE, &BuyRocknotAle);
+    ObjectiveHookRegistry::AddHook(out, HOOK_PHALANX_AT_DOOR, &PhalanxAtDoor);
 }
 
 void RegisterBlackrockDepthsEvents(std::vector<DungeonEvent>& out)
@@ -176,6 +509,86 @@ void RegisterBlackrockDepthsEvents(std::vector<DungeonEvent>& out)
             .WaitForGOState(BRD_GO_GIANT_DOORS, BRD_GO_STATE_READY,
                             BRD_GIANT_DOOR_TIMEOUT_MS, BRD_GIANT_DOOR_SCAN)
             .Build());
+
+    // --- HURLEY'S KEGS, ANCHORED ahead of Hurley (shares his index 11) ---
+    // Walk to the three Thunderbrew Lager Kegs and use all three; hook 52 is
+    // the clicks AND the gate (Hurley visible and no longer immune), see
+    // WakeHurley. The roster's Hurley row then engages him where his path left
+    // him.
+    //
+    // Not persistent: nothing here spans a fight. Hurley is passive until the
+    // party engages him, which happens after this objective latches, and a
+    // rewind re-runs a MoveTo and a hook that reads Hurley before touching a keg.
+    out.push_back(
+        EventBuilder(MAP_ID, EVENT_HURLEY_KEGS, "Hurley's Kegs")
+            .Anchored(/*orderIndex*/ 11)
+            .MoveTo(KEG_X, KEG_Y, KEG_Z, /*radius*/ 4.0f)
+            .Custom(HOOK_WAKE_HURLEY)
+            // His walk from the bar's back corner to the floor is ~25yd at walk
+            // speed after the yell; a minute is plenty, and a keg chain that
+            // never landed shows up as this step's timeout.
+            .Timeout(60000)
+            .Build());
+
+    // --- RIBBLY'S CHALLENGE, ANCHORED ahead of Ribbly (index 12) ---------
+    // Ribbly Screwspigot (9543) is faction 735 — friendly. Gossip menu 1970
+    // option 0 ("time to pay for your wickedness") is the whole trigger: his
+    // SmartAI (event 62) sets faction 14 on him and on his three cronies (10043)
+    // within 30yd and AttackStarts the player who chose it. menu 1970 has no
+    // conditions row, and the leader running this event is the tank, so the
+    // fight opens on the tank. The roster's Ribbly row finishes it.
+    //
+    // SkipIfTargetMissing: a Ribbly who is already dead (a resumed run, or a
+    // human beat us to him) completes the objective instead of stalling it.
+    out.push_back(
+        EventBuilder(MAP_ID, EVENT_RIBBLY, "Ribbly's Challenge")
+            .Anchored(/*orderIndex*/ 12)
+            .Gossip(NPC_RIBBLY, /*option*/ 0, /*searchRadius*/ 30.0f)
+            .SkipIfTargetMissing()
+            .Build());
+
+    // --- ROCKNOT'S ALE RUN, ANCHORED ahead of Phalanx (index 13) ---------
+    // The way a player opens the Bar Door: buy six Dark Iron Ale Mugs from
+    // Plugger (hook 54), hand "Rocknot's Ale" to Private Rocknot three times
+    // (hook 47), then stand clear while he walks off and kicks the kegs. His last
+    // kick breaks the door; 7s later Phalanx is woken and runs from his corner to
+    // the doorway, turning hostile only when he gets there. The objective latches
+    // on THAT (hook 55), not on the door: the roster's Phalanx row is next, and a
+    // row picked while he is still friendly has the tank chase a golem it cannot
+    // attack across the doorway he is running to.
+    //
+    // The door wait stays as its own step. The door is what the party has to
+    // walk through, and a reloaded instance can read TYPE_BAR DONE with the door
+    // still shut (the upstream reload bug; see the plan's §8), which must stall
+    // visibly here rather than at the door later.
+    //
+    // NOT an instance-data garrison: TYPE_BAR reads SPECIAL (4) for the whole
+    // escort — GetData reports SPECIAL while BarAleCount is 3 and the state is
+    // IN_PROGRESS — and the garrison gate is `>=`, so "hold until >= DONE (3)"
+    // would pass the instant the run started.
+    //
+    // PERSISTENT so a fight in the bar during the escort (a patron, a crony)
+    // does not rewind the event, and so the walks to Plugger and Rocknot (both
+    // 15-30yd off the hold) keep the event live away from its anchor. Every step
+    // survives a rewind anyway: the buy is Done once six mugs are carried, the
+    // hand-in once the bar reads SPECIAL.
+    out.push_back(
+        EventBuilder(MAP_ID, EVENT_ROCKNOT, "Rocknot's Ale Run")
+            .Anchored(/*orderIndex*/ 13)
+            .Persistent()
+            .MoveTo(ROCKNOT_HOLD_X, ROCKNOT_HOLD_Y, ROCKNOT_HOLD_Z, ROCKNOT_HOLD_RADIUS)
+            .Custom(HOOK_BUY_ROCKNOT_ALE)
+            .Timeout(60000)
+            .Custom(HOOK_START_ROCKNOT_ALE_RUN)
+            .Timeout(60000)
+            // Back off his walk and out of the bar's middle; Phalanx's doorway is
+            // 16yd from here, close enough to meet him there.
+            .MoveTo(ROCKNOT_HOLD_X, ROCKNOT_HOLD_Y, ROCKNOT_HOLD_Z, ROCKNOT_HOLD_RADIUS)
+            .WaitForGOState(GO_BAR_DOOR, BRD_GO_STATE_ACTIVE_ALTERNATIVE,
+                            BRD_ROCKNOT_TIMEOUT_MS, /*searchRadius*/ 40.0f)
+            .Custom(HOOK_PHALANX_AT_DOOR)
+            .Timeout(BRD_PHALANX_WAKE_TIMEOUT_MS)
+            .Build());
 }
 
 // --- roster patch (relocated from BossRosterRegistry) --------------------
@@ -201,6 +614,7 @@ void RegisterBlackrockDepthsRoster(std::vector<BossRosterPatch>& t)
     {
         BossRosterPatch p;
         p.mapId = 230;
+        p.remove = { DcBlackrockDepths::NPC_PLUGGER };
         p.add = {
             MakeObjective(OBJ(1), /*encounterIndex*/ 3, 230, "Ring of Law",
                           596.432f, -188.498f, -53.9f, /*arriveRadius*/ 12.0f,
@@ -221,6 +635,38 @@ void RegisterBlackrockDepthsRoster(std::vector<BossRosterPatch>& t)
             MakeObjective(OBJ(2), /*encounterIndex*/ 9, 230, "Shadowforge Lock",
                           615.61f, -49.78f, -59.82f, /*arriveRadius*/ 8.0f,
                           /*gateEntry*/ 0, /*hook*/ 0, /*eventId*/ 2),
+            // --- Blackrock Depths — the Grim Guzzler -------------------------
+            // One objective per scripted gate, each sharing the index of the
+            // boss it unlocks so the objective-before-boss tie-break walks the
+            // party to the gate first (the Shadowforge Lock shape). The order
+            // the bar is cleared in is keg -> Hurley -> Ribbly's challenge ->
+            // Ribbly -> Rocknot's ale run -> Phalanx -> Plugger: Plugger's death
+            // turns every patron in the bar hostile (his ON_DEATH SmartAI), so
+            // he goes LAST, with the Bar Door already open behind Phalanx for
+            // the party to leave through.
+            //
+            // And he is not fought at his counter. Killed there he died among
+            // the patrons, and every run of tp-20261018-211235-1 ended the bar
+            // in a brawl with up to seventeen of them. His row is re-anchored
+            // on PLUGGER_CAMP past the Bar Door (keeping kill-bit 14), and
+            // BossPullbackRegistry has the tank drag him out to it, so he dies
+            // with the party out of every patron's aggro range.
+            MakeBoss(DcBlackrockDepths::NPC_PLUGGER, 230, "Plugger Spazzring",
+                     DcBlackrockDepths::PLUGGER_CAMP_X, DcBlackrockDepths::PLUGGER_CAMP_Y,
+                     DcBlackrockDepths::PLUGGER_CAMP_Z,
+                     /*completionFrom*/ DcBlackrockDepths::NPC_PLUGGER),
+            MakeObjective(OBJ(DcBlackrockDepths::OBJ_HURLEY_KEGS), /*encounterIndex*/ 11, 230,
+                          "Hurley's Kegs", DcBlackrockDepths::KEG_X, DcBlackrockDepths::KEG_Y,
+                          DcBlackrockDepths::KEG_Z, /*arriveRadius*/ 8.0f, /*gateEntry*/ 0,
+                          /*hook*/ 0, DcBlackrockDepths::EVENT_HURLEY_KEGS),
+            MakeObjective(OBJ(DcBlackrockDepths::OBJ_RIBBLY), /*encounterIndex*/ 12, 230,
+                          "Ribbly's Challenge", 878.47f, -167.73f, -49.68f, /*arriveRadius*/ 10.0f,
+                          /*gateEntry*/ 0, /*hook*/ 0, DcBlackrockDepths::EVENT_RIBBLY),
+            MakeObjective(OBJ(DcBlackrockDepths::OBJ_ROCKNOT), /*encounterIndex*/ 13, 230,
+                          "Rocknot's Ale Run", DcBlackrockDepths::ROCKNOT_HOLD_X,
+                          DcBlackrockDepths::ROCKNOT_HOLD_Y, DcBlackrockDepths::ROCKNOT_HOLD_Z,
+                          /*arriveRadius*/ 8.0f, /*gateEntry*/ 0, /*hook*/ 0,
+                          DcBlackrockDepths::EVENT_ROCKNOT),
         };
         // --- Blackrock Depths — Stilgiss and Darkvire before Incendius ---
         // DBC order runs Loregrain -> Incendius (bit 5) -> Stilgiss (6) ->
@@ -232,6 +678,13 @@ void RegisterBlackrockDepthsRoster(std::vector<BossRosterPatch>& t)
             { 9041, 5 },   // Warder Stilgiss
             { 9056, 6 },   // Fineous Darkvire
             { 9017, 7 },   // Lord Incendius
+            // --- the Grim Guzzler: Ribbly before Phalanx --------------------
+            // DBC bits run Hurley (11) -> Phalanx (12) -> Ribbly (13) ->
+            // Plugger (14). Phalanx is gated on Rocknot's ale run and Ribbly is
+            // not, and the ale run opens the door the party leaves by, so swap
+            // the two onto each other's slot; Plugger keeps 14 and goes last.
+            { 9543, 12 },  // Ribbly Screwspigot
+            { 9502, 13 },  // Phalanx
         };
         t.push_back(std::move(p));
     }
@@ -268,7 +721,8 @@ void RegisterBlackrockDepthsWings(std::unordered_map<uint32, DungeonWingLayout>&
     // The Shadowforge Lock objective (OBJ(2), event 2) opens the Upper City: it
     // shares Angerforge's ordering index 9 and the objective-before-boss
     // tie-break takes it first, so an Upper City run walks to the lever, then
-    // to Angerforge.
+    // to Angerforge. The Upper City's other scripted gates (events 3+) are
+    // objectives in the same way, each listed just before the boss it unlocks.
     using DcRoster::OBJ;
     store[230] = {true, {
         {"Blackrock Depths (Detention Block)", {
@@ -287,9 +741,12 @@ void RegisterBlackrockDepthsWings(std::unordered_map<uint32, DungeonWingLayout>&
             OBJ(2),  // The Shadowforge Lock (event 2)
             9033,    // General Angerforge
             8983,    // Golem Lord Argelmach
+            OBJ(DcBlackrockDepths::OBJ_HURLEY_KEGS),  // Hurley's Kegs (event 3)
             9537,    // Hurley Blackbreath
-            9502,    // Phalanx
+            OBJ(DcBlackrockDepths::OBJ_RIBBLY),       // Ribbly's Challenge (event 4)
             9543,    // Ribbly Screwspigot
+            OBJ(DcBlackrockDepths::OBJ_ROCKNOT),      // Rocknot's Ale Run (event 5)
+            9502,    // Phalanx
             9499,    // Plugger Spazzring
             9156,    // Ambassador Flamelash
             9035,    // Anger'rel (The Seven)

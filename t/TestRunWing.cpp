@@ -10,6 +10,7 @@
 
 #include "Ai/Dungeon/DungeonClear/Data/DcNavPenaltyRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonWingRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
 #include "Ai/Dungeon/DungeonClear/Overrides/BossRosterRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRunWing.h"
 #include "TestRun/DcTestDungeonRegistry.h"
@@ -429,14 +430,14 @@ TEST(DcRunWingTest, BlackrockDepthsLfgDungeonPicksTheWing)
 
 TEST(DcRunWingTest, EveryBlackrockDepthsRosterRowIsInExactlyOneWing)
 {
-    // The whole live list — bosses AND both objectives — splits 9 / 11 with
+    // The whole live list — bosses AND every objective — splits 9 / 14 with
     // nothing dropped: a row in no wing would never be cleared by either run.
     std::vector<DungeonBossInfo> const roster = BrdRoster();
-    ASSERT_EQ(roster.size(), 20u);
+    ASSERT_EQ(roster.size(), 23u);
     std::size_t const db = DcRunWing::FilterToWing(roster, *DungeonWingRegistry::FindWing(Brd(), "brd-db")).size();
     std::size_t const uc = DcRunWing::FilterToWing(roster, *DungeonWingRegistry::FindWing(Brd(), "brd-uc")).size();
     EXPECT_EQ(db, 9u);
-    EXPECT_EQ(uc, 11u);
+    EXPECT_EQ(uc, 14u);
     EXPECT_EQ(db + uc, roster.size());
     for (DungeonBossInfo const& b : roster)
         EXPECT_NE(DungeonWingRegistry::WingOf(BRD, b.entry), nullptr) << b.name;
@@ -469,11 +470,51 @@ TEST(DcRunWingTest, UpperCityRunGoesToTheShadowforgeLockThenAngerforge)
 {
     std::vector<DungeonBossInfo> const uc =
         DcRunWing::FilterToWing(BrdRoster(), *DungeonWingRegistry::FindWing(Brd(), "brd-uc"));
-    ASSERT_EQ(uc.size(), 11u);
+    ASSERT_EQ(uc.size(), 14u);
     EXPECT_EQ(uc[0].kind, DungeonAnchorKind::Objective);
     EXPECT_EQ(uc[0].eventId, 2u) << "an Upper City run opens at the Shadowforge Lock";
     EXPECT_EQ(uc[1].entry, 9033u) << "then General Angerforge";
     EXPECT_EQ(uc.back().entry, 9019u);   // Thaurissan last
+}
+
+// The Upper City in clear order. Each scripted gate is an objective just ahead
+// of the boss it unlocks, and the Grim Guzzler is cleared keg -> Hurley ->
+// Ribbly -> Rocknot's ale run -> Phalanx -> Plugger: Plugger's death turns the
+// bar's 68 patrons hostile, so he goes last, after the ale run has opened the
+// Bar Door the party leaves by.
+TEST(DcRunWingTest, UpperCityRunClearsTheGrimGuzzlerInScriptOrder)
+{
+    auto const ObjectiveEntry = [](uint32 seq) { return BossRosterRegistry::ObjectiveEntry(seq); };
+    std::vector<DungeonBossInfo> const uc =
+        DcRunWing::FilterToWing(BrdRoster(), *DungeonWingRegistry::FindWing(Brd(), "brd-uc"));
+    std::vector<uint32> const want = {
+        ObjectiveEntry(2),                                   // Shadowforge Lock
+        9033, 8983,                                          // Angerforge, Argelmach
+        ObjectiveEntry(DcBlackrockDepths::OBJ_HURLEY_KEGS), 9537,
+        ObjectiveEntry(DcBlackrockDepths::OBJ_RIBBLY), 9543,
+        ObjectiveEntry(DcBlackrockDepths::OBJ_ROCKNOT), 9502,
+        9499,                                                // Plugger, last in the bar
+        9156, 9035, 9938, 9019,                              // Flamelash .. Thaurissan
+    };
+    ASSERT_EQ(uc.size(), want.size());
+    for (std::size_t i = 0; i < want.size(); ++i)
+        EXPECT_EQ(uc[i].entry, want[i]) << "slot " << i << " is " << uc[i].name;
+
+    // Each gate carries its event, and the reorder moves the path, never the
+    // kill bits.
+    for (DungeonBossInfo const& b : uc)
+    {
+        if (b.entry == ObjectiveEntry(DcBlackrockDepths::OBJ_HURLEY_KEGS))
+            EXPECT_EQ(b.eventId, DcBlackrockDepths::EVENT_HURLEY_KEGS);
+        if (b.entry == ObjectiveEntry(DcBlackrockDepths::OBJ_RIBBLY))
+            EXPECT_EQ(b.eventId, DcBlackrockDepths::EVENT_RIBBLY);
+        if (b.entry == ObjectiveEntry(DcBlackrockDepths::OBJ_ROCKNOT))
+            EXPECT_EQ(b.eventId, DcBlackrockDepths::EVENT_ROCKNOT);
+        if (b.entry == 9543)
+            EXPECT_EQ(b.encounterIndex, 13u) << "Ribbly keeps kill-bit 13";
+        if (b.entry == 9502)
+            EXPECT_EQ(b.encounterIndex, 12u) << "Phalanx keeps kill-bit 12";
+    }
 }
 
 TEST(DcRunWingTest, FallbackAtTheBrdPortalIsTheDetentionBlock)

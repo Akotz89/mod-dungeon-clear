@@ -163,3 +163,20 @@ TEST(DcNeverTargetRegistryTest, BlackwingLairRowsDoNotBanTheRestOfTheRaid)
     EXPECT_FALSE(DcNeverTargetRegistry::IsNeverTarget(469, 14021));
     EXPECT_FALSE(DcNeverTargetRegistry::IsNeverTarget(469, 14026));
 }
+
+// --- Blackrock Depths (230) — the Grim Guzzler's patrons -------------------
+//
+// Plugger Spazzring's ON_DEATH SmartAI turns all 68 patrons hostile, and he is
+// deliberately the bar's last kill: the clear must walk out of the bar, not table
+// to table through it.
+TEST(DcNeverTargetRegistryTest, BlackrockDepthsPatronsAreNeverAClearTarget)
+{
+    EXPECT_TRUE(DcNeverTargetRegistry::IsNeverTarget(230, 9545)) << "Grim Patron";
+    EXPECT_TRUE(DcNeverTargetRegistry::IsNeverTarget(230, 9547)) << "Guzzling Patron";
+    EXPECT_TRUE(DcNeverTargetRegistry::IsNeverTarget(230, 9554)) << "Hammered Patron";
+
+    // Every boss in the bar is still a target, Plugger included.
+    for (uint32 boss : { 9537u, 9543u, 9502u, 9499u })
+        EXPECT_FALSE(DcNeverTargetRegistry::IsNeverTarget(230, boss)) << "entry " << boss;
+    EXPECT_FALSE(DcNeverTargetRegistry::IsNeverTarget(229, 9545)) << "map-230 rows only";
+}

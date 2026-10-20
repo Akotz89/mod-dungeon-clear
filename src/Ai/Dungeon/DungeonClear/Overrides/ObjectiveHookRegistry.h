@@ -91,6 +91,12 @@ inline constexpr uint32 DC_HOOK_RAID_MUSTER = 40;
 // The Black Morass (map 269) — the wave driver. See BlackMorassDriver.cpp.
 void RegisterBlackMorassHooks(ObjectiveHookRegistry::HookTable& out);
 
+// Blackrock Depths (map 230) — the Upper City set pieces: Rocknot's ale run,
+// Hurley's kegs, the Tomb of the Seven and the Lyceum braziers (ids 47-53). They
+// live beside the events in BlackrockDepthsEvents.cpp, which owns the geometry
+// and the instance-data constants they read.
+void RegisterBlackrockDepthsHooks(ObjectiveHookRegistry::HookTable& out);
+
 // Stratholme (map 329) — ziggurat crystal repair (ids 44-46). Lives beside the
 // ziggurat events in StratholmeEvents.cpp, which owns the chamber geometry.
 void RegisterStratholmeHooks(ObjectiveHookRegistry::HookTable& out);

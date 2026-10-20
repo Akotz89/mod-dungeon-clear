@@ -8,18 +8,21 @@
 #include <cmath>
 
 #include "Ai/Dungeon/DungeonClear/Data/BossPullbackRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
 #include "Ai/Dungeon/DungeonClear/Overrides/BossRosterRegistry.h"
 
 // Pull-back bosses (BossPullbackRegistry) — the "this boss must be fought
 // somewhere else" table.
 //
-// THE TABLE IS EMPTY. Its one row (Ghaz'an) was retired in S1593 once the cause
-// was fixed upstream: he sat in the lake only because a headless party never
-// fired areatrigger 4302, the sole caller of his ACTION_MOVE_TO_PLATFORM. He
-// climbs onto meshed ground now and is fought like any other boss.
+// ONE ROW: Plugger Spazzring (9499, Blackrock Depths), dragged out past the Bar
+// Door because his death turns the Grim Guzzler's patrons hostile. The first
+// row (Ghaz'an) was retired in S1593 once the cause was fixed upstream: he sat
+// in the lake only because a headless party never fired areatrigger 4302, the
+// sole caller of his ACTION_MOVE_TO_PLATFORM. He climbs onto meshed ground now
+// and is fought like any other boss.
 //
-// So what these tests pin is (a) that the facility still behaves as an empty
-// table should, (b) the opt-in DEFAULTS a future row would inherit, and (c) that
+// So what these tests pin is (a) Plugger's row and the roster anchor that has
+// to match it, (b) the opt-in DEFAULTS a future row would inherit, and (c) that
 // Ghaz'an specifically is NOT pulled back and IS anchored on his platform. (c)
 // is the regression guard: re-adding the row would silently restore a 150yd
 // force-aggro and a teleport-summon on a boss that no longer needs either.
@@ -38,12 +41,40 @@ namespace
     constexpr float kPlatformY = -458.73f;
 }
 
-TEST(DungeonClearBossPullbackTest, TableIsEmpty)
+TEST(DungeonClearBossPullbackTest, PluggerIsFoughtPastTheBarDoor)
 {
-    // Not a placeholder: an empty table is the current design. If a row is ever
-    // added, this test is the prompt to say WHY in the same commit.
-    EXPECT_EQ(BossPullbackRegistry::Find(kUnderbog, kGhazan), nullptr);
-    EXPECT_FALSE(BossPullbackRegistry::HasRows(kUnderbog));
+    namespace B = DcBlackrockDepths;
+    BossPullback const* row = BossPullbackRegistry::Find(B::MAP_ID, B::NPC_PLUGGER);
+    ASSERT_NE(row, nullptr) << "Plugger dies among the patrons his death turns hostile";
+    EXPECT_FLOAT_EQ(row->campX, B::PLUGGER_CAMP_X);
+    EXPECT_FLOAT_EQ(row->campY, B::PLUGGER_CAMP_Y);
+    EXPECT_FLOAT_EQ(row->campZ, B::PLUGGER_CAMP_Z);
+    // He is neutral (faction 674): a proximity tag never lands, so the row has
+    // to force him. Nothing about him needs the teleport.
+    EXPECT_GT(row->forceAggroRange, 0.0f);
+    EXPECT_FALSE(row->summonWhenStuckBelow);
+    EXPECT_TRUE(BossPullbackRegistry::HasRows(B::MAP_ID));
+
+    // The roster anchor has to be the same camp, or boss navigation walks the
+    // party to his counter and the pull never arms (it gates on the anchor).
+    bool found = false;
+    for (BossRosterPatch const& patch : BossRosterRegistry::AllPatches())
+    {
+        if (patch.mapId != B::MAP_ID)
+            continue;
+        for (DungeonBossInfo const& b : patch.add)
+        {
+            if (b.entry != B::NPC_PLUGGER)
+                continue;
+            found = true;
+            EXPECT_EQ(b.kind, DungeonAnchorKind::Boss);
+            EXPECT_EQ(b.inheritCompletionFrom, B::NPC_PLUGGER) << "keeps his own kill-bit";
+            EXPECT_FLOAT_EQ(b.x, row->campX);
+            EXPECT_FLOAT_EQ(b.y, row->campY);
+            EXPECT_FLOAT_EQ(b.z, row->campZ);
+        }
+    }
+    EXPECT_TRUE(found) << "Plugger's roster row must be re-anchored on the camp";
 }
 
 TEST(DungeonClearBossPullbackTest, GhazanIsNoLongerPulledBack)
@@ -72,6 +103,7 @@ TEST(DungeonClearBossPullbackTest, HasRowsGatesByMap)
     EXPECT_FALSE(BossPullbackRegistry::HasRows(0));
     EXPECT_FALSE(BossPullbackRegistry::HasRows(545));   // The Slave Pens
     EXPECT_FALSE(BossPullbackRegistry::HasRows(585));   // Magisters' Terrace
+    EXPECT_FALSE(BossPullbackRegistry::HasRows(kUnderbog));
 }
 
 // Force-aggro is a PER-ENCOUNTER opt-in, not a property of being a pull-back

@@ -27,6 +27,8 @@
 #include "gtest/gtest.h"
 #include "NavHarness.h"
 
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
+
 #include "DetourNavMesh.h"
 
 #include <algorithm>
@@ -158,4 +160,150 @@ TEST(BlackrockDepthsRouteProbe, UpperCityRouteStaysOutOfTheRingOfLaw)
         }
         std::printf("\n");
     }
+}
+
+// The Upper City's event stand points (Data/Events/BlackrockDepthsEvents.cpp):
+// each must sit ON the navmesh (snapped within a couple of yards, on the right
+// floor) and be reachable from the one before it, in clear order. Doors are not
+// in the navmesh, so this proves geometry only — the events own the doors.
+TEST(BlackrockDepthsRouteProbe, UpperCityEventSpotsAreOnTheNavmesh)
+{
+    std::shared_ptr<dtNavMesh> mesh = LoadOrSkip();
+    if (!mesh)
+        GTEST_SKIP() << "DC_PROBE_MMAPS unset or map 230 mmaps missing";
+
+    namespace B = DcBlackrockDepths;
+    std::vector<Pt> const spots = {
+        { 846.8f, 16.3f, -53.6f, "Argelmach" },
+        { B::KEG_X, B::KEG_Y, B::KEG_Z, "Hurley's kegs" },
+        { 878.47f, -167.73f, -49.68f, "Ribbly" },
+        { B::ROCKNOT_HOLD_X, B::ROCKNOT_HOLD_Y, B::ROCKNOT_HOLD_Z, "Rocknot hold" },
+        { 868.97f, -224.98f, -43.72f, "Phalanx" },
+        { B::PLUGGER_CAMP_X, B::PLUGGER_CAMP_Y, B::PLUGGER_CAMP_Z, "Plugger camp" },
+    };
+
+    std::printf("Blackrock Depths — Upper City event spots\n");
+    for (std::size_t i = 0; i < spots.size(); ++i)
+    {
+        Pt const& want = spots[i];
+        G3D::Vector3 s;
+        bool const snapped = DcNavHarness::NearestPoint(mesh.get(), want.x, want.y, want.z, 4.0f, 6.0f, s);
+        float const off2d = snapped ? std::hypot(s.x - want.x, s.y - want.y) : -1.0f;
+        std::printf("  %-18s (%.1f, %.1f, %.2f) -> snapped=%d (%.2f, %.2f, %.2f) off2d=%.2f dz=%.2f\n",
+                    want.name, want.x, want.y, want.z, snapped, s.x, s.y, s.z, off2d,
+                    snapped ? s.z - want.z : 0.0f);
+        ASSERT_TRUE(snapped) << want.name << " is off the navmesh";
+        EXPECT_LT(off2d, 2.0f) << want.name;
+        EXPECT_LT(std::fabs(s.z - want.z), 2.5f) << want.name << " snapped to another floor";
+
+        if (i == 0)
+            continue;
+        Pt const from = SnapOrKeep(mesh.get(), spots[i - 1]);
+        DcNavHarness::RouteResult const r =
+            DcNavHarness::Route(mesh.get(), BRD, from.x, from.y, from.z, s.x, s.y, s.z);
+        std::printf("      from %-16s reachable=%d complete=%d len2d=%.1f %s\n", from.name, r.reachable,
+                    r.corridorComplete, r.routeLength2d, r.failureReason.c_str());
+        EXPECT_TRUE(r.reachable) << from.name << " -> " << want.name;
+    }
+}
+
+// Rocknot's hold must be OFF his escort (waypoint path 95030, from his spawn) —
+// a body-blocked npc_escortAI stalls the whole ale run — and off Phalanx, who
+// takes the Bar Door at the end of his own run (path 95020) and is fought there.
+TEST(DcBlackrockDepthsGeometry, RocknotHoldIsClearOfHisWalk)
+{
+    namespace B = DcBlackrockDepths;
+    struct P2 { float x, y; };
+    std::vector<P2> const walk = {
+        { 891.198f, -197.924f }, { 884.95f, -193.154f }, { 879.862f, -189.961f },
+        { 871.673f, -185.768f }, { 867.274f, -190.419f }, { 860.899f, -191.715f },
+        { 858.047f, -193.255f }, { 855.187f, -194.8f }, { 851.379f, -196.694f },
+    };
+    float best = std::numeric_limits<float>::max();
+    for (std::size_t i = 0; i + 1 < walk.size(); ++i)
+    {
+        // Distance from the hold to each leg of the walk.
+        float const ax = walk[i].x, ay = walk[i].y, bx = walk[i + 1].x, by = walk[i + 1].y;
+        float const dx = bx - ax, dy = by - ay;
+        float t = ((B::ROCKNOT_HOLD_X - ax) * dx + (B::ROCKNOT_HOLD_Y - ay) * dy) / (dx * dx + dy * dy);
+        t = std::clamp(t, 0.0f, 1.0f);
+        best = std::min(best, std::hypot(B::ROCKNOT_HOLD_X - (ax + t * dx), B::ROCKNOT_HOLD_Y - (ay + t * dy)));
+    }
+    // The hold radius plus a follower's trail behind the tank.
+    EXPECT_GT(best, B::ROCKNOT_HOLD_RADIUS + 6.0f) << "hold is " << best << "yd from Rocknot's walk";
+    EXPECT_GT(std::hypot(B::ROCKNOT_HOLD_X - B::PHALANX_DOOR_X, B::ROCKNOT_HOLD_Y - B::PHALANX_DOOR_Y), 12.0f)
+        << "hold crowds Phalanx in the doorway";
+}
+
+// Rocknot's ale is bought from Plugger, who patrols BEHIND his counter
+// (waypoint path 477030, delay 0 throughout), so the buy hook chases him and
+// trades the moment it is within interaction range. That only works if the
+// customer side of the counter has floor within reach of his walk: list the
+// reachable stand points within 4yd of it (from Rocknot's hold, on the bar's
+// upper floor).
+TEST(BlackrockDepthsRouteProbe, PluggerIsReachableAcrossHisCounter)
+{
+    std::shared_ptr<dtNavMesh> mesh = LoadOrSkip();
+    if (!mesh)
+        GTEST_SKIP() << "DC_PROBE_MMAPS unset or map 230 mmaps missing";
+
+    namespace B = DcBlackrockDepths;
+    struct P2 { float x, y; };
+    std::vector<P2> const patrol = {
+        { 888.236f, -177.809f }, { 886.791f, -175.185f }, { 886.586f, -174.894f },
+        { 878.133f, -179.536f }, { 886.578f, -174.768f }, { 888.454f, -177.985f },
+    };
+    constexpr float PLUGGER_Z = -42.96f;
+    auto distToPatrol = [&](float x, float y)
+    {
+        float best = std::numeric_limits<float>::max();
+        for (std::size_t i = 0; i + 1 < patrol.size(); ++i)
+        {
+            float const ax = patrol[i].x, ay = patrol[i].y;
+            float const dx = patrol[i + 1].x - ax, dy = patrol[i + 1].y - ay;
+            float const len2 = dx * dx + dy * dy;
+            float t = len2 > 0.0f ? ((x - ax) * dx + (y - ay) * dy) / len2 : 0.0f;
+            t = std::clamp(t, 0.0f, 1.0f);
+            best = std::min(best, std::hypot(x - (ax + t * dx), y - (ay + t * dy)));
+        }
+        return best;
+    };
+
+    Pt const hold = SnapOrKeep(mesh.get(), { B::ROCKNOT_HOLD_X, B::ROCKNOT_HOLD_Y, B::ROCKNOT_HOLD_Z, "hold" });
+    int found = 0;
+    float bestDist = std::numeric_limits<float>::max();
+    std::printf("Plugger's counter — reachable stand points within 4yd of his patrol\n");
+    for (float x = 872.0f; x <= 896.0f; x += 1.0f)
+        for (float y = -190.0f; y <= -168.0f; y += 1.0f)
+        {
+            float const d = distToPatrol(x, y);
+            if (d > 4.0f)
+                continue;
+            G3D::Vector3 s;
+            if (!DcNavHarness::NearestPoint(mesh.get(), x, y, PLUGGER_Z, 0.4f, 2.0f, s))
+                continue;
+            if (std::hypot(s.x - x, s.y - y) > 0.5f || std::fabs(s.z - PLUGGER_Z) > 1.5f)
+                continue;
+            DcNavHarness::RouteResult const r =
+                DcNavHarness::Route(mesh.get(), BRD, hold.x, hold.y, hold.z, s.x, s.y, s.z);
+            if (!r.reachable || !r.corridorComplete)
+                continue;
+            ++found;
+            bestDist = std::min(bestDist, d);
+            std::printf("  (%.1f, %.1f, %.2f) %.1fyd from his walk, route %.1fyd\n", s.x, s.y, s.z, d,
+                        r.routeLength2d);
+        }
+    EXPECT_GT(found, 0) << "no reachable floor within 4yd of Plugger's walk";
+    EXPECT_LT(bestDist, 3.0f);
+
+    // The stand point the buy hook waits on must be one of those.
+    G3D::Vector3 s;
+    ASSERT_TRUE(DcNavHarness::NearestPoint(mesh.get(), B::PLUGGER_STAND_X, B::PLUGGER_STAND_Y,
+                                           B::PLUGGER_STAND_Z, 0.4f, 2.0f, s));
+    EXPECT_LT(std::hypot(s.x - B::PLUGGER_STAND_X, s.y - B::PLUGGER_STAND_Y), 0.5f);
+    EXPECT_LT(std::fabs(s.z - B::PLUGGER_STAND_Z), 1.0f);
+    EXPECT_LT(distToPatrol(B::PLUGGER_STAND_X, B::PLUGGER_STAND_Y), 2.0f);
+    DcNavHarness::RouteResult const r =
+        DcNavHarness::Route(mesh.get(), BRD, hold.x, hold.y, hold.z, s.x, s.y, s.z);
+    EXPECT_TRUE(r.reachable && r.corridorComplete) << "Rocknot hold -> Plugger stand";
 }

@@ -8,6 +8,7 @@
 #include <algorithm>
 
 #include "Ai/Dungeon/DungeonClear/Data/DungeonEventRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
 #include "Ai/Dungeon/DungeonClear/Overrides/BossRosterRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Overrides/ObjectiveHookRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonEventExecutor.h"
@@ -621,6 +622,87 @@ TEST(DungeonEventRegistryTest, BlackrockShadowforgeLockEventShape)
     EXPECT_EQ(e->steps[2].wantState, 1u);     // GO_STATE_READY == shut
     EXPECT_GT(e->steps[2].radius, 113.0f)
         << "the doors are 113yd from the lever — the scan must reach them";
+}
+
+// Blackrock Depths Hurley's Kegs (map 230 event 3): walk between the kegs, then
+// hook 52 uses all three kegs and gates on Hurley having arrived. A WaitForSpawn would be
+// the wrong gate — Hurley exists (invisible, immune) from spawn — so the hook is
+// both the click and the gate.
+TEST(DungeonEventRegistryTest, BlackrockHurleyKegsEventShape)
+{
+    namespace B = DcBlackrockDepths;
+    DungeonEvent const* e = DungeonEventRegistry::Find(B::MAP_ID, B::EVENT_HURLEY_KEGS);
+    ASSERT_NE(e, nullptr);
+    EXPECT_EQ(e->activation, EventActivation::Anchored);
+    EXPECT_EQ(e->orderIndex, 11u);  // Hurley's own bit
+    EXPECT_TRUE(e->required);
+
+    ASSERT_EQ(e->steps.size(), 2u);
+    EXPECT_EQ(e->steps[0].kind, EventStepKind::MoveTo);
+    EXPECT_FLOAT_EQ(e->steps[0].x, B::KEG_X);
+    EXPECT_FLOAT_EQ(e->steps[0].y, B::KEG_Y);
+    EXPECT_EQ(e->steps[1].kind, EventStepKind::Custom);
+    EXPECT_EQ(e->steps[1].hookId, B::HOOK_WAKE_HURLEY);
+    EXPECT_GT(e->steps[1].timeoutMs, 30000u) << "covers Hurley's walk to the floor";
+    for (EventStep const& st : e->steps)
+        EXPECT_NE(st.kind, EventStepKind::WaitForSpawn)
+            << "Hurley is alive from spawn; a spawn gate would pass before any keg is used";
+}
+
+// Blackrock Depths Ribbly's Challenge (map 230 event 4): one gossip, menu 1970
+// option 0, whose SmartAI turns Ribbly and his cronies hostile on the speaker. A
+// dead Ribbly completes the objective rather than stalling it.
+TEST(DungeonEventRegistryTest, BlackrockRibblyChallengeEventShape)
+{
+    namespace B = DcBlackrockDepths;
+    DungeonEvent const* e = DungeonEventRegistry::Find(B::MAP_ID, B::EVENT_RIBBLY);
+    ASSERT_NE(e, nullptr);
+    EXPECT_EQ(e->activation, EventActivation::Anchored);
+    EXPECT_EQ(e->orderIndex, 12u);  // Ribbly's reordered slot
+    ASSERT_EQ(e->steps.size(), 1u);
+    EXPECT_EQ(e->steps[0].kind, EventStepKind::Gossip);
+    EXPECT_EQ(e->steps[0].creatureEntry, B::NPC_RIBBLY);
+    EXPECT_EQ(e->steps[0].gossipOption, 0);
+    EXPECT_TRUE(e->steps[0].skipIfMissing);
+}
+
+// Blackrock Depths Rocknot's Ale Run (map 230 event 5): buy the ale from Plugger
+// (hook 54), hand it to Rocknot (hook 47), back off his walk, latch the Bar Door
+// reaching state 2 and then Phalanx turning hostile at it (hook 55). NOT an
+// instance-data garrison: TYPE_BAR reads SPECIAL (4) for the whole escort, which
+// already satisfies a `>= DONE (3)` gate.
+TEST(DungeonEventRegistryTest, BlackrockRocknotAleRunEventShape)
+{
+    namespace B = DcBlackrockDepths;
+    DungeonEvent const* e = DungeonEventRegistry::Find(B::MAP_ID, B::EVENT_ROCKNOT);
+    ASSERT_NE(e, nullptr);
+    EXPECT_EQ(e->activation, EventActivation::Anchored);
+    EXPECT_EQ(e->orderIndex, 13u);  // Phalanx's reordered slot
+    EXPECT_TRUE(e->persistent) << "the buy and the hand-in walk the tank off the anchor";
+    EXPECT_TRUE(e->required);
+
+    ASSERT_EQ(e->steps.size(), 6u);
+    EXPECT_EQ(e->steps[0].kind, EventStepKind::MoveTo);
+    EXPECT_FLOAT_EQ(e->steps[0].x, B::ROCKNOT_HOLD_X);
+    EXPECT_FLOAT_EQ(e->steps[0].y, B::ROCKNOT_HOLD_Y);
+    EXPECT_EQ(e->steps[1].kind, EventStepKind::Custom);
+    EXPECT_EQ(e->steps[1].hookId, B::HOOK_BUY_ROCKNOT_ALE);
+    EXPECT_EQ(e->steps[2].kind, EventStepKind::Custom);
+    EXPECT_EQ(e->steps[2].hookId, B::HOOK_START_ROCKNOT_ALE_RUN);
+    EXPECT_EQ(e->steps[3].kind, EventStepKind::MoveTo);
+    EXPECT_FLOAT_EQ(e->steps[3].x, B::ROCKNOT_HOLD_X);
+    EXPECT_FLOAT_EQ(e->steps[3].y, B::ROCKNOT_HOLD_Y);
+    EXPECT_EQ(e->steps[4].kind, EventStepKind::WaitForGameObjectState);
+    EXPECT_EQ(e->steps[4].goEntry, B::GO_BAR_DOOR);
+    EXPECT_EQ(e->steps[4].wantState, 2u);  // GO_STATE_ACTIVE_ALTERNATIVE, as npc_rocknot sets it
+    EXPECT_GE(e->steps[4].timeoutMs, 60000u) << "the escort alone is ~40s";
+    EXPECT_EQ(e->steps[5].kind, EventStepKind::Custom);
+    EXPECT_EQ(e->steps[5].hookId, B::HOOK_PHALANX_AT_DOOR)
+        << "the door breaks 7s before Phalanx even starts his run to it";
+    EXPECT_GE(e->steps[5].timeoutMs, 22000u) << "7s cork delay + his 15s run cap";
+    for (EventStep const& st : e->steps)
+        EXPECT_NE(st.instanceDataId, static_cast<int32>(B::TYPE_BAR))
+            << "TYPE_BAR is SPECIAL (>= DONE) for the whole escort";
 }
 
 // Deadmines Defias Cannon: walk to the cannon, fire it (Custom hook 2 casts the

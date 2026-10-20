@@ -91,12 +91,18 @@ enum class DcThrottle : uint8
     ChessLog,            // the Karazhan chess conductor's DC_CHESS state line
     ChessGossip,         // a chess member's piece gossip (one per 3s)
     ChessSeatTeleport,   // a chess controller's hop to its sideline seat
+    BrdEventLog,         // the Blackrock Depths Upper City hooks' waiting lines
 
     // --- action floors (time only) -----------------------------------------
     UpHarpoonFire,       // floor between two Harpoon Launcher clicks (its own
                          // autoclose is 1000ms and GO_FLAG_IN_USE blocks a click
                          // until GameObject::Update clears it, so a faster cadence
                          // can only produce swallowed clicks and log noise)
+    BrdKegUse,           // floor between two Thunderbrew Lager Keg uses: all three
+                         // are needed to wake Hurley, one per tick-floor so each
+                         // keg's SmartAI chain lands before the next
+    BrdAleTurnIn,        // floor between two Rocknot's Ale hand-ins, so each lands
+                         // as its own drink and yell instead of three in one tick
 
     Count
 };

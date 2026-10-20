@@ -11,11 +11,29 @@ namespace
 {
     // ---- the table ------------------------------------------------------
     //
-    // CURRENTLY EMPTY. It has held exactly one row in its life — Ghaz'an
-    // (18105, The Underbog 546) — and that row was retired in S1593. The
-    // machinery is kept because the facility is general and the invariants are
-    // tested; adding a boss is still a single entry here plus a matching
+    // ONE ROW: Plugger Spazzring (9499, Blackrock Depths 230). Before him it held
+    // exactly one row in its life — Ghaz'an (18105, The Underbog 546) — retired
+    // in S1593; see below. Adding a boss is a single entry here plus a matching
     // BossRosterPatch anchor.
+    //
+    // WHY PLUGGER. It is not his ground that kills the party, it is his death:
+    // his ON_DEATH SmartAI (9499 rows 9-12) sets faction 14 on every Grim,
+    // Guzzling and Hammered Patron within 100yd, and they aggro by proximity.
+    // Fought at his counter he died with three patrons within 8yd and the way
+    // out running through two more groups at 1-3yd, and each patron that wakes
+    // brings its whole formation — tp-20261018-211235-1 ended the bar in a
+    // brawl with up to seventeen of them. That is his authentic script, so
+    // there is no upstream defect to fix instead. His anchor (PLUGGER_CAMP,
+    // DungeonEventTables.h) is past the Bar Door, out of every patron's aggro
+    // range.
+    //
+    // FORCE-AGGRO, because he cannot be tagged the ordinary way: he is faction
+    // 674, neutral, so the proximity tag never fires, and a tank with neither a
+    // trained opener nor a ranged weapon would hold in his bubble until the leg
+    // watchdog. His route is dry and on the navmesh, so the stand-off resolves
+    // to him and the walk-out is an ordinary walk-in. The force fires his own
+    // aggro rows (EngageWithTarget + AttackStart), and he chases into melee —
+    // his casts carry no combat-move flag — so he follows the tank out.
     //
     // WHY GHAZ'AN'S ROW WENT AWAY, so nobody re-adds it from the old reasoning:
     //
@@ -56,6 +74,7 @@ namespace
     {
         static std::vector<BossPullback> const rows = {
             // map  entry  anchor x  y  z  forceAggro  summonIfStuck
+            { 230, 9499, 871.0f, -235.0f, -43.27f, 40.0f, false },  // Blackrock Depths — Plugger Spazzring
         };
         return rows;
     }

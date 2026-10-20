@@ -311,6 +311,30 @@ namespace
         // after a fountain between soldier packs.
         { 650, 35614 },  // Trial of the Champion — Desecration Stalker (the Black Knight's ground hazard)
         { 650, 35311 },  // Trial of the Champion — Fountain of Light (the Priestess's summon)
+
+        // --- Blackrock Depths (230): the Grim Guzzler's patrons ---------------
+        //
+        // Class 2, staging around an encounter the party is LEAVING. Plugger
+        // Spazzring (9499) is the bar's last boss on purpose: his ON_DEATH SmartAI
+        // sets faction 14 on every Grim, Guzzling and Hammered Patron within
+        // 100yd — 68 of them, levels 48-52, 12 elite — and on Phalanx. They are
+        // aggressive but aggro only by proximity; nothing in the script sends
+        // them at the party. Rocknot's ale run has already opened the Bar Door
+        // behind Phalanx, and Plugger is dragged out through it to die past the
+        // door (BossPullbackRegistry), so the party is already outside when
+        // they turn and the next roster target (Ambassador Flamelash) leads on
+        // from there.
+        //
+        // What would go wrong without these rows is the clear itself: the moment
+        // Plugger dies the corridor scan and room pre-clear see 68 fresh hostiles
+        // in the room behind the party, and would walk back in from table to
+        // table pulling the whole bar. That is not progress — none of them is an
+        // encounter, and the dungeon is behind the door. Patrons that DO aggro on
+        // the way out are fought normally; these rows only stop the clear going
+        // looking for them.
+        { 230, 9545 },   // Blackrock Depths — Grim Patron     (hostile once Plugger dies)
+        { 230, 9547 },   // Blackrock Depths — Guzzling Patron (hostile once Plugger dies)
+        { 230, 9554 },   // Blackrock Depths — Hammered Patron (hostile once Plugger dies)
     };
 }
 

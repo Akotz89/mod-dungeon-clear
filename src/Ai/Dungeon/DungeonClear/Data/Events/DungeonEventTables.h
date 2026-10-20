@@ -82,6 +82,89 @@ namespace DcHellfireRamparts
     constexpr float FINAL_APPROACH_MIN_Z = 76.0f;
 }
 
+// Blackrock Depths (map 230) — the Upper City numbers BlackrockDepthsEvents.cpp's
+// events, hooks and roster patch share with the gtests (t/TestDungeonEvent,
+// t/TestBlackrockDepthsRouteProbe). The reasoning for each is in that file.
+namespace DcBlackrockDepths
+{
+    constexpr uint32 MAP_ID = 230;
+
+    // instance_blackrock_depths DataTypes / EncounterState, kept local so the
+    // module needn't pull the core BRD header.
+    constexpr uint32 TYPE_BAR = 3;
+    constexpr uint32 STATE_NOT_STARTED = 0;
+    constexpr uint32 STATE_IN_PROGRESS = 1;
+    constexpr uint32 STATE_DONE = 3;
+    constexpr uint32 STATE_SPECIAL = 4;
+
+    // Event ids (map-230 latch keys) and the roster objective sequence numbers
+    // (OBJ(n)) that carry them. Events 1/2 (Ring of Law, Shadowforge Lock) are
+    // older and keep their inline literals.
+    constexpr uint32 EVENT_HURLEY_KEGS = 3;
+    constexpr uint32 EVENT_RIBBLY = 4;
+    constexpr uint32 EVENT_ROCKNOT = 5;
+    constexpr uint32 OBJ_HURLEY_KEGS = 3;
+    constexpr uint32 OBJ_RIBBLY = 4;
+    constexpr uint32 OBJ_ROCKNOT = 5;
+
+    // ObjectiveHookRegistry ids (one flat space across every dungeon).
+    constexpr uint32 HOOK_START_ROCKNOT_ALE_RUN = 47;
+    constexpr uint32 HOOK_WAKE_HURLEY = 52;
+    constexpr uint32 HOOK_BUY_ROCKNOT_ALE = 54;
+    constexpr uint32 HOOK_PHALANX_AT_DOOR = 55;
+
+    constexpr uint32 NPC_HURLEY = 9537;
+    constexpr uint32 NPC_PHALANX = 9502;
+    constexpr uint32 NPC_ROCKNOT = 9503;
+    constexpr uint32 NPC_RIBBLY = 9543;
+    constexpr uint32 NPC_PLUGGER = 9499;
+    constexpr uint32 GO_THUNDERBREW_KEG = 164911;
+    constexpr uint32 GO_BAR_DOOR = 170571;
+    constexpr uint32 QUEST_ALE = 4295;   // Rocknot's "Dark Iron Ale" turn-in
+    constexpr uint32 ITEM_DARK_IRON_ALE_MUG = 11325;  // Plugger sells them, 4295 takes two
+    // Three turn-ins of two mugs start Rocknot's walk (BarAleCount == 3).
+    constexpr uint32 ALE_TURN_INS = 3;
+    constexpr uint32 ALE_MUGS_PER_TURN_IN = 2;
+
+    // Between the three Thunderbrew Lager Kegs, on the lower bar floor.
+    constexpr float KEG_X = 916.7f;
+    constexpr float KEG_Y = -150.2f;
+    constexpr float KEG_Z = -49.76f;
+
+    // Rocknot's hold: on the upper bar floor between his walk to the keg
+    // (script_waypoint 9503, y -186..-198) and the Bar Door / Phalanx (y -225..-229),
+    // off both. Probed in t/TestBlackrockDepthsRouteProbe.
+    constexpr float ROCKNOT_HOLD_X = 878.0f;
+    constexpr float ROCKNOT_HOLD_Y = -211.0f;
+    constexpr float ROCKNOT_HOLD_Z = -43.7f;
+    constexpr float ROCKNOT_HOLD_RADIUS = 6.0f;
+
+    // Where the ale is bought. Plugger patrols BEHIND his counter (path 477030,
+    // no delays, a ~10s loop) and the customer side only comes within trading
+    // range at the counter's west end, where he turns at (878.1,-179.5). Probed
+    // in t/TestBlackrockDepthsRouteProbe (PluggerIsReachableAcrossHisCounter).
+    constexpr float PLUGGER_STAND_X = 877.0f;
+    constexpr float PLUGGER_STAND_Y = -180.0f;
+    constexpr float PLUGGER_STAND_Z = -43.53f;
+
+    // Phalanx's guard spot in the Bar Door: the end of his wake-up run (path
+    // 95020), where npc_phalanx turns him hostile.
+    constexpr float PHALANX_DOOR_X = 867.295f;
+    constexpr float PHALANX_DOOR_Y = -222.645f;
+
+    // Where Plugger is fought (BossPullbackRegistry): 7.6yd out past the Bar
+    // Door on the upper floor, 59yd of navmesh from his counter. His death turns
+    // every patron within 100yd hostile; from here the nearest patron spawn is
+    // 19.4yd off (a Hammered Patron, level 48-52, so at most a 14yd aggro radius
+    // against a level-58 party) and the nearest Flamelash-side mob 25.5yd. Inside
+    // the bar, at his counter, three patrons stand within 8yd of him and the way
+    // out runs through two more groups at 1-3yd. Probed in
+    // t/TestBlackrockDepthsRouteProbe.
+    constexpr float PLUGGER_CAMP_X = 871.0f;
+    constexpr float PLUGGER_CAMP_Y = -235.0f;
+    constexpr float PLUGGER_CAMP_Z = -43.27f;
+}
+
 void RegisterHellfireRampartsEvents(std::vector<DungeonEvent>& out);
 void RegisterBloodFurnaceEvents(std::vector<DungeonEvent>& out);
 void RegisterSlavePensEvents(std::vector<DungeonEvent>& out);
