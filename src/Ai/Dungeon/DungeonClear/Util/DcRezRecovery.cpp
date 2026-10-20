@@ -250,6 +250,19 @@ namespace
                 run.rezPendingSinceMs = 0;
                 run.rezAnnounceMs = 0;
             }
+            // The NoRezzer floor's clocks belong to the episode that just ended,
+            // too. They are otherwise only cleared by a verdict OUTSIDE the
+            // no-rezzer branch, which a party with no living rez class never
+            // produces — so when a corpse is raised by anything other than the rez
+            // rung (a soulstone, a .revive, a human, another module's resurrect),
+            // noRezzerSinceMs stays stamped from that first death, and the NEXT
+            // death reads holdCapped at once and disables the run mid-fight,
+            // skipping the "finishing this fight first" hold.
+            if (mutate)
+            {
+                run.noRezzerSinceMs = 0;
+                run.noRezzerQuietSinceMs = 0;
+            }
             return plan;  // None / NoDeaths
         }
 
@@ -786,6 +799,11 @@ namespace DcRezRecovery
         if (plan.verdict.reason == DcRezDecision::Reason::BlockedWaiting)
             return "Can't resurrect " + plan.targetName +
                    " while the encounter is in progress.";
+        // No rezzer is elected on this hold, so rezzerName is empty (the panel
+        // read " is coming to resurrect X.").
+        if (plan.verdict.reason == DcRezDecision::Reason::NoRezzerInFight)
+            return "No one left can resurrect " + plan.targetName +
+                   " \xe2\x80\x94 finishing this fight first.";
         return plan.rezzerName + " is coming to resurrect " + plan.targetName + ".";
     }
 }
