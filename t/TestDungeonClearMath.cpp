@@ -2919,6 +2919,30 @@ TEST(DungeonClearMathTest, RepathOffLevelIsSpentOnce)
     EXPECT_FALSE(DungeonClearMath::ShouldRepathOffLevel(-14.2f, 5.0f, true));
 }
 
+// tr-20261018-101829-3: tank 30yd from Emperor Thaurissan, 5.1yd under his
+// throne, stock PathGenerator NOPATH to him, boss in plain view.
+TEST(DungeonClearMathTest, NoRouteToADaisBossFallsBackToSight)
+{
+    EXPECT_TRUE(DungeonClearMath::ProbeSaysSameFloor(false, false, false, 0.0f, 32.3f, true));
+}
+
+TEST(DungeonClearMathTest, NoRouteAndNoSightIsAnotherFloor)
+{
+    // A boss a storey away is behind the floor slab.
+    EXPECT_FALSE(DungeonClearMath::ProbeSaysSameFloor(false, false, false, 0.0f, 32.3f, false));
+}
+
+TEST(DungeonClearMathTest, ARouteStillDecidesByLengthWhateverTheSight)
+{
+    // Walkway over Rethilgore: in sight, but the stairs make it a long walk.
+    EXPECT_FALSE(DungeonClearMath::ProbeSaysSameFloor(true, true, true, 80.0f, 32.3f, true));
+    EXPECT_TRUE(DungeonClearMath::ProbeSaysSameFloor(true, true, true, 30.0f, 32.3f, false));
+    // INCOMPLETE is an answer ("not reachable from here"), not a fall-back.
+    EXPECT_FALSE(DungeonClearMath::ProbeSaysSameFloor(true, false, true, 20.0f, 32.3f, true));
+    // A short route that ends on the wrong level is not the boss's floor.
+    EXPECT_FALSE(DungeonClearMath::ProbeSaysSameFloor(true, true, false, 20.0f, 32.3f, true));
+}
+
 TEST(DungeonClearMathTest, RejoinGapGrowsWhileSinkingUnderTheRoutePoint)
 {
     // tr-20260927-101342-8: 2D deviation 3.2 -> 0.0yd while the tank walked the

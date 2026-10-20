@@ -2227,7 +2227,13 @@ bool DungeonClearAdvanceAction::Execute(Event /*event*/)
     // direct-pursuit give-up latch so a boss that wanders back out can be
     // re-pursued cleanly (the counters themselves live on appr and are consumed
     // by FillHopObs/DoHopDoneEscalation and DoPursue below).
-    if (engageDist < engageRange)
+    //
+    // Gated on atBoss, not raw 3D range: a tank inside the range but OFF the
+    // boss's floor is still approaching, and wiping the pursuit latch every tick
+    // there means a refused pursuit can never abdicate to the long path —
+    // tr-20261018-101829-3 sat at noClose=0/5 for 7 minutes, 30yd under
+    // Emperor Thaurissan's throne, against a 32yd room-aggro hand-off.
+    if (atBoss)
         appr.OnEnteredEngageRange();
 
     // Bundle the per-tick approach state for the extracted phase steps below.

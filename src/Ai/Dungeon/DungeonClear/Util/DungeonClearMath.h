@@ -1327,6 +1327,27 @@ namespace DungeonClearMath
         return !alreadySpent && std::fabs(dz) > levelTolerance;
     }
 
+    // Verdict of a stock path probe to a VERTICALLY SEPARATED boss: is the bot in
+    // the boss's room / on its floor? `routed` = the probe returned NORMAL or
+    // INCOMPLETE (stock had an opinion), `normal` = NORMAL, `endOnLevel` = the
+    // route ends on the boss's level, `los` = the bot can see the boss.
+    //
+    // A route that exists answers the question by its length, as before. NO route
+    // at all (PATHFIND_NOPATH) answers nothing: the probe cannot tell "a floor up"
+    // from "on a dais the mesh doesn't join", so the question falls back to sight.
+    // A boss a storey away is behind a floor slab; one on a throne is in plain view.
+    // Treating NOPATH as "a floor away" parked tr-20261018-101829-3 5.1yd under
+    // Emperor Thaurissan's throne for 7 minutes: not at the boss, not in his room
+    // (so no room clear and no pre-clear hold), and Advance pursued a destination
+    // stock refused every tick.
+    inline bool ProbeSaysSameFloor(bool routed, bool normal, bool endOnLevel,
+                                   float pathLength, float range, bool los)
+    {
+        if (!routed)
+            return los;
+        return normal && endOnLevel && pathLength <= range;
+    }
+
     struct RejoinProgressVerdict
     {
         bool  progressed = false;  // the gap set a new best: re-entry is working

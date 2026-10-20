@@ -981,16 +981,17 @@ namespace
         // line proximity is then a lie — require the NAVIGATIONAL distance to be
         // within range AND to end on the boss's level, so a balcony/overhead boss
         // defers the handoff and Advance keeps walking the route to the right floor.
+        // No stock route at all (a throne the mesh doesn't join) says nothing
+        // about floors, so it falls back to sight — see ProbeSaysSameFloor.
         PathGenerator gen(bot);
         gen.CalculatePath(bx, by, bz, /*forceDest*/ false);
-        if (gen.GetPathType() != PATHFIND_NORMAL)
-            return false;
+        PathType const type = gen.GetPathType();
         Movement::PointsArray const& path = gen.GetPath();
-        if (path.empty())
-            return false;
-        if (std::fabs(path.back().z - bz) > DC_Z_LEVEL_TOLERANCE)
-            return false;
-        return gen.getPathLength() <= range;
+        return DungeonClearMath::ProbeSaysSameFloor(
+            (type & (PATHFIND_NORMAL | PATHFIND_INCOMPLETE)) != 0,
+            type == PATHFIND_NORMAL,
+            !path.empty() && std::fabs(path.back().z - bz) <= DC_Z_LEVEL_TOLERANCE,
+            gen.getPathLength(), range, bot->IsWithinLOSInMap(live));
     }
 }
 
@@ -1086,12 +1087,16 @@ bool DcEngageGeometry::TankReachedRoomByPath(Player* bot, AiObjectContext* ctx,
     // detour by foot. Only a PATHFIND_NORMAL route whose LENGTH is within the
     // window means the tank is genuinely in the room and may begin clearing. A
     // far tank yields an INCOMPLETE route (the boss is past the node budget) or an
-    // over-window length — both correctly read as "not in the room yet".
+    // over-window length — both correctly read as "not in the room yet". NO
+    // route at all falls back to sight (ProbeSaysSameFloor): a chamber one wall
+    // over is out of view, a boss on a dais the mesh doesn't join is not.
     PathGenerator gen(bot);
     gen.CalculatePath(bx, by, bz, /*forceDest*/ false);
-    if (gen.GetPathType() != PATHFIND_NORMAL)
-        return false;
-    return gen.getPathLength() <= window;
+    PathType const type = gen.GetPathType();
+    return DungeonClearMath::ProbeSaysSameFloor(
+        (type & (PATHFIND_NORMAL | PATHFIND_INCOMPLETE)) != 0,
+        type == PATHFIND_NORMAL, /*endOnLevel*/ true,
+        gen.getPathLength(), window, live && bot->IsWithinLOSInMap(live));
 }
 
 bool DcEngageGeometry::IsDisplayedDead(Unit const* u)
