@@ -10,10 +10,10 @@
 #include <unordered_map>
 
 // Maraudon (map 349) has no scripted events — its clear-data is the wing
-// LABELS (isolated == false: display only, not a filter) plus one roster
-// removal (Rotgrip, who sits in open water). This file is Maraudon's
-// definition unit so that data lives with its dungeon like every other. The TU
-// stays linked because DungeonWingRegistry's aggregator calls
+// layout (three dungeon-finder wings plus the whole dungeon, chosen per run)
+// and one roster removal (Rotgrip, who sits in open water). This file is
+// Maraudon's definition unit so that data lives with its dungeon like every
+// other. The TU stays linked because DungeonWingRegistry's aggregator calls
 // RegisterMaraudonWings explicitly (and BossRosterRegistry's calls
 // RegisterMaraudonRoster).
 
@@ -21,31 +21,41 @@
 void RegisterMaraudonWings(std::unordered_map<uint32, DungeonWingLayout>& store)
 {
     // --- Maraudon (map 349) --------------------------------------
-    // Three named regions — Orange (Foulspore Cavern), Purple (Wicked
-    // Grotto) and the inner Pristine Waters (Earth Song Falls) — but
-    // UNLIKE Dire Maul they share one connected interior: orange and
-    // purple converge at the Celebras seal, which opens into the inner
-    // waters, and the Earth Song Falls surface portal drops straight
-    // into that same inner area. So every boss is reachable from any
-    // entrance.
+    // Three regions — Orange (Foulspore Cavern), Purple (Wicked Grotto) and
+    // the inner Pristine Waters (Earth Song Falls) — that, UNLIKE Dire Maul,
+    // share one connected interior: orange and purple converge at the
+    // Celebras seal, which opens into the inner waters. Every boss is
+    // reachable from any entrance.
     //
-    // isolated == false: this is a LABEL only. Do NOT filter — all
-    // eight bosses stay in the clear list; the wing name is surfaced in
-    // status/UI so the player can see which region each boss sits in.
+    // The 3.3 dungeon finder still queues each region as its own dungeon,
+    // with its own entrance: LFG 26 Orange Crystals (ends on Razorlash), 272
+    // Purple Crystals (Vyletongue) and 273 Pristine Waters (Princess
+    // Theradras), whose entrance drops the party in the inner waters. A
+    // whole-map list there starts at Noxxion (bit 0) and walks the party back
+    // out through the entire dungeon, so the wing is chosen per RUN
+    // (WingSelect::Explicit, see DcRunWing): the queue-fill latches the LFG
+    // dungeon's wing, `dc on <wing>` / a test row picks one by hand.
     //
-    // Entries are the kill-creature credit-entries from
-    // instance_encounters (what BossSpawnIndex emits). Celebras the
-    // Cursed sits at the purple-side seal he unlocks, so he is grouped
-    // with Purple.
-    store[349] = {false, {
+    // With no choice made the run clears the WHOLE dungeon — the last wing,
+    // "maraudon", lists all eight bosses and is the default — so a bare `dc
+    // on` behaves as it always has. It sits last so WingOf/WingName still
+    // label each boss with its region. There are no wing regions to fall back
+    // on (the interior is connected), so the fallback is always "maraudon".
+    //
+    // Entries are the kill-creature credit-entries from instance_encounters
+    // (what BossSpawnIndex emits). Celebras the Cursed sits at the purple-side
+    // seal he unlocks, so he is grouped with Purple. Encounter bits from
+    // DungeonEncounter.dbc (map 349, bits 0-7, entries 422-429): Noxxion,
+    // Razorlash, Vyletongue, Celebras, Landslide, Gizlock, Rotgrip, Theradras.
+    store[349] = {true, {
         {"Maraudon (Orange)", {
             13282,  // Noxxion
             12258,  // Razorlash
-        }},
+        }, "mara-orange", /*lfgDungeonId*/ 26, /*terminalBossEntry*/ 0, /*encounterMask*/ 0x03u},
         {"Maraudon (Purple)", {
             12236,  // Lord Vyletongue
             12225,  // Celebras the Cursed
-        }},
+        }, "mara-purple", /*lfgDungeonId*/ 272, /*terminalBossEntry*/ 0, /*encounterMask*/ 0x0Cu},
         {"Maraudon (Pristine Waters)", {
             13601,  // Tinkerer Gizlock
             12203,  // Landslide
@@ -53,8 +63,18 @@ void RegisterMaraudonWings(std::unordered_map<uint32, DungeonWingLayout>& store)
                     // below); the label is kept so anything that resolves his
                     // entry to a region still names the right one.
             12201,  // Princess Theradras
-        }},
-    }};
+        }, "mara-pw", /*lfgDungeonId*/ 273, /*terminalBossEntry*/ 12201, /*encounterMask*/ 0xF0u},
+        {"Maraudon", {
+            13282,  // Noxxion
+            12258,  // Razorlash
+            12236,  // Lord Vyletongue
+            12225,  // Celebras the Cursed
+            13601,  // Tinkerer Gizlock
+            12203,  // Landslide
+            13596,  // Rotgrip
+            12201,  // Princess Theradras
+        }, "maraudon"},
+    }, WingSelect::Explicit, /*defaultWing*/ "maraudon"};
 }
 
 // --- roster patch: drop Rotgrip ------------------------------------------

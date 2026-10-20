@@ -134,9 +134,50 @@ TEST(DcRunWingTest, DireMaulAndScarletMonasteryStayProximity)
         EXPECT_TRUE(layout->isolated) << map;
         EXPECT_EQ(layout->select, WingSelect::Proximity) << map;
     }
-    // Maraudon stays a label-only layout.
-    ASSERT_NE(DungeonWingRegistry::Get(349), nullptr);
-    EXPECT_FALSE(DungeonWingRegistry::Get(349)->isolated);
+}
+
+TEST(DcRunWingTest, MaraudonLfgWingsAndWholeDungeonDefault)
+{
+    // The dungeon finder queues Maraudon's three wings separately; a Pristine
+    // Waters group lands in the inner waters, so its run must start at Landslide
+    // rather than walk back out to Noxxion (bit 0).
+    constexpr uint32 MARA = 349;
+    DungeonWingLayout const* layout = DungeonWingRegistry::Get(MARA);
+    ASSERT_NE(layout, nullptr);
+    EXPECT_TRUE(layout->isolated);
+    EXPECT_EQ(layout->select, WingSelect::Explicit);
+
+    ASSERT_NE(DungeonWingRegistry::WingForLfgDungeon(MARA, 26), nullptr);
+    EXPECT_EQ(DungeonWingRegistry::WingForLfgDungeon(MARA, 26)->token, "mara-orange");
+    ASSERT_NE(DungeonWingRegistry::WingForLfgDungeon(MARA, 272), nullptr);
+    EXPECT_EQ(DungeonWingRegistry::WingForLfgDungeon(MARA, 272)->token, "mara-purple");
+    DungeonWing const* pw = DungeonWingRegistry::WingForLfgDungeon(MARA, 273);
+    ASSERT_NE(pw, nullptr);
+    EXPECT_EQ(pw->token, "mara-pw");
+
+    // The roster after the Rotgrip patch, in DBC-bit order.
+    std::vector<DungeonBossInfo> const roster = {
+        Boss(13282, 0, 0, 0, 0, MARA), Boss(12258, 1, 0, 0, 0, MARA),
+        Boss(12236, 2, 0, 0, 0, MARA), Boss(12225, 3, 0, 0, 0, MARA),
+        Boss(12203, 4, 0, 0, 0, MARA), Boss(13601, 5, 0, 0, 0, MARA),
+        Boss(12201, 7, 0, 0, 0, MARA),
+    };
+    std::vector<DungeonBossInfo> const pwList = DcRunWing::FilterToWing(roster, *pw);
+    ASSERT_EQ(pwList.size(), 3u);
+    EXPECT_EQ(pwList[0].entry, 12203u);   // Landslide first
+    EXPECT_EQ(pwList[1].entry, 13601u);   // Tinkerer Gizlock
+    EXPECT_EQ(pwList[2].entry, 12201u);   // Princess Theradras
+
+    // No choice made: the default wing is the whole dungeon, every boss kept.
+    EXPECT_EQ(DcRunWing::ResolveFallback(*layout, nullptr), "maraudon");
+    DungeonWing const* whole = DungeonWingRegistry::FindWing(*layout, "maraudon");
+    ASSERT_NE(whole, nullptr);
+    EXPECT_EQ(DcRunWing::FilterToWing(roster, *whole).size(), roster.size());
+
+    // Status labels still name each boss's region, not the whole-dungeon wing.
+    EXPECT_EQ(DungeonWingRegistry::WingOf(MARA, 12203)->token, "mara-pw");
+    EXPECT_EQ(DungeonWingRegistry::WingOf(MARA, 13282)->token, "mara-orange");
+    EXPECT_EQ(DungeonWingRegistry::WingOf(MARA, 12225)->token, "mara-purple");
 }
 
 TEST(DcRunWingTest, EveryIsolatedWingTokenHasACatalogueRowOnItsMap)
@@ -144,7 +185,7 @@ TEST(DcRunWingTest, EveryIsolatedWingTokenHasACatalogueRowOnItsMap)
     // Rez recovery regroups a wiped party at the row whose token is the run's
     // wing token, and the test harness picks the run wing by the row's token —
     // so the two vocabularies must be one.
-    for (uint32 map : { 229u, 230u, 429u, 189u })
+    for (uint32 map : { 229u, 230u, 349u, 429u, 189u })
     {
         DungeonWingLayout const* layout = DungeonWingRegistry::Get(map);
         ASSERT_NE(layout, nullptr);

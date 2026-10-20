@@ -56,7 +56,13 @@ namespace DcTestDungeonRegistry
             { "rfd",             "Razorfen Downs",                129,  2592.55f,  1107.50f,   51.29f, 4.740f, 40, "" },
             { "uldaman",         "Uldaman",                        70,  -226.80f,    49.09f,  -46.03f, 1.390f, 44, "" },
             { "zf",              "Zul'Farrak",                    209,  1213.52f,   841.59f,    8.93f, 6.090f, 46, "" },
+            // Maraudon: the whole dungeon, then its three dungeon-finder wings at
+            // their lfg_dungeon_template entrances (see MaraudonEvents). The row's
+            // token IS the run wing; `maraudon` clears all of it.
             { "maraudon",        "Maraudon",                      349,  1019.69f,  -458.31f,  -43.43f, 0.310f, 48, "" },
+            { "mara-orange",     "Maraudon: Orange Crystals",     349,  1019.69f,  -458.31f,  -43.43f, 0.310f, 46, "Orange" },
+            { "mara-purple",     "Maraudon: Purple Crystals",     349,   752.91f,  -616.53f,  -33.11f, 1.370f, 46, "Purple" },
+            { "mara-pw",         "Maraudon: Pristine Waters",     349,   495.70f,    17.34f,  -96.31f, 3.119f, 48, "Pristine Waters" },
             { "st",              "The Temple of Atal'Hakkar",     109,  -319.24f,    99.90f, -131.85f, 3.190f, 52, "" },
             // Blackrock Depths is two dungeons on one map (see BlackrockDepthsEvents):
             // the Detention Block (Gerstahn -> Bael'Gar) and the Upper City

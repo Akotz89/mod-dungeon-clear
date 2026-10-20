@@ -623,7 +623,7 @@ TEST(DungeonEventIntegrityTest, IsolatedWingObjectivesAppearInExactlyOneWing)
     {
         DungeonWingLayout const* layout = DungeonWingRegistry::Get(patch.mapId);
         if (!layout || !layout->isolated)
-            continue;  // single-wing, or label-only (Maraudon) — no filter applied
+            continue;  // single-wing, or label-only — no filter applied
         for (DungeonBossInfo const& e : patch.add)
         {
             if (e.kind != DungeonAnchorKind::Objective)

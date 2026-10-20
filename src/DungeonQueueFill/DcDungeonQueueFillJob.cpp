@@ -1158,9 +1158,10 @@ void DcDungeonQueueFillJob::TickFormed()
                 break;
 
             DcStrategyGate::Reconcile(tank);
-            // A map whose wing is chosen per run (Blackrock Spire/Depths) takes it
-            // from the dungeon the group was actually formed for: LFG 32 is LBRS,
-            // 44 UBRS, 30 the BRD Detention Block, 276 the BRD Upper City.
+            // A map whose wing is chosen per run (Blackrock Spire/Depths,
+            // Maraudon) takes it from the dungeon the group was actually formed
+            // for: LFG 32 is LBRS, 44 UBRS, 30 the BRD Detention Block, 276 the
+            // BRD Upper City, 26/272/273 Maraudon's Orange/Purple/Pristine Waters.
             // Latched before `dc on` so the run clears that wing.
             uint32 const lfgDungeon = sLFGMgr->GetDungeon(_formedGroupGuid);
             if (DungeonWing const* wing =

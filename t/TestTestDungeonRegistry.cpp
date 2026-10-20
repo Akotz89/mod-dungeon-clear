@@ -232,8 +232,16 @@ TEST(DcTestDungeonRegistryTest, WingSplitMapsHaveWingTokens)
         }
     EXPECT_EQ(brsRows, 2);
 
-    // Maraudon's wings interconnect — one unlabelled row, findable by mapId.
-    EXPECT_NE(Find("349"), nullptr);
+    // Maraudon: the unlabelled whole-dungeon row plus its three dungeon-finder
+    // wings — so, like the other split maps, the bare mapId is ambiguous.
+    ASSERT_NE(Find("maraudon"), nullptr);
+    EXPECT_STREQ(Find("maraudon")->wing, "");
+    EXPECT_EQ(Find("349"), nullptr);
+    int maraRows = 0;
+    for (Row const& row : All())
+        if (row.mapId == 349 && *row.wing)
+            ++maraRows;
+    EXPECT_EQ(maraRows, 3);
 }
 
 TEST(DcTestDungeonRegistryTest, UnknownLookupsReturnNull)

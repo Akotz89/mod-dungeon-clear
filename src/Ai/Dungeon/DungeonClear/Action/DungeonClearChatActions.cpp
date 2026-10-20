@@ -833,8 +833,8 @@ bool DcBossesAction::Execute(Event event)
         else
             statusStr = "alive";  // exists in the instance, grid not yet loaded
 
-        // Wing label for split maps (empty for single-wing dungeons). On
-        // connected maps like Maraudon this is the only place the wing surfaces
+        // Wing label for split maps (empty for single-wing dungeons). On a
+        // whole-dungeon Maraudon run this is the only place the wing surfaces
         // — the boss list still holds every boss, it's just annotated by region.
         std::string const wing = DungeonWingRegistry::WingName(bot->GetMapId(), info.entry);
         auto const annIt = eventAnnotation.find(info.entry);

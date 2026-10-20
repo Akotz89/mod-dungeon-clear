@@ -159,7 +159,7 @@ namespace
         if (!layout || layout->wings.empty() || bosses.empty())
             return bosses;
 
-        // Connected-wing maps (Maraudon) are not split for filtering: every
+        // Connected-wing (label-only) maps are not split for filtering: every
         // wing is reachable from any entrance, so all bosses must stay in the
         // list. The wing data is a display label only — never filter, or the
         // bot would clear one region and read the whole dungeon as done.

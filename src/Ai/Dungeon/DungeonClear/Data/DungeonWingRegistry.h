@@ -28,12 +28,12 @@
 //     by proximity, since the wings sit far apart in world space). Bosses in
 //     other wings can never be reached and would otherwise wedge the clear.
 //
-//   isolated == false (Maraudon): the "wings" share one connected interior —
-//     orange, purple and the inner Pristine Waters all link up, so every boss
+//   isolated == false: the "wings" share one connected interior, so every boss
 //     stays reachable from any entrance. Here the wing data is NOT a filter; it
 //     is a display/label only. All bosses remain in the list and clearable, and
-//     the wing name is just surfaced in status/UI. Filtering here would make the
-//     bot clear one wing and falsely read the dungeon as done.
+//     the wing name is just surfaced in status/UI. (Maraudon is connected too,
+//     but the dungeon finder queues its wings separately, so it is an Explicit
+//     layout whose default wing lists every boss — see MaraudonEvents.cpp.)
 //
 // HOW an isolated map's wing is chosen is the layout's `select`:
 //
@@ -41,7 +41,7 @@
 //     the bot. Right when the wings sit hundreds of yards apart and each has its
 //     own portal — the bot always stands in the wing it is clearing.
 //
-//   Explicit (Blackrock Spire): the wing is a per-RUN choice, latched on the run
+//   Explicit (Blackrock Spire/Depths, Maraudon): the wing is a per-RUN choice, latched on the run
 //     owner for the instance (DcRunWing). Needed when the wings share a portal
 //     and are stacked: at the BRS portal the nearest bosses are UBRS's (Emberseer
 //     87yd, Drakkisath 96yd) though the party is about to clear LBRS, so

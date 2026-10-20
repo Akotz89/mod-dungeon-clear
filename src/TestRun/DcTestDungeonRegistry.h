@@ -16,10 +16,10 @@
 // row per *enterable unit*. Split-wing maps whose wings are physically
 // isolated (Dire Maul, Scarlet Monastery, Blackrock Spire, Blackrock Depths) get
 // one row per wing, so each wing has its own token and entrance. On DM/SM the wing
-// a run covers is decided by where the party stands; on Blackrock Spire and
-// Blackrock Depths (one shared portal) the row's token IS the run wing
-// (DungeonWing::token, latched by the harness).
-// Maraudon's wings interconnect, so it stays one row.
+// a run covers is decided by where the party stands; on Blackrock Spire,
+// Blackrock Depths and Maraudon the row's token IS the run wing
+// (DungeonWing::token, latched by the harness). Maraudon also keeps its
+// whole-dungeon row, `maraudon`, whose wing lists every boss.
 //
 // Entrance coordinates are the world-DB areatrigger_teleport targets (the
 // point just inside the instance portal) — safely on the navmesh, where a
