@@ -83,6 +83,15 @@ namespace
           /*detourReachable*/ true, /*bossSideLastRadius*/ 36.0f },
         { 429, 14354,  50.0f, {} }, // Dire Maul East — Pusillin
 
+        // Upper Blackrock Spire (229) — General Drakkisath. NOT a script radius:
+        // his own engage only DoZoneInCombats his two Chromatic Elite Guards (his
+        // formation, fought with him). The room around him is the problem — 14
+        // Blackhand / Rage Talon mobs stand within 57yd of him at the north pair,
+        // the south archway the party walks in by, and the western group, and a
+        // boss fight among them pulls them in. 60yd is the measured gap: the next
+        // spawn out is 71.5yd off, in the corridors. Single level (z 111).
+        { 229, 10363,  60.0f, {} }, // Upper Blackrock Spire — General Drakkisath
+
         // Deadmines (36) — Gilnid, the goblin foundry.
         //
         // THE RADIUS IS NOT READ FROM A SCRIPT HERE, because there is no script to

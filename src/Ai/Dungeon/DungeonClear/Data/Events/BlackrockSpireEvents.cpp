@@ -627,9 +627,16 @@ void RegisterBlackrockSpireRoster(std::vector<BossRosterPatch>& t)
     // Solakar Flamewreath (10264, bit 10) has no static spawn, so BossSpawnIndex
     // never lists him and there is no row to mark skipByDesign: he stays out of
     // the run by not being in it. The ubrs wing still names him, for credit.
+    //
+    // The Beast is re-anchored on his pull-back camp (keeping kill-bit 12), the
+    // BRD Plugger shape: boss-nav walks the party there instead of to his live,
+    // patrolling position, and BossPullbackRegistry has the tank fight him on it.
     BossRosterPatch p;
     p.mapId = MAP_ID;
+    p.remove = { NPC_THE_BEAST };
     p.add = {
+        MakeBoss(NPC_THE_BEAST, MAP_ID, "The Beast", BEAST_CAMP_X, BEAST_CAMP_Y, BEAST_CAMP_Z,
+                 /*completionFrom*/ NPC_THE_BEAST),
         MakeObjective(OBJ(OBJ_DRAGONSPINE_DOOR), /*encounterIndex*/ 9, MAP_ID, "Dragonspine Door",
                       DOOR_STAND_X, DOOR_STAND_Y, DOOR_STAND_Z, /*arriveRadius*/ 6.0f,
                       /*gateEntry*/ 0, /*hook*/ 0, EVENT_DRAGONSPINE_DOOR),

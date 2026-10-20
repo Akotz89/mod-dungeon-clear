@@ -635,6 +635,33 @@ namespace DcBlackrockSpire
     // Floor between two forged AT 2026 fires while Rend reads NOT_STARTED.
     constexpr uint32 STADIUM_START_FLOOR_MS = 5000;
 
+    // --- The Beast and General Drakkisath (no events) ---------------------
+    constexpr uint32 NPC_THE_BEAST = 10430;
+    constexpr uint32 NPC_GENERAL_DRAKKISATH = 10363;
+    constexpr uint32 GO_DRAKKISATH_DOOR_1 = 175946;
+    constexpr uint32 GO_DRAKKISATH_DOOR_2 = 175947;
+
+    // Where The Beast is fought (BossPullbackRegistry), and his roster anchor.
+    // boss_the_beast evades when his own Y goes above -505 in combat, and the
+    // corridor on to Drakkisath runs north from (29,-503): a fight at its mouth,
+    // or a Berserker Charge onto a bot standing in it, resets him at full health.
+    // The camp is on the Furnace floor (poly z 111.0), 35yd south of that line,
+    // inside AT 2066 (75.26,-547.68 r30), so arriving starts his patrol and he
+    // comes to the party; the nearest hostile spawn is 51yd off (the Rage Talon
+    // pack at the corridor mouth). Probed in t/TestBlackrockSpireRouteProbe.
+    constexpr float BEAST_CAMP_X = 60.0f;
+    constexpr float BEAST_CAMP_Y = -540.0f;
+    constexpr float BEAST_CAMP_Z = 111.0f;
+    constexpr float BEAST_EVADE_Y = -505.0f;
+
+    // Drakkisath's room pre-clear (RoomAggroRegistry): every pack around his
+    // room — the north pair and its neighbours (21-34yd), the south archway
+    // (42-48yd), the western group (47-57yd) — and nothing past the 57->72yd gap
+    // to the corridor packs.
+    constexpr float DRAKKISATH_X = 36.45f;
+    constexpr float DRAKKISATH_Y = -285.99f;
+    constexpr float DRAKKISATH_ROOM_RADIUS = 60.0f;
+
     inline bool InBox(Box const& b, float x, float y, float z)
     {
         return x >= b.minX && x <= b.maxX && y >= b.minY && y <= b.maxY && z >= b.minZ && z <= b.maxZ;

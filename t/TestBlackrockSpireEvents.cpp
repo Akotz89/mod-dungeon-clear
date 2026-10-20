@@ -13,6 +13,7 @@
 
 #include "BlackrockSpireRookeryEggs.h"
 
+#include "Ai/Dungeon/DungeonClear/Data/BossPullbackRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DcEventDoorRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DcHazardRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DcNavPenaltyRegistry.h"
@@ -20,6 +21,7 @@
 #include "Ai/Dungeon/DungeonClear/Data/DungeonClearRouteRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonEventRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonWingRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/RoomAggroRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
 #include "Ai/Dungeon/DungeonClear/Overrides/BossRosterRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Overrides/ObjectiveHookRegistry.h"
@@ -528,6 +530,79 @@ TEST(DcBlackrockSpireTest, NefariusIsNeverTargetedButRendIs)
     EXPECT_FALSE(DcNeverTargetRegistry::IsNeverTarget(B::MAP_ID, B::NPC_WARCHIEF_REND_BLACKHAND));
 }
 
+// ---- The Beast and General Drakkisath --------------------------------------------
+
+// The Beast is fought on his camp, and his roster row is anchored on it (or boss
+// navigation walks the party to his live, patrolling position and the pull never
+// arms).
+TEST(DcBlackrockSpireTest, TheBeastIsFoughtOnHisCampSouthOfHisEvadeLine)
+{
+    BossPullback const* row = BossPullbackRegistry::Find(B::MAP_ID, B::NPC_THE_BEAST);
+    ASSERT_NE(row, nullptr);
+    EXPECT_FLOAT_EQ(row->campX, B::BEAST_CAMP_X);
+    EXPECT_FLOAT_EQ(row->campY, B::BEAST_CAMP_Y);
+    EXPECT_FLOAT_EQ(row->campZ, B::BEAST_CAMP_Z);
+    EXPECT_FLOAT_EQ(row->forceAggroRange, 0.0f) << "he is hostile; tag him the normal way";
+    EXPECT_FALSE(row->summonWhenStuckBelow);
+    EXPECT_LE(row->campY, B::BEAST_EVADE_Y - 30.0f) << "he evades above y -505";
+    // Inside AT 2066 (75.26,-547.68 r30): arriving starts his patrol.
+    EXPECT_LT(std::hypot(row->campX - 75.26f, row->campY - -547.68f), 30.0f);
+
+    bool found = false;
+    for (DungeonBossInfo const& b : BrsRoster())
+    {
+        if (b.entry != B::NPC_THE_BEAST)
+            continue;
+        found = true;
+        EXPECT_EQ(b.kind, DungeonAnchorKind::Boss);
+        EXPECT_EQ(b.encounterIndex, 12u) << "keeps his kill-bit";
+        EXPECT_FLOAT_EQ(b.x, row->campX);
+        EXPECT_FLOAT_EQ(b.y, row->campY);
+    }
+    EXPECT_TRUE(found);
+}
+
+// Drakkisath's room pre-clear takes every pack around his room and stops at the
+// corridors. Spawns from the base world SQL.
+TEST(DcBlackrockSpireTest, DrakkisathRoomClearStopsAtTheCorridors)
+{
+    RoomAggroBoss const* row = RoomAggroRegistry::Find(B::MAP_ID, B::NPC_GENERAL_DRAKKISATH);
+    ASSERT_NE(row, nullptr);
+    EXPECT_FLOAT_EQ(row->radius, B::DRAKKISATH_ROOM_RADIUS);
+    EXPECT_TRUE(row->memberEntries.empty());
+
+    struct Mob { float x, y; char const* what; };
+    Mob const in[] = {
+        { 24.4f, -268.2f, "north pair Elite" }, { 23.7f, -258.2f, "north pair Fire Tongue" },
+        { 34.0f, -327.5f, "south archway Captain" }, { 30.4f, -332.9f, "south archway Elite" },
+        { 37.3f, -333.8f, "south archway Elite" }, { 40.7f, -330.5f, "south archway Iron Guard" },
+        { -3.3f, -259.9f, "western Elite" }, { -16.0f, -263.3f, "western Captain" },
+    };
+    for (Mob const& m : in)
+        EXPECT_LT(std::hypot(m.x - B::DRAKKISATH_X, m.y - B::DRAKKISATH_Y), row->radius) << m.what;
+    Mob const out[] = {
+        { -8.1f, -341.9f, "south-west corridor Iron Guard" }, { 30.5f, -381.2f, "south corridor pack" },
+        { 102.1f, -255.0f, "Hall of Blackhand Dragonspawn" },
+    };
+    for (Mob const& m : out)
+        EXPECT_GT(std::hypot(m.x - B::DRAKKISATH_X, m.y - B::DRAKKISATH_Y), row->radius) << m.what;
+}
+
+TEST(DcBlackrockSpireTest, UbrsRunEndsOnDrakkisath)
+{
+    std::vector<DungeonBossInfo> const ubrs = Wing("ubrs");
+    ASSERT_FALSE(ubrs.empty());
+    EXPECT_EQ(ubrs.back().entry, B::NPC_GENERAL_DRAKKISATH);
+    std::size_t bosses = 0;
+    for (DungeonBossInfo const& b : ubrs)
+        bosses += b.kind == DungeonAnchorKind::Boss ? 1 : 0;
+    EXPECT_EQ(bosses, 4u) << "Emberseer, Rend, The Beast, Drakkisath";
+    DungeonWing const* wing = DungeonWingRegistry::FindWing(*DungeonWingRegistry::Get(B::MAP_ID), "ubrs");
+    ASSERT_NE(wing, nullptr);
+    EXPECT_TRUE(DcRunWing::TerminalDone(*wing, ubrs, 1u << 13, false));
+    EXPECT_FALSE(DcRunWing::TerminalDone(*wing, ubrs, (1u << 9) | (1u << 11) | (1u << 12), false));
+}
+
 // ---- hooks and doors -------------------------------------------------------------
 
 TEST(DcBlackrockSpireTest, HooksAreRegistered)
@@ -551,7 +626,8 @@ TEST(DcBlackrockSpireTest, EventOwnedDoorsAreScriptOnly)
     EXPECT_FALSE(DcEventDoorRegistry::IsLockFreeClickable(B::GO_DRAGONSPINE_DOOR));
     // Real gates: navigation must still see them shut.
     EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(B::GO_EMBERSEER_OUT));
-    for (uint32 go : { B::GO_GYTH_ENTRY_DOOR, B::GO_GYTH_COMBAT_DOOR, B::GO_GYTH_EXIT_DOOR })
+    for (uint32 go : { B::GO_GYTH_ENTRY_DOOR, B::GO_GYTH_COMBAT_DOOR, B::GO_GYTH_EXIT_DOOR,
+                       B::GO_DRAKKISATH_DOOR_1, B::GO_DRAKKISATH_DOOR_2 })
         EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(go)) << go;
     for (uint32 go : { B::GO_DRAGONSPINE_DOOR, B::GO_EMBERSEER_IN, B::GO_DOORS, B::GO_EMBERSEER_OUT,
                        B::GO_GYTH_ENTRY_DOOR, B::GO_GYTH_EXIT_DOOR })

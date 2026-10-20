@@ -383,6 +383,12 @@ namespace DcEventDoorRegistry
             case 164726:  // Upper Blackrock Spire — Doodad_PortcullisActive01 (stadium entry)
             case 175185:  // Upper Blackrock Spire — the pen portcullis (wave gate)
             case 175186:  // Upper Blackrock Spire — TOBOSSROOMS (opens on Rend's death)
+            //   175946 / 175947 — PASSAGE doors on General Drakkisath, opened by
+            //     his death. They gate nothing on the way in (the Furnace enters
+            //     his room by the south archway), but must not read as an
+            //     openable blocker.
+            case 175946:  // Upper Blackrock Spire — Drakkisath's door 1 (opens on his death)
+            case 175947:  // Upper Blackrock Spire — Drakkisath's door 2 (opens on his death)
                 return true;
             default:
                 return false;

@@ -75,6 +75,15 @@ namespace
         static std::vector<BossPullback> const rows = {
             // map  entry  anchor x  y  z  forceAggro  summonIfStuck
             { 230, 9499, 871.0f, -235.0f, -43.27f, 40.0f, false },  // Blackrock Depths — Plugger Spazzring
+            // Upper Blackrock Spire — The Beast. NOT a bad-ground row: his script
+            // evades him whenever his own Y goes above -505 in combat, and the
+            // corridor north to Drakkisath starts at y -503. Fought where he
+            // lives the fight drifts there (Berserker Charge, Terrifying Roar,
+            // Flamebreak knock-back), and he resets at full health. The camp is
+            // 35yd south of that line on open Furnace floor; he is tagged the
+            // normal way (his patrol starts when the party reaches the camp,
+            // inside AT 2066). See DcBlackrockSpire::BEAST_CAMP_*.
+            { 229, 10430, 60.0f, -540.0f, 111.0f, 0.0f, false },
         };
         return rows;
     }
