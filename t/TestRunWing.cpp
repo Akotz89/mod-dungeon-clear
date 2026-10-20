@@ -430,14 +430,14 @@ TEST(DcRunWingTest, BlackrockDepthsLfgDungeonPicksTheWing)
 
 TEST(DcRunWingTest, EveryBlackrockDepthsRosterRowIsInExactlyOneWing)
 {
-    // The whole live list — bosses AND every objective — splits 9 / 15 with
+    // The whole live list — bosses AND every objective — splits 9 / 17 with
     // nothing dropped: a row in no wing would never be cleared by either run.
     std::vector<DungeonBossInfo> const roster = BrdRoster();
-    ASSERT_EQ(roster.size(), 24u);
+    ASSERT_EQ(roster.size(), 26u);
     std::size_t const db = DcRunWing::FilterToWing(roster, *DungeonWingRegistry::FindWing(Brd(), "brd-db")).size();
     std::size_t const uc = DcRunWing::FilterToWing(roster, *DungeonWingRegistry::FindWing(Brd(), "brd-uc")).size();
     EXPECT_EQ(db, 9u);
-    EXPECT_EQ(uc, 15u);
+    EXPECT_EQ(uc, 17u);
     EXPECT_EQ(db + uc, roster.size());
     for (DungeonBossInfo const& b : roster)
         EXPECT_NE(DungeonWingRegistry::WingOf(BRD, b.entry), nullptr) << b.name;
@@ -470,7 +470,7 @@ TEST(DcRunWingTest, UpperCityRunGoesToTheShadowforgeLockThenAngerforge)
 {
     std::vector<DungeonBossInfo> const uc =
         DcRunWing::FilterToWing(BrdRoster(), *DungeonWingRegistry::FindWing(Brd(), "brd-uc"));
-    ASSERT_EQ(uc.size(), 15u);
+    ASSERT_EQ(uc.size(), 17u);
     EXPECT_EQ(uc[0].kind, DungeonAnchorKind::Objective);
     EXPECT_EQ(uc[0].eventId, 2u) << "an Upper City run opens at the Shadowforge Lock";
     EXPECT_EQ(uc[1].entry, 9033u) << "then General Angerforge";
@@ -496,6 +496,8 @@ TEST(DcRunWingTest, UpperCityRunClearsEachScriptedGateBeforeItsBoss)
         9499,                                                // Plugger, last in the bar
         9156,                                                // Flamelash
         ObjectiveEntry(DcBlackrockDepths::OBJ_TOMB_OF_SEVEN), 9035,  // the Seven, then Anger'rel's row
+        ObjectiveEntry(DcBlackrockDepths::OBJ_LYCEUM_SOUTH),  // the Lyceum, south brazier
+        ObjectiveEntry(DcBlackrockDepths::OBJ_LYCEUM_NORTH),  // then north
         9938, 9019,                                          // Magmus, Thaurissan
     };
     ASSERT_EQ(uc.size(), want.size());

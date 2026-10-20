@@ -273,6 +273,14 @@ namespace DcRel
     inline constexpr float KzChess                = 64.25f; // any role: the Karazhan chess seat (and conductor)
     inline constexpr float HorStayAhead           = 56.0f; // any role: forward, with the party and out of his ring
     inline constexpr float HazardVacate           = 55.0f; // any role: clear an unfightable hazard's pulse
+    // Blackrock Depths' Lyceum only: any member but the tank, in a fight inside
+    // the room, more than 15yd from the tank walks back to it. Above every mover
+    // that would hold it out there — stock MoveChase / reach (~30), the reach-heal
+    // (40), the heal reposition (41) and the DC assist / regroup (35 / 29) — and
+    // below the hazard vacate (55), so standing in something that hurts still
+    // wins. Map- and room-partitioned from the Iron Hall (57) and HoR (56) rungs.
+    // See DungeonClearLyceumCloseUp{Trigger,Action}.
+    inline constexpr float LyceumCloseUp          = 44.0f; // any member: inside 15yd of the tank, Lyceum fights
     inline constexpr float AssistCampCombat       = 35.0f; // follower: onto the leader's pack
     // Leader-only, combat side of the KillCreature-engage objective. A stealthed
     // sapper (Shattered Halls' Shattered Hand Assassins) flags the party into combat

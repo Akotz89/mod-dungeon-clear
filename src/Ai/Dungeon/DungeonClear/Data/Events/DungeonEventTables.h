@@ -200,6 +200,101 @@ namespace DcBlackrockDepths
         { 9036, 1272.32f, -199.82f, -85.59f },   // Vile'rel
         { 9034, 1246.18f, -189.97f, -85.59f },   // Hate'rel
     };
+
+    // --- the Lyceum (events 7 and 8) -------------------------------------
+    constexpr uint32 TYPE_LYCEUM = 5;
+    constexpr uint32 EVENT_LYCEUM_SOUTH = 7;
+    constexpr uint32 EVENT_LYCEUM_NORTH = 8;
+    constexpr uint32 OBJ_LYCEUM_SOUTH = 7;
+    constexpr uint32 OBJ_LYCEUM_NORTH = 8;
+    constexpr uint32 HOOK_GATHER_TORCH = 48;
+    constexpr uint32 HOOK_LIGHT_BRAZIER_S = 49;
+    constexpr uint32 HOOK_LIGHT_BRAZIER_N = 50;
+    constexpr uint32 NPC_FLAME_KEEPER = 9956;       // Shadowforge Flame Keeper, pool 1550
+    constexpr uint32 ITEM_SHADOWFORGE_TORCH = 11885;
+    constexpr uint32 GO_BRAZIER_S = 174744;
+    constexpr uint32 GO_BRAZIER_N = 174745;
+    constexpr uint32 GO_GOLEM_DOOR_N = 170573;
+    constexpr uint32 GO_GOLEM_DOOR_S = 170574;
+    constexpr uint32 GO_STATE_LIT_OR_OPEN = 0;      // GOState ACTIVE: a lit brazier, an open door
+
+    // Where the tank stands to light each brazier: in front of it, on the
+    // Lyceum floor, with its Fireguard Destroyer (8911) on the far side. The
+    // braziers themselves are at (1330.14, -508.86) / (1431.13, -508.94), z -88.87.
+    constexpr float BRAZIER_S_X = 1330.1f;
+    constexpr float BRAZIER_S_Y = -503.0f;
+    constexpr float BRAZIER_S_Z = -88.9f;
+    constexpr float BRAZIER_N_X = 1431.1f;
+    constexpr float BRAZIER_N_Y = -503.0f;
+    constexpr float BRAZIER_N_Z = -88.9f;
+
+    // Where each brazier OBJECTIVE is anchored — not on its brazier. An anchored
+    // event stands the pull system, the scout-lag and the off-line route rejoin
+    // down only once the tank is inside the anchor's arriveRadius; everything
+    // before that is ordinary Advance. With the anchors on the brazier stands,
+    // tp-20261018-211235-1 crossed the room to each one in Advance — 1m27s-2m27s
+    // to the south stand from the door, 1m11s-2m31s on to the north one — with
+    // the party scout-lagging 15-25yd behind, a rest gate after every fight, and
+    // every one of the tank's 68 route-rejoin backtracks (none once an event
+    // ran). So the south event starts 10yd inside the Lyceum door (1311.48,
+    // -343.07), and the north event where the south one leaves the tank: on the
+    // south stand. Both walks to a brazier are the events' own MoveTo steps.
+    constexpr float LYCEUM_ENTRY_X = 1311.5f;
+    constexpr float LYCEUM_ENTRY_Y = -353.0f;
+    constexpr float LYCEUM_ENTRY_Z = -92.0f;
+
+    // The four points pool 1550 (max_limit 2, 300s respawn) spawns its Flame
+    // Keepers on. Every one is inside LYCEUM_KEEPER_SCAN of both anchors and both
+    // brazier stands (t/TestDungeonEvent pins it): the hunt and the torch hook
+    // both scan with this ONE radius, and if they disagreed the hook could ask
+    // for a hunt the hunt step reads as already done, rewinding forever.
+    // ROOM-WIDE (= LYCEUM_ROOM_SCAN): the hunt now starts at the door, and keeper
+    // points 2 and 3 are 186yd and 213yd from it.
+    struct PoolPoint { float x, y, z; };
+    constexpr PoolPoint FLAME_KEEPER_POINTS[] = {
+        { 1382.62f, -397.68f, -94.59f },
+        { 1385.20f, -439.44f, -94.59f },
+        { 1431.38f, -462.24f, -91.93f },
+        { 1382.00f, -528.69f, -91.96f },
+    };
+    constexpr float LYCEUM_KEEPER_SCAN = 280.0f;
+
+    // The room itself: the never-target Reservist box (DcNeverTargetRegistry —
+    // all 232 of them, and every Flame Keeper point, lie inside it) plus a floor
+    // band. Every one of the room's 238 spawns stands at z -96..-88, the Lyceum
+    // door included, so the band keeps the box off any other level. The pet
+    // sweep (DcLyceum::Tick) holds pets passive inside it.
+    constexpr float LYCEUM_BOX_X_MIN = 1275.0f;
+    constexpr float LYCEUM_BOX_X_MAX = 1480.0f;
+    constexpr float LYCEUM_BOX_Y_MIN = -560.0f;
+    constexpr float LYCEUM_BOX_Y_MAX = -305.0f;
+    constexpr float LYCEUM_BOX_Z_MIN = -102.0f;
+    constexpr float LYCEUM_BOX_Z_MAX = -80.0f;
+
+    // How far the braziers are looked for, and the radius of the north event's
+    // door completion. ROOM-WIDE: the braziers are 101yd apart and each has its
+    // own entry, so nothing can be mistaken for its pair, while a scan sized to
+    // the stand point loses the brazier the moment a fight drags the tank off
+    // it. Live tr-20261018-190617-15: the south brazier was lit, the tank chased
+    // Reservists off the healer to 102yd, the 40yd completion and the light
+    // hook's 40yd lookup both read "no brazier", and the step ran Running until
+    // the stall watchdog killed the run. Sized to reach both braziers and the
+    // north Golem door (1389.55, -555.85) from every corner of the room box —
+    // the furthest pair, door to the Lyceum-door corner, is 276yd
+    // (t/TestDungeonEvent pins it).
+    constexpr float LYCEUM_ROOM_SCAN = 280.0f;
+
+    // Pack leash for both brazier events (DungeonEvent::packLeash): between
+    // fights the tank holds until every living member is within this of it.
+    // Followers trail the tank by ~6yd and a ranged healer by 15-20; past this,
+    // a member is a column, not a party.
+    constexpr float LYCEUM_PACK_LEASH = 22.0f;
+
+    // A torch lost (never looted, or expired in the bags after its 300s) costs a
+    // pool respawn: 300s plus slack. Past this with no keeper back, the torch
+    // step stalls visibly — the signature of the pooled-respawn bug fixed by
+    // AC PR #25826, not something DC works around.
+    constexpr uint32 TORCH_WAIT_MS = 330000;
 }
 
 void RegisterHellfireRampartsEvents(std::vector<DungeonEvent>& out);

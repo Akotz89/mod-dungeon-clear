@@ -345,6 +345,12 @@ namespace DcEventDoorRegistry
             // Lyceum; opening it early would skip the Seven. Map-230 event 6 owns both.
             case 170576:  // Blackrock Depths — Summoner's Tomb entrance (shut while the Seven are up)
             case 170577:  // Blackrock Depths — Summoner's Tomb exit (opens on the Seven DONE)
+            // The two Golem Room doors out of the Lyceum to Magmus, empty-lock-85,
+            // opened only by TYPE_LYCEUM DONE (both braziers lit). A click would
+            // skip the braziers and leave the Lyceum's respawn running behind a
+            // party that never earned its way out. Map-230 events 7/8 own them.
+            case 170573:  // Blackrock Depths — Golem Room North (opens on TYPE_LYCEUM DONE)
+            case 170574:  // Blackrock Depths — Golem Room South (opens on TYPE_LYCEUM DONE)
                 return true;
             default:
                 return false;

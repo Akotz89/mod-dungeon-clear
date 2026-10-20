@@ -307,6 +307,13 @@ struct DcRunState
     // this is what makes the WARN fire once per release instead of once per tick.
     bool   transitHoldTimedOut = false;
 
+    // --- an event's pack leash (DungeonEvent::packLeash) --------------------
+    // The two clocks DcPackLeash::Decide carries across ticks: when the current
+    // hold began, and when its watchdog last released (the walk window). Both
+    // self-clear the moment the party is formed up, so no teardown owns them.
+    uint32 leashHoldSinceMs = 0;
+    uint32 leashReleasedAtMs = 0;
+
     // The Violet Hold keeper / Black Morass rift a bot has COMMITTED to, held
     // across the portal-death boundary so a tank two yards from a corpse is not
     // instantly re-aimed at the next spawn tens of yards away. Empty = nothing
@@ -396,6 +403,13 @@ struct DcRunState
     // hands the tick back to MoveChase halfway through a 136yd leg and the bot
     // is walked back onto the add it left.
     bool   horFollowAdvancing = false;
+
+    // --- Blackrock Depths: the Lyceum close-up (map 230) ----------------------
+    //
+    // When this bot started walking back inside DcLyceumCloseUp::CLOSE_TO of its
+    // tank (0 = it is not closing up). The latch is the hysteresis: begun past
+    // LEASH, the walk runs until CLOSE_TO, not until the bot crosses LEASH again.
+    uint32 lyceumCloseUpMs = 0;
 
     // --- The Culling of Stratholme: the ten waves (map 595) ------------------
     //

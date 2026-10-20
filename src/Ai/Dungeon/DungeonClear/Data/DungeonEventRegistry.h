@@ -583,6 +583,15 @@ struct DungeonEvent
     // and over. See DcSuppressionTransitDecision.h.
     bool ownsThePull{false};
 
+    // PACK LEASH, yd (0 = off). Between fights, the objective action holds the
+    // leader while any living member on the map is further than this from it, so
+    // the party crosses as ONE body instead of a column (DcPackLeashDecision.h,
+    // which also bounds the hold with a duty-cycle watchdog). For a room that
+    // refills behind the party, where a straggler is an add magnet — Blackrock
+    // Depths' Lyceum. The hold never walks the leader back and never runs in
+    // combat: the followers' own follow closes the gap.
+    float packLeash{0.0f};
+
     // Conditional ownsThePull events only. While a pull-owning event drives, the
     // Advance ladder's off-line route rejoin stands down: an event that stepped
     // its own movement has left the route cursor somewhere the party no longer
@@ -648,6 +657,9 @@ public:
     // event drives — see DungeonEvent::ownsThePull. Conditional events only; the
     // anchored path already infers it from Persistent().
     EventBuilder& OwnsThePull();
+    // Hold the leader between fights until the party is within `radius` of it
+    // (see DungeonEvent::packLeash).
+    EventBuilder& PackLeash(float radius);
     // A pull-owning driver whose yield hands the approach — off-line rejoin
     // included — back to Advance (see DungeonEvent::yieldsTheApproach).
     EventBuilder& YieldsTheApproach();

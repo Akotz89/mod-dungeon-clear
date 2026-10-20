@@ -335,13 +335,44 @@ namespace
         { 230, 9545 },   // Blackrock Depths — Grim Patron     (hostile once Plugger dies)
         { 230, 9547 },   // Blackrock Depths — Guzzling Patron (hostile once Plugger dies)
         { 230, 9554 },   // Blackrock Depths — Hammered Patron (hostile once Plugger dies)
+
+        // --- Blackrock Depths (230): the Lyceum's Anvilrage Reservists --------
+        //
+        // Class 3, by arithmetic. Every one of the map's 236 Anvilrage
+        // Reservists (8901) has spawntimesecs = 0, so with Corpse.Decay.NORMAL at
+        // 60 each respawns about a minute after it dies (Creature::Update), and
+        // 232 of them stand in the Lyceum. Holding that room empty would take 3.9
+        // kills a second, sustained, at any DPS. The respawn is intended (AC #1773
+        // set it): the Lyceum is a room to cross under pressure on the way to its
+        // Flame Keepers and braziers, not one to clear, and a picker that walks to
+        // the nearest Reservist, kills it and picks its replacement never leaves.
+        //
+        // BOXED to the Lyceum (x 1275..1480, y -560..-305 — every one of the 232,
+        // with a few yards of margin; the room's north edge stops short of the
+        // Summoner's Tomb at y > -300). The four Reservists in the East Garrison,
+        // by the Shadowforge Lock at (655, 20), are ordinary trash and stay
+        // targets. Reservists that aggro are still fought; General Angerforge's
+        // summons (also 8901) are fought wherever he calls them.
+        { 230, 8901, 1275.0f, 1480.0f, -560.0f, -305.0f },  // Blackrock Depths — Anvilrage Reservist, Lyceum only
     };
 }
 
 bool DcNeverTargetRegistry::IsNeverTarget(uint32 mapId, uint32 entry)
 {
     for (DcNeverTargetRow const& r : kRows)
-        if (r.mapId == mapId && r.entry == entry)
+        if (r.mapId == mapId && r.entry == entry && !r.HasRegion())
             return true;
+    return false;
+}
+
+bool DcNeverTargetRegistry::IsNeverTarget(uint32 mapId, uint32 entry, float x, float y)
+{
+    for (DcNeverTargetRow const& r : kRows)
+    {
+        if (r.mapId != mapId || r.entry != entry)
+            continue;
+        if (!r.HasRegion() || (x >= r.minX && x <= r.maxX && y >= r.minY && y <= r.maxY))
+            return true;
+    }
     return false;
 }

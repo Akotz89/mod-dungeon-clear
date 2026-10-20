@@ -56,6 +56,7 @@
 #include "Ai/Dungeon/DungeonClear/Util/DcDoorPolicy.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcLeaderSignal.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcMovement.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcPackLeashDecision.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcPartyState.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcBreadcrumb.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcPathWorker.h"
@@ -1730,6 +1731,68 @@ DungeonClearEngageActionBase::EventRest DungeonClearEngageActionBase::EventRestD
     return EventRest::None;
 }
 
+bool DungeonClearEngageActionBase::HoldForPackLeash(DungeonEvent const& ev)
+{
+    // Hold budget and the walk window its watchdog grants. Twenty seconds is
+    // ample for a follower on the far side of a room to walk in; a member who
+    // has not come by then is wedged, and the six-second window is one short leg
+    // of progress before the leash re-arms (see DcPackLeashDecision.h).
+    constexpr uint32 LEASH_HOLD_BUDGET_MS = 20000;
+    constexpr uint32 LEASH_WALK_WINDOW_MS = 6000;
+    constexpr uint32 LEASH_LOG_MS = 5000;
+
+    uint32 outside = 0;
+    uint32 living = 0;
+    float trail = 0.0f;
+    Player* trailer = nullptr;
+    if (Group* group = bot->GetGroup())
+    {
+        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+        {
+            Player* m = ref->GetSource();
+            if (!m || m == bot || !m->IsInWorld() || !m->IsAlive() || m->GetMapId() != bot->GetMapId() ||
+                m->GetInstanceId() != bot->GetInstanceId())
+                continue;
+            ++living;
+            float const d = bot->GetExactDist(m);
+            if (d > ev.packLeash)
+                ++outside;
+            if (d > trail)
+            {
+                trail = d;
+                trailer = m;
+            }
+        }
+    }
+
+    DcRunState& run = DcRun::Of(context);
+    DcPackLeash::Inputs in;
+    in.outside = outside;
+    in.nowMs = getMSTime();
+    in.holdSinceMs = run.leashHoldSinceMs;
+    in.releasedAtMs = run.leashReleasedAtMs;
+    in.holdBudgetMs = LEASH_HOLD_BUDGET_MS;
+    in.walkWindowMs = LEASH_WALK_WINDOW_MS;
+    DcPackLeash::Verdict const v = DcPackLeash::Decide(in);
+
+    if (v.timedOut)
+        LOG_WARN("playerbots.dungeonclear",
+                 "[DC:{}] event '{}' pack leash — {} of {} member(s) still outside {:.0f}yd after "
+                 "{}s (furthest {} at {:.1f}yd) -> walking on for {}s",
+                 bot->GetName(), ev.name, outside, living, ev.packLeash, LEASH_HOLD_BUDGET_MS / 1000,
+                 trailer ? trailer->GetName() : "?", trail, LEASH_WALK_WINDOW_MS / 1000);
+    else if (v.hold && !run.Throttled(DcThrottle::EventLeashLog, LEASH_LOG_MS))
+        LOG_INFO("playerbots.dungeonclear",
+                 "[DC:{}] event '{}' pack leash — holding: {} of {} member(s) outside {:.0f}yd "
+                 "(furthest {} at {:.1f}yd)",
+                 bot->GetName(), ev.name, outside, living, ev.packLeash,
+                 trailer ? trailer->GetName() : "?", trail);
+
+    run.leashHoldSinceMs = v.holdSinceMs;
+    run.leashReleasedAtMs = v.releasedAtMs;
+    return v.hold;
+}
+
 bool DungeonClearEngageActionBase::DriveUseItemOnGO(EventStep const& step)
 {
     if (!bot || step.goEntry == 0)
@@ -2043,6 +2106,18 @@ bool DcObjectiveArriveAction::Execute(Event /*event*/)
                     case EventRest::None:
                         break;
                 }
+            }
+            // THE PACK LEASH (DungeonEvent::packLeash): no step walks the leader
+            // on while the party is strung out behind it. Asked before every
+            // movement-issuing branch below, and only here — between fights —
+            // so a fight is never held and the leader never walks back. The
+            // followers' own follow closes the gap; DcPackLeash bounds the wait.
+            if (ev->packLeash > 0.0f && HoldForPackLeash(*ev))
+            {
+                DcMovement::StopBot(bot, DcMovement::Stop::Hold);
+                SetPhase(context, "objective");
+                ClearStall(context);
+                return true;
             }
             if (step.kind == EventStepKind::KillCreature && step.engage && step.creatureEntry)
             {

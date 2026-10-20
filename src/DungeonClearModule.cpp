@@ -90,6 +90,7 @@
 #include "Ai/Dungeon/DungeonClear/DungeonClearStrategyContext.h"
 #include "Ai/Dungeon/DungeonClear/DungeonClearTriggerContext.h"
 #include "Ai/Dungeon/DungeonClear/DungeonClearValueContext.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/BlackrockDepthsLyceum.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcCombatPurge.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcPathWorker.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcFirstContact.h"
@@ -552,6 +553,11 @@ public:
         // when switched off, and it too gets a live player's claim on the
         // provisioning ration ahead of the test harness.
         DcBgQueueFillManager::Instance().Tick(diff);
+
+        // The Lyceum's room hold (BRD pets passive, torches looted in combat).
+        // Ahead of the gate for the queue fills' reason: what it holds — pets it
+        // put passive — it must hand back when the module goes off.
+        DcLyceum::Tick(diff, DcModule::IsEnabled());
 
         if (!DcModule::IsEnabled())
             return;

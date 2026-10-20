@@ -87,7 +87,8 @@ namespace
                 continue;
             if (!c->IsHostileTo(corpse))
                 continue;
-            if (DcNeverTargetRegistry::IsNeverTarget(corpse->GetMapId(), c->GetEntry()))
+            if (DcNeverTargetRegistry::IsNeverTarget(corpse->GetMapId(), c->GetEntry(), c->GetPositionX(),
+                                                    c->GetPositionY()))
                 continue;
             return true;
         }

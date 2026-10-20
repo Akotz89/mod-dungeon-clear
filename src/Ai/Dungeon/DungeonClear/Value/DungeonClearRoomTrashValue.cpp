@@ -211,7 +211,7 @@ GuidVector DungeonClearRoomTrashValue::Calculate()
         }
         // Scripted never-dies mobs are not room trash — clearing a room that
         // contains one would never complete. See DcNeverTargetRegistry.
-        if (DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), u->GetEntry()))
+        if (DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), u->GetEntry(), u->GetPositionX(), u->GetPositionY()))
         {
             ++exTarget;
             continue;

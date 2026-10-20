@@ -61,6 +61,17 @@ struct DcNeverTargetRow
     uint32 mapId{0};
     uint32 entry{0};   // the NORMAL creature entry; heroic spawns keep it
                        // (Creature::InitEntry swaps m_creatureInfo, not the entry)
+
+    // Optional region, axis-aligned in x/y, for an entry that is a never-target
+    // in ONE room and ordinary trash everywhere else on the map. All four 0 =>
+    // the whole map. The creature's live position is what is tested, so a mob
+    // that wanders or is dragged out of the box becomes a target again.
+    float minX{0.0f};
+    float maxX{0.0f};
+    float minY{0.0f};
+    float maxY{0.0f};
+
+    bool HasRegion() const { return minX != maxX || minY != maxY; }
 };
 
 class DcNeverTargetRegistry
@@ -70,6 +81,11 @@ public:
     // (no game state) so it is unit-testable on its own. Linear scan; the table
     // is tiny.
     static bool IsNeverTarget(uint32 mapId, uint32 entry);
+
+    // The same, for a creature standing at (x, y): also matches a REGION row
+    // whose box contains it. The overload above matches whole-map rows only, so a
+    // caller with a creature in hand should use this one.
+    static bool IsNeverTarget(uint32 mapId, uint32 entry, float x, float y);
 };
 
 #endif  // _PLAYERBOT_DCNEVERTARGETREGISTRY_H

@@ -578,6 +578,17 @@ void DungeonClearCombatStrategy::InitTriggers(std::vector<TriggerNode*>& trigger
         "dungeon clear hor stay ahead",
         { NextAction("dungeon clear hor stay ahead", DcRel::HorStayAhead) }));
 
+    // Blackrock Depths' Lyceum only, combat engine: in a fight inside the room,
+    // every member but the tank stays within 15yd of the tank — how a real group
+    // plays a room that refills behind it. The chase half (no stock reach toward
+    // a target outside that radius) is DungeonClearCombatMultiplier's. Combat
+    // only: between fights the event's pack leash and the follow own spacing.
+    // Inert everywhere else: the trigger's first test is the map id. See
+    // DungeonClearLyceumCloseUpTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear lyceum close up",
+        { NextAction("dungeon clear lyceum close up", DcRel::LyceumCloseUp) }));
+
     // The Oculus only: the rider rung, combat side. See the non-combat copy; the
     // stand-down exempts it by name (DcBossStandDown::ClassifyAction), because the
     // Eregos fight is fought entirely from this rung.

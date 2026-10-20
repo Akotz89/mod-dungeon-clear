@@ -48,6 +48,7 @@ public:
         creators["dungeon clear heal reposition"] = &DungeonClearActionContext::heal_reposition;
         creators["dungeon clear hazard vacate"] = &DungeonClearActionContext::hazard_vacate;
         creators["dungeon clear hor stay ahead"] = &DungeonClearActionContext::hor_stay_ahead;
+        creators["dungeon clear lyceum close up"] = &DungeonClearActionContext::lyceum_close_up;
         creators["dungeon clear oc rider"] = &DungeonClearActionContext::oc_rider;
         creators["dungeon clear kz chess"] = &DungeonClearActionContext::kz_chess;
         creators["dungeon clear razorgore orb"] = &DungeonClearActionContext::razorgore_orb;
@@ -117,6 +118,7 @@ private:
     static Action* heal_reposition(PlayerbotAI* ai) { return new DungeonClearHealRepositionAction(ai); }
     static Action* hazard_vacate(PlayerbotAI* ai) { return new DungeonClearHazardVacateAction(ai); }
     static Action* hor_stay_ahead(PlayerbotAI* ai) { return new DungeonClearHorStayAheadAction(ai); }
+    static Action* lyceum_close_up(PlayerbotAI* ai) { return new DungeonClearLyceumCloseUpAction(ai); }
     static Action* oc_rider(PlayerbotAI* ai) { return new DungeonClearOculusRiderAction(ai); }
     static Action* kz_chess(PlayerbotAI* ai) { return new DungeonClearKzChessAction(ai); }
     static Action* razorgore_orb(PlayerbotAI* ai) { return new DungeonClearRazorgoreOrbAction(ai); }

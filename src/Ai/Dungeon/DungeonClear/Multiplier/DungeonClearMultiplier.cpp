@@ -16,12 +16,14 @@
 #include "Player.h"
 #include "Playerbots.h"
 #include "Position.h"
+#include "ReachTargetActions.h"
 #include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
 #include "Ai/Dungeon/DungeonClear/DcPullContext.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcBossStandDown.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcEscapeLeap.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcFlightLeg.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcLyceumCloseUpDecision.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcOculusPlan.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcSmartRest.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearUtil.h"
@@ -214,6 +216,28 @@ static bool OculusDrakeAttackUnsafe(Player* bot, PlayerbotAI* botAI, AiObjectCon
         }
     }
     return target && !DcFlightLeg::IsFlyingSafe(target);
+}
+
+// BLACKROCK DEPTHS' LYCEUM: no stock reach / chase toward a target further than
+// DcLyceumCloseUp::LEASH from the tank, for any member but the tank, while both
+// stand in the room. The other half of the close-up rung — see
+// DcLyceumCloseUpDecision.h. ReachTargetAction is every stock combat chase
+// (reach melee / reach spell / reach party member to heal all end in ChaseTo).
+static bool LyceumChaseLeavesThePack(Player* bot, AiObjectContext* context, Action* action)
+{
+    if (bot->GetMapId() != DcBlackrockDepths::MAP_ID)
+        return false;
+    auto* reach = dynamic_cast<ReachTargetAction*>(action);
+    if (!reach || !DcLyceumCloseUp::InRoom(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ()))
+        return false;
+    Player* tank = context->GetValue<Player*>(DcKey::PartyTank)->Get();
+    if (!tank || tank == bot || !tank->IsAlive() || tank->GetInstanceId() != bot->GetInstanceId() ||
+        DcLeaderSignal::IsDungeonClearLeader(bot) ||
+        !DcLyceumCloseUp::InRoom(tank->GetPositionX(), tank->GetPositionY(), tank->GetPositionZ()))
+        return false;
+    Unit* target = context->GetValue<Unit*>(reach->GetTargetName())->Get();
+    return target && DcLyceumCloseUp::ChaseLeavesThePack(target->GetPositionX(), target->GetPositionY(),
+                                                         tank->GetPositionX(), tank->GetPositionY());
 }
 
 float DungeonClearMultiplier::GetValue(Action* action)
@@ -474,6 +498,21 @@ float DungeonClearCombatMultiplier::GetValue(Action* action)
     // Order of tests: the prefix compare is paid only after the cheap
     // exact-compare fast path fails, and IsActive itself is raid-gated +
     // leader-memoised, so dungeon runs pay one Map::IsRaid() at most.
+    // Blink / Disengage — see DcEscapeLeap. The ban has to live HERE: both are
+    // fired by combat-engine triggers ("enemy too close for spell/auto shot"), so
+    // the non-combat multiplier's copy never once met them. Live,
+    // tp-20261018-211235-1 cast 314 of them across eight runs with that copy in
+    // place, and 29 landed the leaper on a fresh Reservist within six seconds.
+    // Above the fast path (both are stock actions). A raid encounter's stand-down
+    // hands the fight to the playerbots raid strategy, which rules on its own leaps.
+    if (DcEscapeLeap::IsBanned(name) && AI_VALUE(Player*, DcKey::PartyTank) &&
+        !DcBossStandDown::IsActive(bot))
+        return 0.0f;
+
+    // The Lyceum's close-up, chase half — see LyceumChaseLeavesThePack above.
+    if (LyceumChaseLeavesThePack(bot, context, action))
+        return 0.0f;
+
     bool const isDcAction = name.compare(0, 13, "dungeon clear") == 0;
     if (!isDcAction && name != "drop target")
         return 1.0f;

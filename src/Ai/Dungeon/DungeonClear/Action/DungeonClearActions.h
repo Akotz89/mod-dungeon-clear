@@ -21,6 +21,7 @@ class Creature;
 class Map;
 struct DungeonBossInfo;
 struct EventStep;
+struct DungeonEvent;
 struct DungeonEventProgress;
 
 // Thin MovementAction subclass that every movement-issuing DC action derives
@@ -221,6 +222,12 @@ protected:
     // destination). Returns false once within cast range, so the caller falls
     // through to Drive and RunStep fires the GO.
     bool DriveUseItemOnGO(EventStep const& step);
+
+    // The event's pack leash (DungeonEvent::packLeash): true while the leader
+    // should stand and let the party close up before its next step. Counts the
+    // living members on the map outside the leash and runs DcPackLeash::Decide
+    // against the run state's two clocks; logs the hold and any watchdog release.
+    bool HoldForPackLeash(DungeonEvent const& ev);
 
     // Drive a UseItemAt step's APPROACH (the Culling of Stratholme's five plagued
     // grain crates, 48-81yd apart along 330yd of road). Owns the tick (returns
@@ -992,6 +999,19 @@ class DungeonClearHorStayAheadAction : public DcMovementAction
 public:
     DungeonClearHorStayAheadAction(PlayerbotAI* botAI)
         : DcMovementAction(botAI, "dungeon clear hor stay ahead")
+    {
+    }
+    bool Execute(Event event) override;
+};
+
+// BLACKROCK DEPTHS' LYCEUM ONLY, every member but the tank, combat engine: walk
+// back inside DcLyceumCloseUp::CLOSE_TO of the tank. Driven by
+// DungeonClearLyceumCloseUpTrigger; the decision is DcLyceumCloseUp::Decide.
+class DungeonClearLyceumCloseUpAction : public DcMovementAction
+{
+public:
+    DungeonClearLyceumCloseUpAction(PlayerbotAI* botAI)
+        : DcMovementAction(botAI, "dungeon clear lyceum close up")
     {
     }
     bool Execute(Event event) override;

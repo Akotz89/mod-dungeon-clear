@@ -180,3 +180,32 @@ TEST(DcNeverTargetRegistryTest, BlackrockDepthsPatronsAreNeverAClearTarget)
         EXPECT_FALSE(DcNeverTargetRegistry::IsNeverTarget(230, boss)) << "entry " << boss;
     EXPECT_FALSE(DcNeverTargetRegistry::IsNeverTarget(229, 9545)) << "map-230 rows only";
 }
+
+// --- Blackrock Depths (230) — the Lyceum's Anvilrage Reservists -------------
+//
+// 232 Reservists on a ~60s respawn: a room that refills faster than any party
+// can empty it. The row is BOXED to the Lyceum, so the same entry elsewhere on
+// the map (the four by the Shadowforge Lock, Angerforge's summons) stays trash.
+TEST(DcNeverTargetRegistryTest, BlackrockDepthsReservistsAreNeverATargetInTheLyceumOnly)
+{
+    // Inside the room, at both of its extremes.
+    EXPECT_TRUE(DcNeverTargetRegistry::IsNeverTarget(230, 8901, 1380.0f, -440.0f));
+    EXPECT_TRUE(DcNeverTargetRegistry::IsNeverTarget(230, 8901, 1280.16f, -436.09f));   // westmost spawn
+    EXPECT_TRUE(DcNeverTargetRegistry::IsNeverTarget(230, 8901, 1477.09f, -433.06f));   // eastmost spawn
+    EXPECT_TRUE(DcNeverTargetRegistry::IsNeverTarget(230, 8901, 1372.49f, -314.39f));   // northmost spawn
+    EXPECT_TRUE(DcNeverTargetRegistry::IsNeverTarget(230, 8901, 1394.0f, -543.97f));    // southmost spawn
+
+    // The East Garrison's four, by the Shadowforge Lock.
+    EXPECT_FALSE(DcNeverTargetRegistry::IsNeverTarget(230, 8901, 654.28f, 17.60f));
+    // The Summoner's Tomb, just north of the box, and the Iron Hall south of it.
+    EXPECT_FALSE(DcNeverTargetRegistry::IsNeverTarget(230, 8901, 1268.0f, -272.0f));
+    EXPECT_FALSE(DcNeverTargetRegistry::IsNeverTarget(230, 8901, 1380.0f, -600.0f));
+
+    // The whole-map overload never matches a region row.
+    EXPECT_FALSE(DcNeverTargetRegistry::IsNeverTarget(230, 8901));
+    // The torch carriers and the brazier guards are the room's real targets.
+    EXPECT_FALSE(DcNeverTargetRegistry::IsNeverTarget(230, 9956, 1382.6f, -397.7f));  // Flame Keeper
+    EXPECT_FALSE(DcNeverTargetRegistry::IsNeverTarget(230, 8911, 1330.3f, -499.3f));  // Fireguard Destroyer
+    // A whole-map row still matches through the positional overload.
+    EXPECT_TRUE(DcNeverTargetRegistry::IsNeverTarget(230, 9545, 0.0f, 0.0f));
+}

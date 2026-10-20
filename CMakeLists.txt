@@ -60,6 +60,10 @@ AC_ADD_SCRIPT("${CMAKE_CURRENT_LIST_DIR}/src")
 
 AC_ADD_CONFIG_FILE("${CMAKE_CURRENT_LIST_DIR}/conf/mod_dungeon_clear.conf.dist")
 
+# New files added: Action/DcLyceumCloseUpAction.cpp, Util/DcLyceumCloseUpDecision.h
+#   (BRD Lyceum: in a fight inside the room every member stands within 15yd of
+#    the tank — the combat-engine rung that walks a member back, plus the
+#    multiplier's veto on stock chase toward a target outside that radius.)
 # New files added: Util/DcDungeonAccess.{h,cpp}
 #   (making a throwaway pool bot ELIGIBLE for the destination. Player::TeleportTo
 #    refuses a far teleport silently in two places — the

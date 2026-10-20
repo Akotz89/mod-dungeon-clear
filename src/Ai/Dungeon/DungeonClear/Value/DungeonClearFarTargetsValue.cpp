@@ -46,7 +46,8 @@ bool DungeonClearFarTargetsValue::AcceptUnit(Unit* unit)
     // ClearRadius read it), so dropping them here covers most of the pipeline in
     // one place; the few scans that build their own candidate list repeat the
     // check next to their own IsPossibleTarget gate.
-    if (unit && DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), unit->GetEntry()))
+    if (unit && DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), unit->GetEntry(), unit->GetPositionX(),
+                                                        unit->GetPositionY()))
         return false;
 
     // PvE dungeons only — skip the PvP attack-chance machinery in

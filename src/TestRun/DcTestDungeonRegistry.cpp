@@ -70,7 +70,11 @@ namespace DcTestDungeonRegistry
             // portal, as the dungeon finder does. The retired `brd` token aliases
             // to `brd-db`.
             { "brd-db",          "Blackrock Depths: Detention Block", 230, 456.93f,  34.09f,  -68.09f, 4.712f, 54, "Detention Block" },
-            { "brd-uc",          "Blackrock Depths: Upper City",  230,   456.93f,    34.09f,  -68.09f, 4.712f, 58, "Upper City" },
+            // The Upper City's no-progress net is wider than the global 600s: in
+            // the Lyceum a lost torch costs a 300s Flame Keeper respawn (plus the
+            // 330s torch-wait stall it is allowed) between two objective latches.
+            { "brd-uc",          "Blackrock Depths: Upper City",  230,   456.93f,    34.09f,  -68.09f, 4.712f, 58, "Upper City",
+              0, nullptr, {}, {}, 0, 0, /*noProgressS*/ 900 },
             // Blackrock Spire is two dungeons on one map (see BlackrockSpireEvents).
             // LBRS enters at the shared portal; UBRS drops the party inside the
             // shared hall facing the Dragonspine Door (GO 164725), where a UBRS

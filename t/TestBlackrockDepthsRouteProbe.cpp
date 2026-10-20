@@ -183,6 +183,15 @@ TEST(BlackrockDepthsRouteProbe, UpperCityEventSpotsAreOnTheNavmesh)
         { 1009.75f, -239.02f, -61.3f, "Flamelash" },
         { B::TOMB_HOLD_X, B::TOMB_HOLD_Y, B::TOMB_HOLD_Z, "Tomb garrison" },
         { 1281.14f, -282.15f, -78.14f, "Doom'rel" },
+        { 1311.48f, -343.07f, -92.01f, "Lyceum door" },
+        { B::LYCEUM_ENTRY_X, B::LYCEUM_ENTRY_Y, B::LYCEUM_ENTRY_Z, "Lyceum entry" },
+        { B::BRAZIER_S_X, B::BRAZIER_S_Y, B::BRAZIER_S_Z, "S brazier stand" },
+        { B::FLAME_KEEPER_POINTS[0].x, B::FLAME_KEEPER_POINTS[0].y, B::FLAME_KEEPER_POINTS[0].z, "keeper pt 0" },
+        { B::FLAME_KEEPER_POINTS[1].x, B::FLAME_KEEPER_POINTS[1].y, B::FLAME_KEEPER_POINTS[1].z, "keeper pt 1" },
+        { B::FLAME_KEEPER_POINTS[2].x, B::FLAME_KEEPER_POINTS[2].y, B::FLAME_KEEPER_POINTS[2].z, "keeper pt 2" },
+        { B::FLAME_KEEPER_POINTS[3].x, B::FLAME_KEEPER_POINTS[3].y, B::FLAME_KEEPER_POINTS[3].z, "keeper pt 3" },
+        { B::BRAZIER_N_X, B::BRAZIER_N_Y, B::BRAZIER_N_Z, "N brazier stand" },
+        { 1389.55f, -555.85f, -92.01f, "Golem door N" },
     };
 
     std::printf("Blackrock Depths — Upper City event spots\n");

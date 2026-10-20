@@ -646,6 +646,20 @@ public:
     bool IsActive() override;
 };
 
+// BLACKROCK DEPTHS' LYCEUM ONLY, combat engine: active for any member of a
+// running clear but the tank, fighting inside the room, that stands more than
+// DcLyceumCloseUp::LEASH from the tank — and for as long as its walk back is in
+// flight. Free on every other map: the first test is the map id.
+class DungeonClearLyceumCloseUpTrigger : public Trigger
+{
+public:
+    DungeonClearLyceumCloseUpTrigger(PlayerbotAI* botAI)
+        : Trigger(botAI, "dungeon clear lyceum close up", 1)
+    {
+    }
+    bool IsActive() override;
+};
+
 // THE OCULUS ONLY: active for a member that sits on a drake, or whose party plan
 // (the flight driver's, DcOculusPlanView) has something for the riders to do.
 // Free on every other map — the first test is an integer compare on the map id.

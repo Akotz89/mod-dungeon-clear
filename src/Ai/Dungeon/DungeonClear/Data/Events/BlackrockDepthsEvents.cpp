@@ -9,24 +9,37 @@
 
 #include <cmath>
 #include <list>
+#include <map>
+#include <set>
 #include <unordered_map>
+#include <vector>
 
+#include "Bag.h"
+#include "CharmInfo.h"
 #include "Creature.h"
 #include "CreatureAI.h"
 #include "GameObject.h"
 #include "Group.h"
 #include "InstanceScript.h"
+#include "Item.h"
 #include "Log.h"
+#include "LootMgr.h"
+#include "MotionMaster.h"
+#include "ObjectAccessor.h"
 #include "ObjectMgr.h"
+#include "Pet.h"
 #include "Player.h"
 #include "Playerbots.h"
 #include "QuestDef.h"
 #include "ScriptMgr.h"
 #include "WorldSession.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/BlackrockDepthsLyceum.h"
 #include "Ai/Dungeon/DungeonClear/Overrides/ObjectiveHookRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcStatusPublisher.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTargeting.h"
+#include "Ai/Dungeon/DungeonClear/Util/DungeonEventExecutor.h"
 
 // --- Blackrock Depths (map 230) — the RING OF LAW, ANCHORED + PERSISTENT ---
 // A sealed arena gauntlet that gates the way between Houndmaster Grebmar and
@@ -510,10 +523,487 @@ namespace
                  "the challenge", bot->GetName());
         return ObjectiveArriveResult::Restart;
     }
+
+    // --- the Lyceum (events 7 and 8) ---------------------------------------
+    // Two braziers, S (174744) and N (174745), lock 799: the Shadowforge Torch.
+    // go_shadowforge_brazier sets TYPE_LYCEUM IN_PROGRESS on the first and DONE
+    // when the second is lit while the first still burns, which opens both Golem
+    // doors to Magmus. Torches (11885: one per Flame Keeper, 100%; 300s in the
+    // bags; spent on use) come only from the Shadowforge Flame Keepers of pool
+    // 1550 — two alive at a time over four points, 300s respawn — in a room of
+    // 232 Anvilrage Reservists that each come back a minute after they die.
+    //
+    // GameObject::Use() has no lock check, so a server-side click would light a
+    // brazier with no torch and erase the whole challenge. The hooks below play
+    // it straight instead: kill keepers, LOOT their torches, and SPEND one per
+    // brazier. Nothing is granted, and no respawn is forced.
+
+    // TORCHES ARE LOST TO THE CORPSE CLOCK, not to the hunt. Flame Keepers are
+    // rank 0, so an unlooted corpse decays in Corpse.Decay.NORMAL = 60s, and the
+    // hunt (a KillCreature gate: Running while ANY keeper is alive in 160yd)
+    // already kills both live keepers. What used to lose the second torch was
+    // when and where it was looked for: only out of combat — which, among 232
+    // Reservists on a 60s respawn, can be a minute after the kill — and only
+    // within 40yd of wherever the fights had left the tank. All six logged runs
+    // of 2026-10-18 banked ONE torch from the south hunt and then waited 2-5
+    // minutes at the north brazier for pool 1550 to respawn a keeper (two runs
+    // waited twice: keepers killed, corpses gone before anyone stood at them).
+    //
+    // So a corpse is now taken two ways. In combat, DcLyceum::Tick loots any
+    // torch corpse a member is already standing at (the melee who killed it).
+    // Out of combat, the torch hook WALKS to one anywhere in the room for as
+    // long as the party holds fewer torches than there are braziers left to
+    // light: a walk across the room is twenty seconds, and the wait it replaces
+    // is three hundred.
+    //
+    // Loot reach: the core's interaction distance.
+    constexpr float BRD_TORCH_LOOT_REACH = 5.0f;
+    // A torch holder this close to a brazier lights it. The tank stands on the
+    // brazier's stand point (within 4yd, itself ~6yd in front of the brazier),
+    // and a follower trails it by up to ~6yd.
+    constexpr float BRD_BRAZIER_REACH = 10.0f;
+    constexpr uint32 BRD_TORCH_NUDGE_MS = 2000;
+    // How long the brazier waits for the holder of the torch that expires first
+    // before it settles for a fresher one already in reach. The holder trails the
+    // tank by a few yards at most; past this it is not coming.
+    constexpr uint32 BRD_OLDEST_TORCH_WAIT_MS = 8000;
+
+    bool LyceumDone(Player* bot)
+    {
+        InstanceScript* inst = DcTargeting::GetInstanceScript(bot);
+        return inst && inst->GetData(TYPE_LYCEUM) == STATE_DONE;
+    }
+
+    // Living party members on the bot's map (the bot itself included).
+    template <typename Fn>
+    void ForEachLivingMember(Player* bot, Fn&& fn)
+    {
+        Group* group = bot->GetGroup();
+        if (!group)
+        {
+            fn(bot);
+            return;
+        }
+        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+        {
+            Player* member = ref->GetSource();
+            if (member && member->IsInWorld() && member->IsAlive() &&
+                member->GetMapId() == bot->GetMapId())
+                fn(member);
+        }
+    }
+
+    uint32 PartyTorchCount(Player* bot)
+    {
+        uint32 n = 0;
+        ForEachLivingMember(bot, [&](Player* m) { n += m->GetItemCount(ITEM_SHADOWFORGE_TORCH); });
+        return n;
+    }
+
+    // Every Shadowforge Torch a living member carries, with the time left on its
+    // 300s bag clock.
+    struct HeldTorch
+    {
+        Player* holder = nullptr;
+        Item* item = nullptr;
+        uint32 leftMs = 0;
+    };
+
+    template <typename Fn>
+    void ForEachTorchIn(Player* p, Fn&& fn)
+    {
+        auto visit = [&](Item* item)
+        {
+            if (item && item->GetEntry() == ITEM_SHADOWFORGE_TORCH)
+                fn(item);
+        };
+        for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+            visit(p->GetItemByPos(INVENTORY_SLOT_BAG_0, slot));
+        for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
+            if (Bag* b = p->GetBagByPos(bag))
+                for (uint32 slot = 0; slot < b->GetBagSize(); ++slot)
+                    visit(b->GetItemByPos(static_cast<uint8>(slot)));
+    }
+
+    std::vector<HeldTorch> PartyTorches(Player* bot)
+    {
+        std::vector<HeldTorch> out;
+        ForEachLivingMember(bot, [&](Player* m)
+        {
+            ForEachTorchIn(m, [&](Item* item)
+            {
+                out.push_back({ m, item, item->GetUInt32Value(ITEM_FIELD_DURATION) * IN_MILLISECONDS });
+            });
+        });
+        return out;
+    }
+
+    // The slot of an untaken torch in a keeper corpse's loot, or -1.
+    int32 TorchSlot(Creature* corpse)
+    {
+        Loot const& loot = corpse->loot;
+        for (uint8 slot = 0; slot < loot.items.size(); ++slot)
+            if (loot.items[slot].itemid == ITEM_SHADOWFORGE_TORCH && !loot.items[slot].is_looted)
+                return slot;
+        return -1;
+    }
+
+    // Torches the party still has a use for: one per unlit brazier. The first
+    // lit brazier moves TYPE_LYCEUM to IN_PROGRESS, the second to DONE.
+    uint32 TorchesStillNeeded(Player* bot)
+    {
+        InstanceScript* inst = DcTargeting::GetInstanceScript(bot);
+        if (!inst)
+            return 1;
+        switch (inst->GetData(TYPE_LYCEUM))
+        {
+            case STATE_DONE:        return 0;
+            case STATE_IN_PROGRESS: return 1;
+            default:                return 2;
+        }
+    }
+
+    // The nearest keeper corpse in `scan` of the bot that still holds its torch.
+    Creature* NearestTorchCorpse(Player* bot, float scan)
+    {
+        std::list<Creature*> keepers;
+        bot->GetCreatureListWithEntryInGrid(keepers, NPC_FLAME_KEEPER, scan);
+        Creature* corpse = nullptr;
+        for (Creature* k : keepers)
+            if (!k->IsAlive() && TorchSlot(k) >= 0 &&
+                (!corpse || bot->GetExactDist(k) < bot->GetExactDist(corpse)))
+                corpse = k;
+        return corpse;
+    }
+
+    // A living member standing at `corpse` (the bot itself preferred), or null.
+    Player* MemberAtCorpse(Player* bot, Creature* corpse)
+    {
+        Player* looter = nullptr;
+        ForEachLivingMember(bot, [&](Player* m)
+        {
+            if (m->IsWithinDistInMap(corpse, BRD_TORCH_LOOT_REACH) && (!looter || m == bot))
+                looter = m;
+        });
+        return looter;
+    }
+
+    // The real loot: the corpse's own generated loot, taken with StoreLootItem
+    // by a member standing at it (the Hakkari Blood precedent).
+    void LootTorch(Player* bot, Player* looter, Creature* corpse, char const* when)
+    {
+        InventoryResult msg = EQUIP_ERR_OK;
+        looter->StoreLootItem(static_cast<uint8>(TorchSlot(corpse)), &corpse->loot, msg);
+        LOG_INFO("playerbots.dungeonclear",
+                 "[DC:{}] Lyceum — {} looted a Shadowforge Torch from Flame Keeper {} {} "
+                 "(result {}); party now holds {} of {} needed",
+                 bot->GetName(), looter->GetName(), corpse->GetGUID().ToString(), when,
+                 static_cast<uint32>(msg), PartyTorchCount(bot), TorchesStillNeeded(bot));
+    }
+
+    // --- GatherShadowforgeTorch (hook 48) ----------------------------------
+    // Step 2 of each brazier event, right after the keeper hunt (step 1, a
+    // KillCreatureEngage over LYCEUM_KEEPER_SCAN). Decides, every tick:
+    //   1. the party holds fewer torches than braziers left unlit, and a keeper
+    //      corpse anywhere in the room still holds one -> walk to it and loot it.
+    //      Ordinary bot looting and the in-combat sweep (DcLyceum::Tick) usually
+    //      get there first, which is fine — the count sees the torch wherever it
+    //      landed; this is what keeps a corpse nobody stopped at from decaying
+    //      with the north brazier's torch in it.
+    //   2. the party holds a torch -> Done; go and light the brazier. One is
+    //      enough: braziers are lit as soon as a torch is in hand, because a
+    //      torch carried around waiting for its pair is a torch expiring.
+    //   3. no torch, but a keeper is alive -> Restart: rewind to the hunt (step
+    //      0, the sticky-arming MoveTo, is Done on the spot anywhere in the room).
+    //   4. no torch, no keeper -> the pool is respawning. Hold where the hunt
+    //      left the party and keep fighting; the step's TORCH_WAIT_MS timeout
+    //      stalls it visibly if no keeper ever comes back.
+    ObjectiveArriveResult GatherShadowforgeTorch(Player* bot, AiObjectContext* context,
+                                                 DungeonBossInfo const& /*info*/)
+    {
+        if (LyceumDone(bot))
+            return ObjectiveArriveResult::Done;
+
+        Creature* corpse = PartyTorchCount(bot) < TorchesStillNeeded(bot)
+                               ? NearestTorchCorpse(bot, LYCEUM_KEEPER_SCAN)
+                               : nullptr;
+        if (corpse)
+        {
+            Player* looter = MemberAtCorpse(bot, corpse);
+            if (!looter)
+            {
+                if (!bot->isMoving())
+                    bot->GetMotionMaster()->MovePoint(0, corpse->GetPositionX(), corpse->GetPositionY(),
+                                                      corpse->GetPositionZ(), FORCED_MOVEMENT_NONE,
+                                                      0.0f, 0.0f, /*generatePath*/ true, false);
+                return ObjectiveArriveResult::Running;
+            }
+            LootTorch(bot, looter, corpse, "between fights");
+            return ObjectiveArriveResult::Running;  // re-decide with the new count
+        }
+
+        if (PartyTorchCount(bot) >= 1)
+            return ObjectiveArriveResult::Done;
+
+        if (bot->FindNearestCreature(NPC_FLAME_KEEPER, LYCEUM_KEEPER_SCAN, /*alive*/ true))
+        {
+            LOG_INFO("playerbots.dungeonclear",
+                     "[DC:{}] Lyceum — no Shadowforge Torch in the party and a Flame Keeper "
+                     "is up: back to the hunt", bot->GetName());
+            return ObjectiveArriveResult::Restart;
+        }
+
+        // Waiting on pool 1550. Say so every 10s, and once — loudly — when the
+        // wait has outlived a respawn, which is the step's timeout firing next.
+        DcRunState& run = DcRun::Of(context);
+        DungeonEventProgress const& prog =
+            context->GetValue<DungeonEventProgress&>(DcKey::EventProgress)->Get();
+        if (getMSTimeDiff(prog.stepStartMs, getMSTime()) + 1000 >= TORCH_WAIT_MS &&
+            !run.Throttled(DcThrottle::BrdTorchWarn, TORCH_WAIT_MS))
+            LOG_WARN("playerbots.dungeonclear",
+                     "[DC:{}] LYCEUM no Flame Keeper respawned in {}s (pool 1550, 300s respawn) — "
+                     "if this repeats, the pooled-respawn fix (AC PR #25826) is not in this core",
+                     bot->GetName(), TORCH_WAIT_MS / 1000);
+        else if (!run.Throttled(DcThrottle::BrdEventLog, 10000))
+            LOG_INFO("playerbots.dungeonclear",
+                     "[DC:{}] Lyceum — out of torches and no Flame Keeper alive; waiting for "
+                     "pool 1550 to respawn one", bot->GetName());
+        return ObjectiveArriveResult::Running;
+    }
+
+    // --- LightBrazier (hooks 49 S / 50 N) ----------------------------------
+    // The last step of each brazier event. Spend ONE torch from a holder at the
+    // brazier, then GameObject::Use() it as that holder: the same Use() a
+    // player's click reaches, so go_shadowforge_brazier still runs and still
+    // sees which brazier was first. The torch is destroyed by hand because
+    // Use() skips lock 799 and would otherwise light it for free.
+    //   * lit already (by us, a human, or a rewind) -> Done, no torch spent
+    //   * a holder in reach -> spend + light
+    //   * a holder elsewhere in the party -> walk them over (throttled)
+    //   * no torch left anywhere (expired, or the holder died and released) ->
+    //     Restart: back to the hunt
+    ObjectiveArriveResult LightBrazier(Player* bot, AiObjectContext* context, uint32 brazierEntry)
+    {
+        if (LyceumDone(bot))
+            return ObjectiveArriveResult::Done;
+
+        GameObject* brazier = bot->FindNearestGameObject(brazierEntry, LYCEUM_ROOM_SCAN);
+        if (!brazier)
+            return ObjectiveArriveResult::Running;
+        if (brazier->GetGoState() != GO_STATE_READY)
+            return ObjectiveArriveResult::Done;
+        if (brazier->HasGameObjectFlag(GO_FLAG_NOT_SELECTABLE))
+            return ObjectiveArriveResult::Running;  // Use() would swallow it — and the torch
+
+        // SPEND THE TORCH THAT DIES FIRST. Each one runs its own 300s clock, so
+        // which torch lights the south brazier decides whether the other survives
+        // to the north one. tr-20261018-211242-1 held a 3m30s-old torch and a
+        // fresh one, the tank lit the south brazier with its own fresh one, and
+        // the old torch expired on the walk north: back to the hunt, seven minutes
+        // on the north brazier. With a torch still to keep, the oldest one is
+        // spent, its holder walked in for up to BRD_OLDEST_TORCH_WAIT_MS; with
+        // none to keep (the last brazier), the oldest one already in reach.
+        std::vector<HeldTorch> const torches = PartyTorches(bot);
+        HeldTorch const* oldest = nullptr;
+        HeldTorch const* oldestInReach = nullptr;
+        for (HeldTorch const& t : torches)
+        {
+            if (!oldest || t.leftMs < oldest->leftMs)
+                oldest = &t;
+            if (t.holder->IsWithinDistInMap(brazier, BRD_BRAZIER_REACH) &&
+                (!oldestInReach || t.leftMs < oldestInReach->leftMs))
+                oldestInReach = &t;
+        }
+
+        HeldTorch const* spend = nullptr;
+        if (oldest && oldest->holder->IsWithinDistInMap(brazier, BRD_BRAZIER_REACH))
+            spend = oldest;
+        else if (oldestInReach)
+        {
+            DungeonEventProgress const& prog =
+                context->GetValue<DungeonEventProgress&>(DcKey::EventProgress)->Get();
+            if (TorchesStillNeeded(bot) <= 1 ||
+                getMSTimeDiff(prog.stepStartMs, getMSTime()) >= BRD_OLDEST_TORCH_WAIT_MS)
+                spend = oldestInReach;
+        }
+
+        if (!spend)
+        {
+            if (!oldest)
+            {
+                LOG_INFO("playerbots.dungeonclear",
+                         "[DC:{}] Lyceum — at the {} brazier with no Shadowforge Torch left "
+                         "(expired or lost): back to the hunt", bot->GetName(),
+                         brazierEntry == GO_BRAZIER_S ? "south" : "north");
+                return ObjectiveArriveResult::Restart;
+            }
+            if (!DcRun::Of(context).Throttled(DcThrottle::BrdTorchNudge, BRD_TORCH_NUDGE_MS))
+                oldest->holder->GetMotionMaster()->MovePoint(0, brazier->GetPositionX(),
+                                                             brazier->GetPositionY(), brazier->GetPositionZ(),
+                                                             FORCED_MOVEMENT_NONE, 0.0f, 0.0f,
+                                                             /*generatePath*/ true, false);
+            return ObjectiveArriveResult::Running;
+        }
+
+        Player* holder = spend->holder;
+        uint32 const leftS = spend->leftMs / IN_MILLISECONDS;
+        uint32 one = 1;
+        holder->DestroyItemCount(spend->item, one, /*update*/ true);
+        brazier->Use(holder);
+        LOG_INFO("playerbots.dungeonclear",
+                 "[DC:{}] Lyceum — {} spent a Shadowforge Torch ({}s left of 300) on the {} brazier: "
+                 "state {} (TYPE_LYCEUM now {})", bot->GetName(), holder->GetName(), leftS,
+                 brazierEntry == GO_BRAZIER_S ? "south" : "north",
+                 static_cast<uint32>(brazier->GetGoState()),
+                 DcTargeting::GetInstanceScript(bot)
+                     ? DcTargeting::GetInstanceScript(bot)->GetData(TYPE_LYCEUM) : 0u);
+        return ObjectiveArriveResult::Running;  // the lit-state check above latches it
+    }
+}
+
+namespace DcLyceum
+{
+    namespace
+    {
+        using namespace DcBlackrockDepths;
+
+        constexpr uint32 LYCEUM_TICK_MS = 500;
+        uint32 g_lyceumAccumMs = 0;
+
+        // Owner -> the stance its pet had before the room took it. Only pets
+        // this sweep changed are here, so a stance a player set themselves is
+        // never "restored" over.
+        std::map<ObjectGuid, ReactStates> g_lyceumPets;
+
+        bool InLyceum(WorldObject const* o)
+        {
+            return o && o->GetMapId() == MAP_ID &&
+                   o->GetPositionX() >= LYCEUM_BOX_X_MIN && o->GetPositionX() <= LYCEUM_BOX_X_MAX &&
+                   o->GetPositionY() >= LYCEUM_BOX_Y_MIN && o->GetPositionY() <= LYCEUM_BOX_Y_MAX &&
+                   o->GetPositionZ() >= LYCEUM_BOX_Z_MIN && o->GetPositionZ() <= LYCEUM_BOX_Z_MAX;
+        }
+
+        // Hold one bot's pet: passive, and back on follow if it is fighting or
+        // has been told to do anything but follow.
+        void HoldPet(Player* owner, PlayerbotAI* ownerAI)
+        {
+            Pet* pet = owner->GetPet();
+            if (!pet || !pet->IsAlive())
+                return;
+
+            if (pet->GetReactState() != REACT_PASSIVE)
+            {
+                g_lyceumPets.emplace(owner->GetGUID(), pet->GetReactState());
+                pet->SetReactState(REACT_PASSIVE);
+                LOG_INFO("playerbots.dungeonclear",
+                         "[DC:{}] Lyceum — {}'s pet {} held passive on follow for the room",
+                         owner->GetName(), owner->GetName(), pet->GetName());
+            }
+            if (!g_lyceumPets.count(owner->GetGUID()))
+                return;  // passive by its owner's choice; not ours to steer
+
+            CharmInfo* ci = pet->GetCharmInfo();
+            if (pet->GetVictim() || (ci && !ci->HasCommandState(COMMAND_FOLLOW)))
+                ownerAI->PetFollow();
+        }
+
+        void ReleasePet(ObjectGuid ownerGuid, ReactStates prior)
+        {
+            Player* owner = ObjectAccessor::FindPlayer(ownerGuid);
+            if (!owner || !owner->IsInWorld())
+                return;
+            if (Pet* pet = owner->GetPet())
+            {
+                pet->SetReactState(prior);
+                LOG_INFO("playerbots.dungeonclear",
+                         "[DC:{}] Lyceum — {}'s pet {} released from the room hold",
+                         owner->GetName(), owner->GetName(), pet->GetName());
+            }
+        }
+
+        // Any keeper corpse in the room that still holds its torch, looted by a
+        // member already standing at it. Nobody is walked anywhere: in combat the
+        // fight owns movement, and the corpse is where the melee killed it.
+        void LootTorchesInReach(Player* tank)
+        {
+            if (PartyTorchCount(tank) >= TorchesStillNeeded(tank))
+                return;
+            std::list<Creature*> keepers;
+            tank->GetCreatureListWithEntryInGrid(keepers, NPC_FLAME_KEEPER, LYCEUM_KEEPER_SCAN);
+            for (Creature* k : keepers)
+            {
+                if (k->IsAlive() || TorchSlot(k) < 0)
+                    continue;
+                if (Player* looter = MemberAtCorpse(tank, k))
+                {
+                    LootTorch(tank, looter, k, tank->IsInCombat() ? "mid-fight" : "on the spot");
+                    if (PartyTorchCount(tank) >= TorchesStillNeeded(tank))
+                        return;
+                }
+            }
+        }
+    }
+
+    void Tick(uint32 diff, bool moduleEnabled)
+    {
+        g_lyceumAccumMs += diff;
+        if (g_lyceumAccumMs < LYCEUM_TICK_MS)
+            return;
+        g_lyceumAccumMs = 0;
+
+        std::set<ObjectGuid> held;
+        if (moduleEnabled)
+        {
+            for (ObjectGuid guid : DcStatusPublisher::ActiveTanks())
+            {
+                Player* tank = ObjectAccessor::FindPlayer(guid);
+                if (!tank || !tank->IsInWorld() || tank->GetMapId() != MAP_ID)
+                    continue;
+                PlayerbotAI* tankAI = GET_PLAYERBOT_AI(tank);
+                if (!tankAI)
+                    continue;
+                DcRunState const& run = DcRun::Of(tankAI);
+                if (!run.enabled || run.paused)
+                    continue;
+
+                if (tank->IsAlive() && InLyceum(tank))
+                    LootTorchesInReach(tank);
+
+                ForEachLivingMember(tank, [&](Player* m)
+                {
+                    if (m->GetInstanceId() != tank->GetInstanceId() || !InLyceum(m))
+                        return;
+                    PlayerbotAI* mAI = GET_PLAYERBOT_AI(m);
+                    if (!mAI)
+                        return;  // a human's pet is the human's
+                    held.insert(m->GetGUID());
+                    HoldPet(m, mAI);
+                });
+            }
+        }
+
+        for (auto it = g_lyceumPets.begin(); it != g_lyceumPets.end();)
+        {
+            if (held.count(it->first))
+            {
+                ++it;
+                continue;
+            }
+            ReleasePet(it->first, it->second);
+            it = g_lyceumPets.erase(it);
+        }
+    }
 }
 
 void RegisterBlackrockDepthsHooks(ObjectiveHookRegistry::HookTable& out)
 {
+    ObjectiveHookRegistry::AddHook(out, HOOK_GATHER_TORCH, &GatherShadowforgeTorch);
+    ObjectiveHookRegistry::AddHook(out, HOOK_LIGHT_BRAZIER_S,
+        [](Player* bot, AiObjectContext* context, DungeonBossInfo const&)
+        { return LightBrazier(bot, context, GO_BRAZIER_S); });
+    ObjectiveHookRegistry::AddHook(out, HOOK_LIGHT_BRAZIER_N,
+        [](Player* bot, AiObjectContext* context, DungeonBossInfo const&)
+        { return LightBrazier(bot, context, GO_BRAZIER_N); });
     ObjectiveHookRegistry::AddHook(out, HOOK_TOMB_MUSTER, &TombMuster);
     ObjectiveHookRegistry::AddHook(out, HOOK_TOMB_RESET_WATCH, &TombResetWatch);
     ObjectiveHookRegistry::AddHook(out, HOOK_START_ROCKNOT_ALE_RUN, &StartRocknotAleRun);
@@ -701,6 +1191,101 @@ void RegisterBlackrockDepthsEvents(std::vector<DungeonEvent>& out)
             // time counts (Drive re-bases the step clock after every fight).
             .Timeout(420000)
             .Build());
+
+    // --- THE LYCEUM, two ANCHORED brazier events ahead of Magmus (index 17) ---
+    // The room is a PUSH, not a clear: its Reservists come back a minute after
+    // they die (never-target, boxed to the room — DcNeverTargetRegistry), so
+    // nothing here waits for an empty room. Each event hunts the live Flame
+    // Keepers, takes their torches, and spends one on its brazier:
+    //   0. a MoveTo on the anchor itself, radius LYCEUM_KEEPER_SCAN (see below)
+    //   1. KillCreatureEngage the keepers (the engage pipeline walks the tank to
+    //      each, across the room, through whatever it meets)
+    //   2. hook 48: loot the torches; Done once the party holds one; Restart
+    //      (back to 0) if it holds none and a keeper is up; otherwise wait out
+    //      the pool's 300s respawn, stalling visibly at TORCH_WAIT_MS
+    //   3. walk to the brazier
+    //   4. hook 49/50: spend a torch and light it; Restart if the torch expired
+    //
+    // STEP 0 ONLY ARMS THE PERSISTENCE STICKY. With the hunt leading, the tank
+    // stepped inside arriveRadius, DcObjectiveArriveAction's engage branch
+    // walked it one tick toward a keeper 55-90yd off and returned BEFORE Drive,
+    // so the event never stamped its progress and IsPersistentAnchoredEventActive
+    // (which counts only a leading MoveTo as started) never latched. Out of the
+    // ring, Advance hauled it back, forever: tr-20261018-093304-1 parked at
+    // dist=8.0..9.5 > arriveRadius=8.0 on the brazier dais for four minutes with
+    // not one "event 'Lyceum: South Brazier' step" line. The radius is the hunt's
+    // own scan so the step is Done wherever a Restart rewinds from — anywhere the
+    // hunt could have taken the tank — and never walks it back up to the dais.
+    //
+    // TWO EVENTS, NOT ONE: each brazier gets its own objective (the same-index
+    // siblings run S, then N, then Magmus) so each completes on its own end
+    // state. NEITHER IS ANCHORED ON ITS BRAZIER (LYCEUM_ENTRY in
+    // DungeonEventTables.h): the south event starts just inside the door and the
+    // north one on the south stand, where the south one leaves the tank, so the
+    // whole room — the hunt and both walks to a brazier — runs inside an event,
+    // with its pull stand-down, tight follow and pack leash, and none of it as
+    // ordinary Advance. Step 3's MoveTo walks a brazier from wherever the hunt
+    // left the tank, across the room if need be. The first hunt usually kills
+    // both keepers, so the north event normally finds its torch already in the
+    // bags and skips straight to the walk. Each event also COMPLETES on its own end state, whatever step it
+    // is on: the south one on its brazier burning, the north one on the Golem
+    // door opening — so a brazier a human (or a rewind) already lit is never
+    // re-hunted for.
+    //
+    // NOT DrivesInCombat, which the plan asked for: that flag only exists on the
+    // conditional rung (TestEventRegistry pins it), and an anchored event is
+    // driven by the objective action between fights. The Reservists are static
+    // spawns that aggro by proximity, so fights in here end; the hunt, the loot
+    // and the walk happen in the gaps, and the pull system stands down for a
+    // persistent anchored event so the tank face-pulls what it meets.
+    //
+    // MOVE AS ONE, FIGHT WHAT CAME. Between fights the tank does not take its
+    // next step while any living member is more than LYCEUM_PACK_LEASH away
+    // (PackLeash — DcPackLeashDecision.h bounds it). The room refills, so a
+    // party strung across it is a party pulling fresh Reservists onto its
+    // furthest member — in the logged runs, the healer: the tank chased those
+    // adds off him across the room and once left the lit brazier 102yd behind.
+    // Pets are held passive inside the room for the same reason (DcLyceum::Tick,
+    // BlackrockDepthsLyceum.h): they took 15-30% of all Reservist hits.
+    //
+    // PERSISTENT: every step spans fights.
+    out.push_back(
+        EventBuilder(MAP_ID, EVENT_LYCEUM_SOUTH, "Lyceum: South Brazier")
+            .Anchored(/*orderIndex*/ 17)
+            .Persistent()
+            .CompleteWhenGOState(GO_BRAZIER_S, GO_STATE_LIT_OR_OPEN, LYCEUM_ROOM_SCAN)
+            .PackLeash(LYCEUM_PACK_LEASH)
+            .MoveTo(LYCEUM_ENTRY_X, LYCEUM_ENTRY_Y, LYCEUM_ENTRY_Z, /*radius*/ LYCEUM_KEEPER_SCAN)
+            .KillCreatureEngage(NPC_FLAME_KEEPER, /*count*/ 1, LYCEUM_KEEPER_SCAN)
+            .Timeout(240000)
+            .Custom(HOOK_GATHER_TORCH)
+            .Timeout(TORCH_WAIT_MS)
+            .MoveTo(BRAZIER_S_X, BRAZIER_S_Y, BRAZIER_S_Z, /*radius*/ 4.0f)
+            .Timeout(120000)
+            .Custom(HOOK_LIGHT_BRAZIER_S)
+            .Build());
+
+    out.push_back(
+        EventBuilder(MAP_ID, EVENT_LYCEUM_NORTH, "Lyceum: North Brazier")
+            .Anchored(/*orderIndex*/ 17)
+            .Persistent()
+            // The doors are ~70yd from the north brazier; the scan reaches both.
+            .CompleteWhenGOState(GO_GOLEM_DOOR_N, GO_STATE_LIT_OR_OPEN, LYCEUM_ROOM_SCAN)
+            .PackLeash(LYCEUM_PACK_LEASH)
+            .MoveTo(BRAZIER_S_X, BRAZIER_S_Y, BRAZIER_S_Z, /*radius*/ LYCEUM_KEEPER_SCAN)
+            .KillCreatureEngage(NPC_FLAME_KEEPER, /*count*/ 1, LYCEUM_KEEPER_SCAN)
+            .Timeout(240000)
+            .Custom(HOOK_GATHER_TORCH)
+            .Timeout(TORCH_WAIT_MS)
+            .MoveTo(BRAZIER_N_X, BRAZIER_N_Y, BRAZIER_N_Z, /*radius*/ 4.0f)
+            .Timeout(120000)
+            .Custom(HOOK_LIGHT_BRAZIER_N)
+            // Lighting the second brazier sets TYPE_LYCEUM DONE, which opens the
+            // Golem doors in the same call. Confirm on the door — it is what the
+            // party walks through, and an instance reload can read DONE with it
+            // still shut (upstream; see the plan's §8).
+            .WaitForGOState(GO_GOLEM_DOOR_N, GO_STATE_LIT_OR_OPEN, /*timeoutMs*/ 10000, LYCEUM_ROOM_SCAN)
+            .Build());
 }
 
 // --- roster patch (relocated from BossRosterRegistry) --------------------
@@ -789,6 +1374,21 @@ void RegisterBlackrockDepthsRoster(std::vector<BossRosterPatch>& t)
                           DcBlackrockDepths::TOMB_HOLD_Y, DcBlackrockDepths::TOMB_HOLD_Z,
                           /*arriveRadius*/ 8.0f, /*gateEntry*/ 0, /*hook*/ 0,
                           DcBlackrockDepths::EVENT_TOMB_OF_SEVEN),
+            // --- Blackrock Depths — the Lyceum braziers ----------------------
+            // Two objectives on Magmus's index 17, one per brazier (events 7/8;
+            // same-index objectives run in this order, then Magmus). Anchored at
+            // the Lyceum door (S) and on the south stand (N), NOT on their
+            // braziers, so the events own the whole room — see LYCEUM_ENTRY.
+            MakeObjective(OBJ(DcBlackrockDepths::OBJ_LYCEUM_SOUTH), /*encounterIndex*/ 17, 230,
+                          "Lyceum: South Brazier", DcBlackrockDepths::LYCEUM_ENTRY_X,
+                          DcBlackrockDepths::LYCEUM_ENTRY_Y, DcBlackrockDepths::LYCEUM_ENTRY_Z,
+                          /*arriveRadius*/ 8.0f, /*gateEntry*/ 0, /*hook*/ 0,
+                          DcBlackrockDepths::EVENT_LYCEUM_SOUTH),
+            MakeObjective(OBJ(DcBlackrockDepths::OBJ_LYCEUM_NORTH), /*encounterIndex*/ 17, 230,
+                          "Lyceum: North Brazier", DcBlackrockDepths::BRAZIER_S_X,
+                          DcBlackrockDepths::BRAZIER_S_Y, DcBlackrockDepths::BRAZIER_S_Z,
+                          /*arriveRadius*/ 8.0f, /*gateEntry*/ 0, /*hook*/ 0,
+                          DcBlackrockDepths::EVENT_LYCEUM_NORTH),
         };
         // --- Blackrock Depths — Stilgiss and Darkvire before Incendius ---
         // DBC order runs Loregrain -> Incendius (bit 5) -> Stilgiss (6) ->
@@ -873,6 +1473,8 @@ void RegisterBlackrockDepthsWings(std::unordered_map<uint32, DungeonWingLayout>&
             9156,    // Ambassador Flamelash
             OBJ(DcBlackrockDepths::OBJ_TOMB_OF_SEVEN),  // Tomb of the Seven (event 6)
             9035,    // Anger'rel (The Seven)
+            OBJ(DcBlackrockDepths::OBJ_LYCEUM_SOUTH),   // Lyceum: South Brazier (event 7)
+            OBJ(DcBlackrockDepths::OBJ_LYCEUM_NORTH),   // Lyceum: North Brazier (event 8)
             9938,    // Magmus
             9019,    // Emperor Dagran Thaurissan
         }, "brd-uc", /*lfgDungeonId*/ 276, /*terminalBossEntry*/ 9019, /*encounterMask*/ 0x7FE00u},

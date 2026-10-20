@@ -238,7 +238,8 @@ namespace
             // re-pick it every tick. The FarTargets set already drops these, but
             // this scan falls back to the stock `possible targets` value when
             // FarTargets is empty, so the check is repeated here.
-            if (DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), u->GetEntry()))
+            if (DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), u->GetEntry(),
+                                                     u->GetPositionX(), u->GetPositionY()))
                 continue;
             // Nor is an add a live boss summoned for his own encounter (Moroes'
             // dinner guests on the dais): it comes with the boss, and pulling it
@@ -641,7 +642,8 @@ Unit* DcTargeting::FindEnRouteAggroPack(Player* bot, AiObjectContext* ctx,
                                          return true;
                                      if (!AttackersValue::IsPossibleTarget(u, bot))
                                          return true;
-                                     if (DcNeverTargetRegistry::IsNeverTarget(mapId, u->GetEntry()))
+                                     if (DcNeverTargetRegistry::IsNeverTarget(mapId, u->GetEntry(),
+                                                                              u->GetPositionX(), u->GetPositionY()))
                                          return true;
                                      if (IsDungeonBossEntry(ctx, u->GetEntry()) ||
                                          IsBossSummon(u))
@@ -966,7 +968,7 @@ Unit* DcTargeting::FindNearestReachableHostile(Player* bot)
         // A scripted never-dies mob would be picked here forever (see
         // DcNeverTargetRegistry) — this scan builds its own candidate list from
         // the creature store, so the FarTargets filter never sees it.
-        if (DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), c->GetEntry()))
+        if (DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), c->GetEntry(), c->GetPositionX(), c->GetPositionY()))
             continue;
         candidates.emplace_back(dist, c);
     }
@@ -1477,7 +1479,7 @@ Unit* DcTargeting::NearestHostileNearPoint(Player* bot, AiObjectContext* ctx,
             continue;
         if (!AttackersValue::IsPossibleTarget(u, bot))
             continue;
-        if (DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), u->GetEntry()))
+        if (DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), u->GetEntry(), u->GetPositionX(), u->GetPositionY()))
             continue;
         // Never treat an encounter boss or a room-aggro boss/partner as clearable
         // area trash — those belong to the dedicated boss/at-boss paths.
