@@ -64,6 +64,14 @@ constexpr uint32 DC_LONGROUTE_DEFER_LIMIT = 20;
 // that a genuine stand-down returns the tick to Advance almost at once.
 constexpr uint32 DC_ENGAGE_WALK_YIELD_MS = 1000;
 
+// Engage-trash's walk-in gives a target up once it has not got any nearer for
+// this long, and leaves it alone for the second span
+// (DungeonClearMath::EngageWalkGivenUp). Eight seconds is ~50yd of walking at
+// run speed; a tick gap past the third restarts the measurement.
+constexpr uint32 DC_ENGAGE_WALK_GIVEUP_MS = 8 * 1000;
+constexpr uint32 DC_ENGAGE_WALK_GIVEN_UP_MS = 60 * 1000;
+constexpr uint32 DC_ENGAGE_WALK_TICK_GAP_MS = 2 * 1000;
+
 // The boss engage's walk-in refused outright (DungeonClearMath::ShouldTagBossFromStandoff):
 // how long the refusal must persist before the tank tags the boss from where it
 // stands, and how far away a boss in line of sight may be for that. The grace

@@ -1652,6 +1652,63 @@ namespace DungeonClearMath
         return !bossInCombat && chaseEndToBoss < wakeSphere;
     }
 
+    // Engage-trash's walk-in on one target: is it getting any nearer? True once the
+    // distance has not improved by `minClose` for `limitMs` of walking. A gap
+    // between ticks longer than `gapMs` (the action lost the tick to a leash
+    // hold, a long-route deferral, a fight) restarts the window rather than
+    // counting the time away against it.
+    //
+    // tr-20261019-182249-1 / sk-20261019-105358-31: the walk-in on a Doomforge
+    // Arcanasmith past Argelmach's door stopped every tick to re-aim and Advance
+    // re-issued its spline in between; the tank stood at (781.7,31.9) for 100s
+    // through 118 yields, the stuck count it never reset climbed to the limit, and
+    // the stall it set ended the run.
+    struct WalkInWatch
+    {
+        float bestDist = -1.0f;
+        uint32_t progressMs = 0;
+        uint32_t lastTickMs = 0;
+    };
+
+    inline bool EngageWalkGivenUp(WalkInWatch& w, float dist, float minClose, uint32_t nowMs,
+                                  uint32_t limitMs, uint32_t gapMs)
+    {
+        bool const restart = w.bestDist < 0.0f || nowMs - w.lastTickMs > gapMs;
+        if (restart || dist < w.bestDist - minClose)
+        {
+            w.bestDist = dist;
+            w.progressMs = nowMs;
+        }
+        w.lastTickMs = nowMs;
+        return nowMs - w.progressMs >= limitMs;
+    }
+
+    // The assist camp's no-LOS close-in on a fight holder: true once every move
+    // toward the SAME holder has been refused for `limitMs` running. A move that
+    // goes restarts it; so does a new holder (its refusals start now).
+    // `refusedSince` is the caller's state, 0 = not refusing.
+    //
+    // sk-20261019-105358 (-70/-72/-73, 2/17): a Reservist or Medic General
+    // Angerforge summons at a random offset landed inside the geometry west of the
+    // fight. Same floor, so the level gate passed it; every member drove at it on
+    // a refused route (900-2000 refusals each), kept re-seeding combat on it over
+    // the stuck-combat breaker, and walked off the tank until the stall watchdog.
+    inline bool AssistCloseGivenUp(bool moved, bool sameTarget, uint32_t nowMs,
+                                   uint32_t limitMs, uint32_t& refusedSince)
+    {
+        if (moved)
+        {
+            refusedSince = 0;
+            return false;
+        }
+        if (!sameTarget || refusedSince == 0)
+        {
+            refusedSince = nowMs != 0 ? nowMs : 1;
+            return false;
+        }
+        return nowMs - refusedSince >= limitMs;
+    }
+
     // How far from the boss a chase toward a target ENDS (2D): a mover with reach
     // `range` stops that far short of the target on its own side, and one already
     // inside it does not move at all. range 0 = it ends on the target (melee, a

@@ -780,6 +780,13 @@ bool DungeonClearEngageTrashAction::Execute(Event /*event*/)
             target = fresh;
     }
 
+    // A target whose walk-in was given up (EngageWalkGivenUp below) is left to
+    // Advance until the give-up lapses; the trigger may well keep naming it.
+    DcApproachState& appr =
+        context->GetValue<DcApproachState&>(DcKey::ApproachState)->Get();
+    if (target && appr.engageWalkGivenUp.Has(target->GetGUID(), getMSTime()))
+        target = nullptr;
+
     if (!target)
     {
         if (!stickyGuid.IsEmpty())
@@ -821,8 +828,6 @@ bool DungeonClearEngageTrashAction::Execute(Event /*event*/)
     // ticks we take the tick back and walk in ourselves — but only for a pack the
     // CHUNKED router says is reachable, so a genuinely unreachable pack (across a gap,
     // behind a gate) still falls through to Advance rather than grinding at it.
-    DcApproachState& appr =
-        context->GetValue<DcApproachState&>(DcKey::ApproachState)->Get();
     float const targetDist = bot->GetDistance(target);
     if (targetDist > DC_ENGAGE_RANGE && !IsDirectlyReachable(bot, target))
     {
@@ -889,6 +894,39 @@ bool DungeonClearEngageTrashAction::Execute(Event /*event*/)
             return true;
         default:
             break;
+    }
+
+    // A walk-in that is not getting any nearer is given up and the tick handed to
+    // Advance (DungeonClearMath::EngageWalkGivenUp). Out of combat only: in a
+    // fight the combat engine owns the tank and the gap is no measure of anything.
+    if (!bot->IsInCombat())
+    {
+        uint32 const nowMs = getMSTime();
+        if (appr.engageWalkWatchTarget != target->GetGUID())
+        {
+            appr.engageWalkWatchTarget = target->GetGUID();
+            appr.engageWalkWatch = DungeonClearMath::WalkInWatch{};
+        }
+        if (DungeonClearMath::EngageWalkGivenUp(appr.engageWalkWatch, bot->GetExactDist(target),
+                                                DC_STUCK_DISPLACEMENT, nowMs,
+                                                DC_ENGAGE_WALK_GIVEUP_MS,
+                                                DC_ENGAGE_WALK_TICK_GAP_MS))
+        {
+            LOG_INFO("playerbots.dungeonclear",
+                     "[DC:{}] engage trash: walk-in on {} {} made no ground for {} ms "
+                     "({:.1f}yd, best {:.1f}yd) -> given up for {}s, advance resumes",
+                     bot->GetName(), target->GetName(), target->GetGUID().ToString(),
+                     nowMs - appr.engageWalkWatch.progressMs, bot->GetExactDist(target),
+                     appr.engageWalkWatch.bestDist, DC_ENGAGE_WALK_GIVEN_UP_MS / 1000);
+            appr.engageWalkGivenUp.Add(target->GetGUID(), nowMs, DC_ENGAGE_WALK_GIVEN_UP_MS);
+            appr.engageWalkWatchTarget.Clear();
+            appr.engageWalkWatch = DungeonClearMath::WalkInWatch{};
+            appr.engageWalkTarget.Clear();
+            appr.engageWalkMs = 0;
+            appr.stuckCount = 0;  // the frozen walk-in was never Advance's own failure
+            context->GetValue<ObjectGuid>(DcKey::EngageTrashTarget)->Set(ObjectGuid::Empty);
+            return false;
+        }
     }
 
     // Stamp a live walk-in so Advance leaves it alone on the ticks this action

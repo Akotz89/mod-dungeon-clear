@@ -3491,6 +3491,59 @@ TEST(DungeonClearRoomTrashTest, TheChaseBanRulesOnWhereTheChaseEnds)
     EXPECT_TRUE(ChaseWakesSleepingBoss(fromBehind, 28.3f, false));
 }
 
+// sk-20261019-105358 (-70/-72/-73): an Angerforge summon inside the geometry held
+// every member on refused routes until the stall watchdog. Five seconds of
+// refusals on the same holder give it up; a move or a new holder restarts.
+TEST(DungeonClearAssistTest, ARefusedHolderIsGivenUp)
+{
+    using DungeonClearMath::AssistCloseGivenUp;
+    uint32_t since = 0;
+    EXPECT_FALSE(AssistCloseGivenUp(false, true, 1000, 5000, since));
+    EXPECT_EQ(since, 1000u);
+    EXPECT_FALSE(AssistCloseGivenUp(false, true, 5999, 5000, since));
+    EXPECT_TRUE(AssistCloseGivenUp(false, true, 6000, 5000, since));
+    // A move that goes restarts the clock.
+    EXPECT_FALSE(AssistCloseGivenUp(true, true, 6100, 5000, since));
+    EXPECT_EQ(since, 0u);
+    EXPECT_FALSE(AssistCloseGivenUp(false, true, 6200, 5000, since));
+    EXPECT_FALSE(AssistCloseGivenUp(false, true, 11199, 5000, since));
+    // A new holder starts its own refusals now.
+    EXPECT_FALSE(AssistCloseGivenUp(false, false, 11200, 5000, since));
+    EXPECT_EQ(since, 11200u);
+    EXPECT_TRUE(AssistCloseGivenUp(false, true, 16200, 5000, since));
+    // getMSTime 0 still starts a clock.
+    since = 0;
+    EXPECT_FALSE(AssistCloseGivenUp(false, true, 0, 5000, since));
+    EXPECT_NE(since, 0u);
+}
+
+// tr-20261019-182249-1: the walk-in on a Doomforge Arcanasmith stood still at
+// (781.7,31.9) for 100s. Eight seconds without closing give it up; a walk that
+// closes, or a gap in the ticks, restarts the measure.
+TEST(DungeonClearEngageTrashTest, AWalkInThatGainsNoGroundIsGivenUp)
+{
+    using DungeonClearMath::EngageWalkGivenUp;
+    DungeonClearMath::WalkInWatch w;
+    EXPECT_FALSE(EngageWalkGivenUp(w, 40.0f, 0.5f, 1000, 8000, 2000));
+    // Frozen: the same 40yd tick after tick.
+    uint32_t t = 1000;
+    for (; t < 8900; t += 200)
+        EXPECT_FALSE(EngageWalkGivenUp(w, 40.0f, 0.5f, t, 8000, 2000));
+    EXPECT_TRUE(EngageWalkGivenUp(w, 40.0f, 0.5f, 9000, 8000, 2000));
+
+    // A walk that closes never trips it.
+    DungeonClearMath::WalkInWatch walking;
+    float d = 60.0f;
+    for (uint32_t ms = 0; ms < 20000; ms += 200, d -= 1.0f)
+        EXPECT_FALSE(EngageWalkGivenUp(walking, d, 0.5f, ms + 1, 8000, 2000));
+
+    // Losing the tick for longer than the gap restarts the window.
+    DungeonClearMath::WalkInWatch held;
+    EXPECT_FALSE(EngageWalkGivenUp(held, 30.0f, 0.5f, 1000, 8000, 2000));
+    EXPECT_FALSE(EngageWalkGivenUp(held, 30.0f, 0.5f, 7000, 8000, 2000));
+    EXPECT_FALSE(EngageWalkGivenUp(held, 30.0f, 0.5f, 10000, 8000, 2000));
+}
+
 TEST(DungeonClearRoomTrashTest, AKillDropsTheRefusals)
 {
     EXPECT_TRUE(DungeonClearMath::ShouldDropLaneRefusals(23u, 24u));

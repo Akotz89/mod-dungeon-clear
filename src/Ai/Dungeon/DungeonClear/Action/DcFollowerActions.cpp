@@ -1233,6 +1233,13 @@ bool DungeonClearCampHoldActionBase::Execute(Event /*event*/)
 
 namespace
 {
+    // The assist camp's no-LOS close-in gives a fight holder up once every move
+    // toward it has been refused this long, and skips it for the second span
+    // (DungeonClearMath::AssistCloseGivenUp). Five seconds is well past an arbiter
+    // deferral or a door's swing; a minute lets a mob that moves be tried again.
+    constexpr uint32 DC_ASSIST_REFUSED_GIVE_UP_MS = 5 * 1000;
+    constexpr uint32 DC_ASSIST_GIVEN_UP_MS = 60 * 1000;
+
     // The mob the PARTY is actually fighting, for a follower to assist onto. The old
     // lookup only considered the LEADER's attacker list + victim — which is EMPTY
     // whenever the pack is ranged, or the mobs fixated a DPS instead of the tank, so
@@ -1271,6 +1278,9 @@ namespace
     // four DcTargeting pickers and none of the followers' own.
     Unit* PickPartyFightTarget(Player* bot, AiObjectContext* context, Player* leader)
     {
+        DcApproachState const& approach =
+            context->GetValue<DcApproachState&>(DcKey::ApproachState)->Get();
+        uint32 const now = getMSTime();
         Unit* best = nullptr;
         float bestDist = 0.0f;
         auto consider = [&](Unit* u)
@@ -1281,6 +1291,10 @@ namespace
                 return;
             float const d = bot->GetExactDist2d(u);
             if (best && d >= bestDist)
+                return;
+            // A holder this bot was refused every route to (the assist camp's
+            // no-LOS close-in, AssistCloseGivenUp) is no fight it can join.
+            if (approach.AssistGivenUp(u->GetGUID(), now))
                 return;
             // CHEAPEST LAST: only a candidate that would actually WIN the rank pays
             // for the probe, and the same-level answer is one float compare — so a
@@ -1359,6 +1373,8 @@ bool DungeonClearAssistCampActionBase::Execute(Event /*event*/)
     // to the tank's fight radius so a stale far-away target can't hijack the
     // assist; anything outside falls through to the fresh pick below.
     Unit* target = nullptr;
+    DcApproachState& approach = context->GetValue<DcApproachState&>(DcKey::ApproachState)->Get();
+    uint32 const now = getMSTime();
     if (Unit* cur = context->GetValue<Unit*>(DcKey::Stock::CurrentTarget)->Get())
     {
         // Same level gate as the fresh pick below. A target already in the slot —
@@ -1370,7 +1386,8 @@ bool DungeonClearAssistCampActionBase::Execute(Event /*event*/)
             bot->IsValidAttackTarget(cur) &&
             cur->GetExactDist2d(leader) <=
                 DcSettings::GetFloat(bot, "PartyMaxSpread") * 1.5f &&
-            DcTickMemoAccess::LevelReachable(bot, context, cur))
+            DcTickMemoAccess::LevelReachable(bot, context, cur) &&
+            !approach.AssistGivenUp(cur->GetGUID(), now))
             target = cur;
     }
 
@@ -1461,6 +1478,7 @@ bool DungeonClearAssistCampActionBase::Execute(Event /*event*/)
 
     if (bot->IsWithinLOSInMap(target))
     {
+        approach.assistRefusedSince = 0;  // the refusal clock runs on the close-in only
         if (inAttackRange)
         {
             if (!bot->HasInArc(CAST_ANGLE_IN_FRONT, target))
@@ -1497,6 +1515,29 @@ bool DungeonClearAssistCampActionBase::Execute(Event /*event*/)
     DC_PULL_TRACE("[DC:{}] assist camp: no-LOS, closing on mob {} ({:.1f}yd, prio={}, "
                   "moved={})", bot->GetName(), target->GetGUID().ToString(), dist,
                   prio == MovementPriority::MOVEMENT_COMBAT ? "combat" : "normal", closing);
+
+    // Refused every route to it for long enough: give it up (see
+    // DungeonClearMath::AssistCloseGivenUp), drop it as the target, and yield.
+    // Neither pick above offers it again until the give-up lapses, so nothing
+    // re-seeds combat on it and the stuck-combat breaker's clear holds.
+    // A false return while the bot is still walking is the arbiter waiting on the
+    // last move, not a refusal; only "refused and not moving" counts.
+    bool const sameTarget = approach.assistRefusedTarget == target->GetGUID();
+    approach.assistRefusedTarget = target->GetGUID();
+    if (DungeonClearMath::AssistCloseGivenUp(closing || bot->isMoving(), sameTarget, now,
+                                             DC_ASSIST_REFUSED_GIVE_UP_MS,
+                                             approach.assistRefusedSince))
+    {
+        uint32 const refusedMs = now - approach.assistRefusedSince;
+        approach.GiveUpAssist(target->GetGUID(), now, DC_ASSIST_GIVEN_UP_MS);
+        LOG_INFO("playerbots.dungeonclear",
+                 "[DC:{}] assist camp: no route to {} {} ({:.1f}yd, refused {} ms) -> given "
+                 "up for {}s", bot->GetName(), target->GetName(), target->GetGUID().ToString(),
+                 dist, refusedMs, DC_ASSIST_GIVEN_UP_MS / 1000);
+        bot->SetSelection(ObjectGuid::Empty);
+        context->GetValue<Unit*>(DcKey::Stock::CurrentTarget)->Set(nullptr);
+        return false;
+    }
 
     return true;
 }
