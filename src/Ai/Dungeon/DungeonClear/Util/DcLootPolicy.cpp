@@ -5,6 +5,7 @@
 
 #include "DcLootPolicy.h"
 
+#include "DcEncounterChests.h"
 #include "DungeonClearMath.h"
 #include "DungeonClearTuning.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
@@ -269,13 +270,16 @@ bool DcLootPolicy::MaybeSkipUnworthyLoot(PlayerbotAI* botAI)
         else if (GameObject* go = botAI->GetGameObject(target.guid))
         {
             // A gameobject. With IgnoreChests on (the default) no world object
-            // is ever worth a detour — the bot stops only for corpses. With it
+            // is ever worth a detour — the bot stops only for corpses — EXCEPT an
+            // encounter chest, which holds a boss's whole reward (the Chest of the
+            // Seven was being skipped like trash; see DcEncounterChests). With it
             // off, stop only for real chests. Herbalism / mining gathering veins
             // are also chest-type gameobjects, but are gated by a profession-
             // skill lock — skillId carries that profession — so exclude them;
             // every non-chest gameobject (fishing hole, lever, quest object) is
             // excluded by type.
-            keep = !ignoreChests && go->GetGoType() == GAMEOBJECT_TYPE_CHEST &&
+            keep = (!ignoreChests || DcEncounterChests::IsEncounterChest(go->GetEntry())) &&
+                   go->GetGoType() == GAMEOBJECT_TYPE_CHEST &&
                    target.skillId != SKILL_HERBALISM && target.skillId != SKILL_MINING;
         }
         // else: loose item loot or an unresolvable guid -> not a corpse or chest.

@@ -6,6 +6,7 @@
 #include "gtest/gtest.h"
 #include "DungeonClearUtil.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcDoorIndex.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcEncounterChests.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTickMemo.h"
 #include "PlayerbotAIConfig.h"
 #include "Player.h"
@@ -721,4 +722,23 @@ TEST(DcTickMemoTest, EnsureFreshResetsFieldsOnNewTick)
     EXPECT_EQ(m.atBossEngage, -1);
     EXPECT_EQ(m.betweenPullsReadyStrict, -1);
     EXPECT_EQ(m.betweenPullsReadyLoose, -1);
+}
+
+// The Chest of the Seven holds the Tomb of the Seven's whole reward, and with
+// IgnoreChests on (the default) it was skipped like a trash chest. Encounter
+// chests bypass that; ordinary trash chests and the hook-owned chests do not.
+TEST(DcEncounterChestsTest, BossRewardChestsAreListed)
+{
+    EXPECT_TRUE(DcEncounterChests::IsEncounterChest(169243));  // Chest of The Seven
+    EXPECT_TRUE(DcEncounterChests::IsEncounterChest(190663));  // Dark Runed Chest (CoS)
+    EXPECT_TRUE(DcEncounterChests::IsEncounterChest(193603));  // Cache of Eregos (H)
+}
+
+TEST(DcEncounterChestsTest, TrashAndHookOwnedChestsAreNot)
+{
+    EXPECT_FALSE(DcEncounterChests::IsEncounterChest(75298));   // Large Solid Chest
+    EXPECT_FALSE(DcEncounterChests::IsEncounterChest(160845));  // Dark Coffer (key lock)
+    EXPECT_FALSE(DcEncounterChests::IsEncounterChest(184465));  // Cache of the Legion (Mechanar hook)
+    EXPECT_FALSE(DcEncounterChests::IsEncounterChest(185119));  // Dust Covered Chest (chess conductor)
+    EXPECT_FALSE(DcEncounterChests::IsEncounterChest(0));
 }
