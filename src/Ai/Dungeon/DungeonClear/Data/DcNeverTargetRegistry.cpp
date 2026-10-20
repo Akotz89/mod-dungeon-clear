@@ -366,6 +366,16 @@ namespace
         // killing one is negative progress. Whelps that aggro the party are
         // fought where they come, by the stock combat engine.
         { 229, 10161 },  // Upper Blackrock Spire — Rookery Whelp (hatched from the eggs)
+
+        // --- Upper Blackrock Spire (229): Lord Victor Nefarius ----------------
+        //
+        // Class 1. Nefarius (10162) watches the stadium from the balcony at
+        // (163.2, -444, z 122.1), 11yd above the arena, with no script AI on map
+        // 229 — talk lines only. He cannot be
+        // reached, and the reachability filter should already drop him; this row
+        // is the cheap insurance that the stadium hold never sends the tank up a
+        // wall at him. Rend beside him stays a target: he is the bit-11 kill.
+        { 229, 10162 },  // Upper Blackrock Spire — Lord Victor Nefarius (balcony, unreachable)
     };
 }
 

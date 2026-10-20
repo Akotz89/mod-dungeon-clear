@@ -598,6 +598,43 @@ namespace DcBlackrockSpire
     constexpr uint32 NPC_ROOKERY_WHELP = 10161;
     constexpr uint32 NPC_WARCHIEF_REND_BLACKHAND = 10429;
 
+    // --- the Blackrock Stadium: Rend and Gyth (event 4) -------------------
+    constexpr uint32 EVENT_BLACKROCK_STADIUM = 4;
+    constexpr uint32 OBJ_BLACKROCK_STADIUM = 4;
+    constexpr uint32 HOOK_MUSTER_IN_STADIUM = 60;
+    constexpr uint32 HOOK_ENSURE_STADIUM_STARTED = 61;
+    constexpr uint32 NPC_LORD_VICTOR_NEFARIUS = 10162;
+    constexpr uint32 GO_GYTH_ENTRY_DOOR = 164726;   // the stadium portcullis (x 108)
+    constexpr uint32 GO_GYTH_COMBAT_DOOR = 175185;  // the pen gate the waves come through
+    constexpr uint32 GO_GYTH_EXIT_DOOR = 175186;    // "TOBOSSROOMS", opens on Rend's death
+
+    // AT 2026 at_blackrock_stadium: (153.76, -419.83, 110.47), radius 20. It
+    // starts the event for any living player inside it — and the portcullis
+    // shuts 1s later — so the party musters well outside it first.
+    constexpr uint32 AT_BLACKROCK_STADIUM = 2026;
+    constexpr float AT_STADIUM_X = 153.76f;
+    constexpr float AT_STADIUM_Y = -419.83f;
+    constexpr float AT_STADIUM_RADIUS = 20.0f;
+
+    // The muster point: 10yd inside the portcullis, 36yd outside AT 2026, 30yd
+    // from the nearest stadium-edge egg. Also the objective anchor, and the end
+    // of ROOKERY_ROUTE.
+    constexpr float STADIUM_MUSTER_X = 118.0f;
+    constexpr float STADIUM_MUSTER_Y = -420.0f;
+    constexpr float STADIUM_MUSTER_Z = 111.0f;
+    // The arena stand: inside AT 2026, 45yd from the pen (summons despawn with
+    // nobody within 100yd), 25yd from Rend on the balcony (the AT script finds
+    // him within 100yd of the player), 46yd from the nearest egg.
+    constexpr float ARENA_STAND_X = 150.0f;
+    constexpr float ARENA_STAND_Y = -420.0f;
+    constexpr float ARENA_STAND_Z = 110.9f;
+    constexpr float ARENA_HOLD_RADIUS = 6.0f;
+    // Everyone past the portcullis (x 108) and on the arena floor — not the
+    // z 106-118 floors and walkway outside it.
+    constexpr Box STADIUM_ARENA = { 110.0f, -455.0f, 108.0f, 192.0f, -386.0f, 114.0f };
+    // Floor between two forged AT 2026 fires while Rend reads NOT_STARTED.
+    constexpr uint32 STADIUM_START_FLOOR_MS = 5000;
+
     inline bool InBox(Box const& b, float x, float y, float z)
     {
         return x >= b.minX && x <= b.maxX && y >= b.minY && y <= b.maxY && z >= b.minZ && z <= b.maxZ;

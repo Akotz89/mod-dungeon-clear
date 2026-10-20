@@ -153,6 +153,26 @@ namespace DcUbrs
             return FreedStep::Restart;
         return attackable ? FreedStep::Done : FreedStep::Wait;
     }
+
+    // --- the stadium start (hook 61) --------------------------------------
+    // Rend's state: IN_PROGRESS ~1s after AT 2026 fires, DONE on his death. FAIL
+    // is transient — the instance respawns him and his Reset puts NOT_STARTED
+    // back — so FAIL is waited out, and NOT_STARTED (a fresh stadium, or one that
+    // has just reset) fires the area trigger.
+    enum class StadiumStep : uint8
+    {
+        Done,
+        Fire,
+        Wait,
+    };
+
+    inline StadiumStep DecideStadiumStart(uint32 rendState)
+    {
+        namespace B = DcBlackrockSpire;
+        if (rendState == B::STATE_IN_PROGRESS || rendState == B::STATE_DONE)
+            return StadiumStep::Done;
+        return rendState == B::STATE_NOT_STARTED ? StadiumStep::Fire : StadiumStep::Wait;
+    }
 }
 
 #endif  // _PLAYERBOT_DCUBRSDECISION_H

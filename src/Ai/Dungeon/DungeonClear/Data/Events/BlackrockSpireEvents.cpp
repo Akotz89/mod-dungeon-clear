@@ -86,18 +86,22 @@ namespace
     // once the radius check passes): STORE snapshots the rune packs and CHECK
     // starts, whichever at_dragonspire_hall is registered. A repeat re-snapshots,
     // which only ever drops a mob that has left its rune — never harmful.
-    bool FireDragonspireHallTrigger(Player* bot)
+    bool FireAreaTriggerScript(Player* bot, uint32 triggerId)
     {
-        AreaTrigger const* at = sObjectMgr->GetAreaTrigger(AT_DRAGONSPIRE_HALL);
+        AreaTrigger const* at = sObjectMgr->GetAreaTrigger(triggerId);
         if (!at)
         {
             LOG_ERROR("playerbots.dungeonclear",
                       "[DC:{}] Upper Blackrock Spire — area trigger {} missing from the "
-                      "world DB; the Dragonspire Hall runes cannot be armed",
-                      bot->GetName(), AT_DRAGONSPIRE_HALL);
+                      "world DB; its encounter cannot be started", bot->GetName(), triggerId);
             return false;
         }
         return sScriptMgr->OnAreaTrigger(bot, at);
+    }
+
+    bool FireDragonspireHallTrigger(Player* bot)
+    {
+        return FireAreaTriggerScript(bot, AT_DRAGONSPIRE_HALL);
     }
 
     // --- OpenDragonspineDoor (hook 56) -------------------------------------
@@ -410,6 +414,52 @@ namespace
         }
         return ObjectiveArriveResult::Running;
     }
+
+    // --- MusterInStadium (hook 60) -----------------------------------------
+    // At the muster point, before anyone steps into AT 2026: the portcullis
+    // shuts 1s after it fires, for anyone inside its 20yd — a scout included —
+    // and the stadium is sealed until Rend dies or the event fails. Done at once
+    // if the stadium is already running or over.
+    ObjectiveArriveResult MusterInStadium(Player* bot, AiObjectContext* context,
+                                          DungeonBossInfo const& /*info*/)
+    {
+        uint32 const state = BossState(DcTargeting::GetInstanceScript(bot), DATA_WARCHIEF_REND_BLACKHAND);
+        if (state == STATE_IN_PROGRESS || state == STATE_DONE)
+            return ObjectiveArriveResult::Done;
+        return Muster(bot, context, STADIUM_ARENA, "Blackrock Stadium");
+    }
+
+    // --- EnsureStadiumStarted (hook 61) ------------------------------------
+    // On the arena stand, inside AT 2026. A client crossing the trigger runs
+    // at_blackrock_stadium (and the test relay does the same for a bot-only
+    // party); this is the belt and braces for a party whose leader never sent
+    // the opcode, and the restart after a FAIL: the hold below rewinds the event
+    // on NOT_STARTED, and this step fires the trigger again from the stand. The
+    // script respawns a dead Rend, and ignores repeats (_gythEvent).
+    ObjectiveArriveResult EnsureStadiumStarted(Player* bot, AiObjectContext* context,
+                                               DungeonBossInfo const& /*info*/)
+    {
+        InstanceScript* inst = DcTargeting::GetInstanceScript(bot);
+        if (!inst)
+            return ObjectiveArriveResult::Running;
+        uint32 const state = BossState(inst, DATA_WARCHIEF_REND_BLACKHAND);
+        switch (DcUbrs::DecideStadiumStart(state))
+        {
+            case DcUbrs::StadiumStep::Done:
+                return ObjectiveArriveResult::Done;
+            case DcUbrs::StadiumStep::Fire:
+                if (DcRun::Of(context).Throttled(DcThrottle::UbrsStadiumFire, STADIUM_START_FLOOR_MS))
+                    return ObjectiveArriveResult::Running;
+                LOG_INFO("playerbots.dungeonclear",
+                         "[DC:{}] Blackrock Stadium — Rend reads NOT_STARTED with the party on the stand: "
+                         "running area trigger {} (script {})", bot->GetName(), AT_BLACKROCK_STADIUM,
+                         FireAreaTriggerScript(bot, AT_BLACKROCK_STADIUM) ? "ran" : "did not run");
+                return ObjectiveArriveResult::Running;
+            case DcUbrs::StadiumStep::Wait:
+                return ObjectiveArriveResult::Running;
+        }
+        return ObjectiveArriveResult::Running;
+    }
 }
 
 void RegisterBlackrockSpireHooks(ObjectiveHookRegistry::HookTable& out)
@@ -419,6 +469,8 @@ void RegisterBlackrockSpireHooks(ObjectiveHookRegistry::HookTable& out)
     ObjectiveHookRegistry::AddHook(out, HOOK_MUSTER_HALL_OF_BINDING, &MusterInHallOfBinding);
     ObjectiveHookRegistry::AddHook(out, HOOK_USE_BLACKROCK_ALTAR, &UseBlackrockAltar);
     ObjectiveHookRegistry::AddHook(out, HOOK_EMBERSEER_FREED, &EmberseerFreed);
+    ObjectiveHookRegistry::AddHook(out, HOOK_MUSTER_IN_STADIUM, &MusterInStadium);
+    ObjectiveHookRegistry::AddHook(out, HOOK_ENSURE_STADIUM_STARTED, &EnsureStadiumStarted);
 }
 
 void RegisterBlackrockSpireEvents(std::vector<DungeonEvent>& out)
@@ -515,6 +567,48 @@ void RegisterBlackrockSpireEvents(std::vector<DungeonEvent>& out)
             .Custom(HOOK_EMBERSEER_FREED)
             .Timeout(120000)
             .Build());
+
+    // --- THE BLACKROCK STADIUM, ANCHORED ahead of Rend (index 11) ---------
+    // The Ring of Law shape. AT 2026 starts it: the portcullis behind the party
+    // shuts, and Rend sends five waves of whelps, dragonspawn and handlers out of
+    // the pen (each DoZoneInCombat 100yd, so the party always has attackers),
+    // then Gyth with Rend on his back; at 25% Gyth drops Rend onto the floor.
+    // Rend's death reopens the portcullis and opens TOBOSSROOMS, the way on.
+    //   0. the muster point, inside the portcullis and 36yd outside the trigger
+    //   1. hook 60: everyone inside the arena before anyone trips it
+    //   2. the arena stand, inside the trigger (crossing it trips it for a
+    //      client and for the test relay)
+    //   3. hook 61: Done once Rend reads IN_PROGRESS; fires the trigger itself
+    //      if nothing has
+    //   4. hold the stand until Rend is DONE. The hold is the fight: the waves,
+    //      Gyth and the summoned Rend come to the party and the combat engine
+    //      fights them; between waves (~13s) the event keeps the party on the
+    //      stand, 45yd from the pen, so no summon ever despawns out of combat.
+    // A summon despawning alive (nobody near, or 30s out of combat) or Gyth or
+    // Rend evading FAILs it: summons despawn, the portcullis reopens, Rend is
+    // respawned and Resets to NOT_STARTED — usually within the same tick, so the
+    // hold restarts on either state, and the rewind re-musters and re-fires.
+    // Neither Gyth nor the summoned Rend is a roster row; the roster's Rend row
+    // (the balcony spawn, bit 11) is already dead when this objective latches.
+    //
+    // PERSISTENT: five waves, Gyth and Rend are many fights with gaps.
+    out.push_back(
+        EventBuilder(MAP_ID, EVENT_BLACKROCK_STADIUM, "Blackrock Stadium")
+            .Anchored(/*orderIndex*/ 11)
+            .Persistent()
+            .MoveTo(STADIUM_MUSTER_X, STADIUM_MUSTER_Y, STADIUM_MUSTER_Z, /*radius*/ 3.0f)
+            .Custom(HOOK_MUSTER_IN_STADIUM)
+            .Timeout(MUSTER_CAP_MS + 10000)
+            .MoveTo(ARENA_STAND_X, ARENA_STAND_Y, ARENA_STAND_Z, /*radius*/ 4.0f)
+            .Custom(HOOK_ENSURE_STADIUM_STARTED)
+            .Timeout(30000)
+            .MoveToHoldUntilBossState(ARENA_STAND_X, ARENA_STAND_Y, ARENA_STAND_Z, ARENA_HOLD_RADIUS,
+                                      DATA_WARCHIEF_REND_BLACKHAND, DcBossStateBit(STATE_DONE))
+            .RestartOnBossState(DcBossStateBit(STATE_FAIL) | DcBossStateBit(STATE_NOT_STARTED))
+            // Five waves at ~13s gaps plus the fights, Gyth and Rend: 5-8 min.
+            // Only out-of-combat time counts against it.
+            .Timeout(900000)
+            .Build());
 }
 
 // --- roster patch ----------------------------------------------------------
@@ -545,6 +639,9 @@ void RegisterBlackrockSpireRoster(std::vector<BossRosterPatch>& t)
         MakeObjective(OBJ(OBJ_BLACKROCK_ALTAR), /*encounterIndex*/ 9, MAP_ID, "Blackrock Altar",
                       ALTAR_STAND_X, ALTAR_STAND_Y, ALTAR_STAND_Z, /*arriveRadius*/ 5.0f,
                       /*gateEntry*/ 0, /*hook*/ 0, EVENT_BLACKROCK_ALTAR),
+        MakeObjective(OBJ(OBJ_BLACKROCK_STADIUM), /*encounterIndex*/ 11, MAP_ID, "Blackrock Stadium",
+                      STADIUM_MUSTER_X, STADIUM_MUSTER_Y, STADIUM_MUSTER_Z, /*arriveRadius*/ 4.0f,
+                      /*gateEntry*/ 0, /*hook*/ 0, EVENT_BLACKROCK_STADIUM),
     };
     t.push_back(std::move(p));
 }
@@ -566,8 +663,9 @@ void RegisterBlackrockSpireRoute()
     // straight legs; every leg is under 10yd and the Rookery's use a 2yd arrive
     // radius, so the tank walks the lane rather than cutting its corners.
     //
-    // Keyed on Warchief Rend Blackhand, the next roster target after Emberseer,
-    // and starting in Emberseer's room, where the party stands when he dies.
+    // Keyed on the Blackrock Stadium objective, the next roster target after
+    // Emberseer, and starting in Emberseer's room, where the party stands when
+    // he dies; it ends on that objective's anchor, the muster point.
     // Followers still path to the tank with the stock PathGenerator; a trailing
     // bot can clip an egg, and one or two Whelps are a non-event at level 60.
     std::vector<WaypointHint> hints;
@@ -581,8 +679,8 @@ void RegisterBlackrockSpireRoute()
             h.arriveRadius = ROOKERY_ANCHOR_ARRIVE;
         hints.push_back(h);
     }
-    DungeonClearRouteRegistry::Register(MAP_ID, DUNGEON_DIFFICULTY_NORMAL, NPC_WARCHIEF_REND_BLACKHAND,
-                                        std::move(hints));
+    DungeonClearRouteRegistry::Register(MAP_ID, DUNGEON_DIFFICULTY_NORMAL,
+                                        DcRoster::OBJ(OBJ_BLACKROCK_STADIUM), std::move(hints));
 }
 
 // --- wing layout ---------------------------------------------------------
@@ -628,6 +726,7 @@ void RegisterBlackrockSpireWings(std::unordered_map<uint32, DungeonWingLayout>& 
             OBJ(DcBlackrockSpire::OBJ_BLACKROCK_ALTAR),   // Blackrock Altar, Emberseer's release (event 3)
             9816,   // Pyroguard Emberseer
             10264,  // Solakar Flamewreath
+            OBJ(DcBlackrockSpire::OBJ_BLACKROCK_STADIUM),  // Blackrock Stadium, Rend and Gyth (event 4)
             10429,  // Warchief Rend Blackhand
             10430,  // The Beast
             10363,  // General Drakkisath

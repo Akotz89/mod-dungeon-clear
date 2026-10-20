@@ -376,6 +376,13 @@ namespace DcEventDoorRegistry
             //   175153 EMBERSEER OUT — spawns shut, opens on Emberseer's death:
             //     the way on into the Rookery. A click would skip him.
             case 175153:  // Upper Blackrock Spire — Emberseer Out (opens on his death)
+            //   164726 STADIUM PORTCULLIS — shuts 1s after AT 2026, reopens on
+            //     Rend's death or a FAIL; 175185 the pen gate the waves come
+            //     through (auto-close 10s); 175186 TOBOSSROOMS, a PASSAGE door
+            //     on Rend — the way on to The Beast. Event 4 owns all three.
+            case 164726:  // Upper Blackrock Spire — Doodad_PortcullisActive01 (stadium entry)
+            case 175185:  // Upper Blackrock Spire — the pen portcullis (wave gate)
+            case 175186:  // Upper Blackrock Spire — TOBOSSROOMS (opens on Rend's death)
                 return true;
             default:
                 return false;

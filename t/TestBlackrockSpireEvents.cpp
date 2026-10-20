@@ -95,7 +95,7 @@ TEST(DcBlackrockSpireTest, UbrsRunOpensTheDoorThenClearsTheHallBeforeEmberseer)
     std::vector<DungeonBossInfo> const ubrs = Wing("ubrs");
     std::vector<uint32> const want = {
         Obj(B::OBJ_DRAGONSPINE_DOOR), Obj(B::OBJ_DRAGONSPIRE_HALL), Obj(B::OBJ_BLACKROCK_ALTAR),
-        9816, 10429, 10430, 10363,
+        9816, Obj(B::OBJ_BLACKROCK_STADIUM), 10429, 10430, 10363,
     };
     ASSERT_GE(ubrs.size(), want.size());
     // Only the door, the hall and the bosses are pinned here; later objectives
@@ -406,14 +406,20 @@ TEST(DcBlackrockSpireTest, NoPenaltyRowTaxesTheRookeryFloor)
 TEST(DcBlackrockSpireTest, RookeryAnchorRouteWalksTheLane)
 {
     std::vector<WaypointHint> const* hints =
-        DungeonClearRouteRegistry::Get(B::MAP_ID, DUNGEON_DIFFICULTY_NORMAL, B::NPC_WARCHIEF_REND_BLACKHAND);
+        DungeonClearRouteRegistry::Get(B::MAP_ID, DUNGEON_DIFFICULTY_NORMAL, Obj(B::OBJ_BLACKROCK_STADIUM));
     ASSERT_NE(hints, nullptr);
     constexpr std::size_t kN = sizeof(B::ROOKERY_ROUTE) / sizeof(B::ROOKERY_ROUTE[0]);
     ASSERT_EQ(hints->size(), kN);
 
-    // Starts in Emberseer's room (where he dies), ends at the stadium muster point.
+    // Starts in Emberseer's room (where he dies), ends on the stadium objective's
+    // anchor, the muster point.
     EXPECT_LT(std::hypot((*hints)[0].x - 144.4f, (*hints)[0].y - -258.0f), 10.0f);
-    EXPECT_LT(std::hypot(hints->back().x - 118.0f, hints->back().y - -420.0f), 0.5f);
+    EXPECT_LT(std::hypot(hints->back().x - B::STADIUM_MUSTER_X, hints->back().y - B::STADIUM_MUSTER_Y), 0.5f);
+    // The leg out of Emberseer's room leads to the stadium objective.
+    std::vector<DungeonBossInfo> const ubrs = Wing("ubrs");
+    for (std::size_t i = 0; i + 1 < ubrs.size(); ++i)
+        if (ubrs[i].entry == 9816)
+            EXPECT_EQ(ubrs[i + 1].entry, Obj(B::OBJ_BLACKROCK_STADIUM));
 
     for (std::size_t i = 0; i + 1 < kN; ++i)
         EXPECT_LT(std::hypot((*hints)[i + 1].x - (*hints)[i].x, (*hints)[i + 1].y - (*hints)[i].y), 10.0f)
@@ -453,6 +459,75 @@ TEST(DcBlackrockSpireTest, RookeryWhelpsAreNeverHunted)
     EXPECT_FALSE(DcNeverTargetRegistry::IsNeverTarget(230, B::NPC_ROOKERY_WHELP));
 }
 
+// ---- event 4: the Blackrock Stadium -------------------------------------------------
+
+TEST(DcBlackrockSpireTest, BlackrockStadiumEventShape)
+{
+    DungeonEvent const& e = Event(B::EVENT_BLACKROCK_STADIUM);
+    EXPECT_EQ(e.orderIndex, 11u) << "Rend's index";
+    EXPECT_TRUE(e.persistent);
+
+    ASSERT_EQ(e.steps.size(), 5u);
+    EXPECT_EQ(e.steps[0].kind, EventStepKind::MoveTo);
+    EXPECT_FLOAT_EQ(e.steps[0].x, B::STADIUM_MUSTER_X);
+    EXPECT_EQ(e.steps[1].hookId, B::HOOK_MUSTER_IN_STADIUM);
+    EXPECT_EQ(e.steps[2].kind, EventStepKind::MoveTo);
+    EXPECT_FLOAT_EQ(e.steps[2].x, B::ARENA_STAND_X);
+    EXPECT_EQ(e.steps[3].hookId, B::HOOK_ENSURE_STADIUM_STARTED);
+
+    EventStep const& hold = e.steps[4];
+    EXPECT_EQ(hold.kind, EventStepKind::MoveTo);
+    EXPECT_EQ(hold.bossStateId, static_cast<int32>(B::DATA_WARCHIEF_REND_BLACKHAND));
+    EXPECT_EQ(hold.bossStateClearMask, DcBossStateBit(B::STATE_DONE));
+    // FAIL is overwritten by Rend's Reset (NOT_STARTED) within the tick: restart
+    // on either, or the hold can miss the reset.
+    EXPECT_EQ(hold.restartOnBossStateMask, DcBossStateBit(B::STATE_FAIL) | DcBossStateBit(B::STATE_NOT_STARTED));
+    EXPECT_EQ(DecideBossStateGate(B::STATE_IN_PROGRESS, hold.bossStateClearMask, hold.restartOnBossStateMask),
+              BossStateGateVerdict::Hold);
+    EXPECT_EQ(DecideBossStateGate(B::STATE_DONE, hold.bossStateClearMask, hold.restartOnBossStateMask),
+              BossStateGateVerdict::Clear);
+    EXPECT_EQ(DecideBossStateGate(B::STATE_NOT_STARTED, hold.bossStateClearMask, hold.restartOnBossStateMask),
+              BossStateGateVerdict::Restart);
+    EXPECT_FLOAT_EQ(hold.x, B::ARENA_STAND_X);
+    EXPECT_GE(hold.timeoutMs, 8u * 60u * 1000u);
+}
+
+TEST(DcBlackrockSpireTest, StadiumGeometry)
+{
+    auto const atDist = [](float x, float y) { return std::hypot(x - B::AT_STADIUM_X, y - B::AT_STADIUM_Y); };
+    // The muster point is past the portcullis (x 108) and well outside AT 2026,
+    // with room for a member a few yards off it.
+    EXPECT_GT(B::STADIUM_MUSTER_X, 108.04f);
+    EXPECT_GT(atDist(B::STADIUM_MUSTER_X, B::STADIUM_MUSTER_Y), B::AT_STADIUM_RADIUS + 10.0f);
+    EXPECT_TRUE(B::InBox(B::STADIUM_ARENA, B::STADIUM_MUSTER_X, B::STADIUM_MUSTER_Y, B::STADIUM_MUSTER_Z));
+    // The stand is inside the trigger, and the box holds everyone past the gate.
+    EXPECT_LT(atDist(B::ARENA_STAND_X, B::ARENA_STAND_Y), B::AT_STADIUM_RADIUS - B::ARENA_HOLD_RADIUS);
+    EXPECT_TRUE(B::InBox(B::STADIUM_ARENA, B::ARENA_STAND_X, B::ARENA_STAND_Y, B::ARENA_STAND_Z));
+    EXPECT_GT(B::STADIUM_ARENA.minX, 108.04f) << "nobody counts as inside while still in the gateway";
+    // A member on the upper floor or the z118 walkway outside is not inside.
+    EXPECT_FALSE(B::InBox(B::STADIUM_ARENA, 133.7f, -362.8f, 118.0f));
+    EXPECT_FALSE(B::InBox(B::STADIUM_ARENA, 95.5f, -406.0f, 112.7f));
+    // The pen (175185 at 194.2,-420.2): summons despawn with no player in 100yd.
+    EXPECT_LT(std::hypot(B::ARENA_STAND_X - 194.2f, B::ARENA_STAND_Y - -420.2f) + B::ARENA_HOLD_RADIUS, 100.0f);
+    // The AT script looks for Rend within 100yd of the player (balcony 159.3,-443.6,122.1).
+    EXPECT_LT(std::hypot(B::ARENA_STAND_X - 159.3f, B::ARENA_STAND_Y - -443.6f), 100.0f);
+}
+
+TEST(DcBlackrockSpireTest, StadiumStartDecision)
+{
+    using DcUbrs::StadiumStep;
+    EXPECT_EQ(DcUbrs::DecideStadiumStart(B::STATE_NOT_STARTED), StadiumStep::Fire);
+    EXPECT_EQ(DcUbrs::DecideStadiumStart(B::STATE_IN_PROGRESS), StadiumStep::Done);
+    EXPECT_EQ(DcUbrs::DecideStadiumStart(B::STATE_DONE), StadiumStep::Done);
+    EXPECT_EQ(DcUbrs::DecideStadiumStart(B::STATE_FAIL), StadiumStep::Wait) << "the respawn is a tick away";
+}
+
+TEST(DcBlackrockSpireTest, NefariusIsNeverTargetedButRendIs)
+{
+    EXPECT_TRUE(DcNeverTargetRegistry::IsNeverTarget(B::MAP_ID, B::NPC_LORD_VICTOR_NEFARIUS));
+    EXPECT_FALSE(DcNeverTargetRegistry::IsNeverTarget(B::MAP_ID, B::NPC_WARCHIEF_REND_BLACKHAND));
+}
+
 // ---- hooks and doors -------------------------------------------------------------
 
 TEST(DcBlackrockSpireTest, HooksAreRegistered)
@@ -462,6 +537,8 @@ TEST(DcBlackrockSpireTest, HooksAreRegistered)
     EXPECT_TRUE(ObjectiveHookRegistry::Has(B::HOOK_MUSTER_HALL_OF_BINDING));
     EXPECT_TRUE(ObjectiveHookRegistry::Has(B::HOOK_USE_BLACKROCK_ALTAR));
     EXPECT_TRUE(ObjectiveHookRegistry::Has(B::HOOK_EMBERSEER_FREED));
+    EXPECT_TRUE(ObjectiveHookRegistry::Has(B::HOOK_MUSTER_IN_STADIUM));
+    EXPECT_TRUE(ObjectiveHookRegistry::Has(B::HOOK_ENSURE_STADIUM_STARTED));
 }
 
 TEST(DcBlackrockSpireTest, EventOwnedDoorsAreScriptOnly)
@@ -474,6 +551,9 @@ TEST(DcBlackrockSpireTest, EventOwnedDoorsAreScriptOnly)
     EXPECT_FALSE(DcEventDoorRegistry::IsLockFreeClickable(B::GO_DRAGONSPINE_DOOR));
     // Real gates: navigation must still see them shut.
     EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(B::GO_EMBERSEER_OUT));
-    for (uint32 go : { B::GO_DRAGONSPINE_DOOR, B::GO_EMBERSEER_IN, B::GO_DOORS, B::GO_EMBERSEER_OUT })
+    for (uint32 go : { B::GO_GYTH_ENTRY_DOOR, B::GO_GYTH_COMBAT_DOOR, B::GO_GYTH_EXIT_DOOR })
+        EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(go)) << go;
+    for (uint32 go : { B::GO_DRAGONSPINE_DOOR, B::GO_EMBERSEER_IN, B::GO_DOORS, B::GO_EMBERSEER_OUT,
+                       B::GO_GYTH_ENTRY_DOOR, B::GO_GYTH_EXIT_DOOR })
         EXPECT_FALSE(DcEventDoorRegistry::IsNavigationIgnored(go)) << go;
 }

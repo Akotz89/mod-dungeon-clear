@@ -117,6 +117,8 @@ enum class DcThrottle : uint8
     UbrsHallRearm,       // floor between two re-fires of AT 2046's script
     UbrsAltarUse,        // floor between two Blackrock Altar uses (its ritual
                          // takes 5s; a re-use mid-ritual is swallowed)
+    UbrsStadiumFire,     // floor between two forged AT 2026 fires (Rend's script
+                         // takes ~1s to read IN_PROGRESS)
 
     Count
 };
