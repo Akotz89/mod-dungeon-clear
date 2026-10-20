@@ -120,8 +120,8 @@ public:
     // the OPERATIONAL failures only — an empty pool, bots that would not
     // queue, a timeout — because those are the ones where the player is left
     // waiting on a queue that is quietly slower than they were promised.
-    // Cancelling, matching with real players, and the dungeon simply ending
-    // are not failures and say nothing.
+    // Cancelling, matching with real players, and the player leaving the
+    // group are not failures and say nothing.
     void Release(std::string const& reason, bool notifyPlayer = false);
 
     std::string StatusLine() const;

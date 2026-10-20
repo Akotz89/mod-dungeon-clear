@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <ctime>
 #include <functional>
+#include <optional>
 #include <utility>
 
 #include "Group.h"
@@ -1108,8 +1109,9 @@ void DcDungeonQueueFillJob::HandOffGroup(Group* grp)
              _playerName, _slots.size());
 }
 
-// The fill is done; the job now only shadows the group so the bots are released
-// at the right moment rather than at a clock.
+// The fill is done; the job now only shadows the group, and the bots are
+// released when the player leaves it (or the group disbands) — never by a clock
+// and never by LFG calling the dungeon finished.
 //
 // Nothing is installed on the bots here. LfgAcceptAction calls
 // RandomPlayerbotMgr::Refresh + ResetStrategies when it accepts, which would
@@ -1129,16 +1131,13 @@ void DcDungeonQueueFillJob::TickFormed()
         return;
     }
 
-    // The dungeon ended. LFGMgr::FinishDungeon parks the group in
-    // LFG_STATE_FINISHED_DUNGEON and leaves it standing (so the party can
-    // queue again together), which is exactly the moment the fill's bots stop
-    // being wanted — waiting for the group to disband on its own could be
-    // another twenty minutes of them following the player around Dalaran.
-    if (sLFGMgr->GetState(_formedGroupGuid) == lfg::LFG_STATE_FINISHED_DUNGEON)
-    {
-        Release("dungeon finished");
-        return;
-    }
+    // LFG_STATE_FINISHED_DUNGEON is deliberately not a release. "Finished" is
+    // LFG's word, not the dungeon's: FinishDungeon fires on whichever encounter
+    // instance_encounters flags lastEncounterDungeon, and that is often not the
+    // last boss — the BRD Detention Block (LFG 30) finishes on Gerstahn, its
+    // FIRST boss; the Sunken Temple (LFG 28) on the Shade of Eranikus with
+    // Jammal'an's floor still standing. Releasing there left the player alone
+    // mid-dungeon. The bots stay until the player leaves the group.
 
     // Opt-in: run the dungeon for the player instead of with them. Issued once,
     // and only once everyone is actually on the dungeon map — `dc on` before
