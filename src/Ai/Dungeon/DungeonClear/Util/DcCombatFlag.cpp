@@ -238,9 +238,22 @@ namespace DcCombatFlag
             float const dist = p->GetExactDist(other);
             if (!scan.found || dist < scan.nearestDist)
                 scan.nearestDist = dist;
+            if (dist < scan.nearestSeenDist && p->IsWithinLOSInMap(other))
+                scan.nearestSeenDist = dist;
             scan.found = true;
         }
         return scan;
+    }
+
+    bool HasSeenAttacker(Player* p)
+    {
+        if (!p)
+            return false;
+        for (Unit* const attacker : p->getAttackers())
+            if (attacker && attacker->IsInWorld() && attacker->GetMap() == p->GetMap() &&
+                p->IsWithinLOSInMap(attacker))
+                return true;
+        return false;
     }
 
     bool IsHeldByLiveEnemy(Player* p, float radius)

@@ -1707,6 +1707,30 @@ TEST(DungeonClearStuckCombatTest, StoppedHolderStopsProsecutingAndStaysStopped)
     EXPECT_TRUE(prosecuting(40.0f));
 }
 
+// The engage-range clause judges the nearest holder the bot can SEE. A holder out of
+// LOS — tr-20261018-101829-1's Angerforge Reservists, 14-16yd away on the floor ~11yd
+// below the tank — is in range by the numbers, but no playerbots action can target it
+// (AttackersValue requires LOS), so treating it as toe-to-toe kept the hatch shut for
+// the whole 900s no-progress window. The trigger passes +inf when no holder is seen.
+TEST(DungeonClearStuckCombatTest, UnseenHolderInRangeProsecutesOnlyWhileClosing)
+{
+    constexpr float engageRange = 22.0f;
+    constexpr float unseen = std::numeric_limits<float>::infinity();
+
+    // What the old code saw: a legitimate holder at 14.4yd -> "a fight", forever.
+    EXPECT_TRUE(DungeonClearMath::IsHolderProsecutingFight(true, 14.4f, engageRange, false));
+
+    // Same holder, judged by SEEN distance: stationary below us -> not a fight, so the
+    // hatch's streak clock runs and the force-clear fires.
+    EXPECT_FALSE(DungeonClearMath::IsHolderProsecutingFight(true, unseen, engageRange, false));
+    EXPECT_TRUE(DungeonClearMath::IsPhantomCombat(
+        true, /*hasAttacker (seen)*/ false, false,
+        DungeonClearMath::IsHolderProsecutingFight(true, unseen, engageRange, false)));
+
+    // A mob chasing us around a corner is unseen too, but it is CLOSING — still a fight.
+    EXPECT_TRUE(DungeonClearMath::IsHolderProsecutingFight(true, unseen, engageRange, true));
+}
+
 // The streak gate: a transient phantom tick must not fire; only a phantom state held
 // continuously for the timeout does, and any break resets the clock.
 TEST(DungeonClearStuckCombatTest, StreakGateArmsHoldsAndFires)

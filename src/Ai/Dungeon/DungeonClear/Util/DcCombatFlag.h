@@ -6,6 +6,8 @@
 #ifndef _PLAYERBOT_DCCOMBATFLAG_H
 #define _PLAYERBOT_DCCOMBATFLAG_H
 
+#include <limits>
+
 class AiObjectContext;
 class Player;
 
@@ -81,12 +83,30 @@ namespace DcCombatFlag
                                     // DC_ENGAGEMENT_RADIUS and reachable holder
                                     // its own AI allows to attack us
         float nearestDist = 0.0f;   // distance to the closest such holder
+        // The closest such holder the player can SEE (LOS), or +inf when none.
+        // A holder on the floor below is reachable and in range by the numbers,
+        // but stock AttackersValue drops anything out of LOS, so nothing in the
+        // party will ever fight it from here — the engage-range shortcut in
+        // DungeonClearMath::IsHolderProsecutingFight must not count it.
+        float nearestSeenDist = std::numeric_limits<float>::infinity();
     };
 
     // The one walk of a player's PvE combat refs, shared by the phantom-combat
     // hatch (which wants opaque || found) and by IsHeldByLiveEnemy (which does
     // not). Costs a pathfind per reference — call it behind the cheap reads.
     HolderScan ScanCombatHolders(Player* p);
+
+    // Is anything attacking this player that the player can actually SEE?
+    //
+    // getAttackers() alone is the wrong "a real fight is on" test for the phantom
+    // hatch: stock AttackersValue::IsValidTarget requires LOS, so an attacker out
+    // of sight is invisible to every playerbots combat action. Live in
+    // tr-20261018-101829-1: General Angerforge's Reservists spawn at random
+    // +/-14yd offsets with no ground check, two dropped ~11yd off his balcony,
+    // and from the floor below kept the tank targeted (and so in getAttackers())
+    // for the full 900s no-progress window while his engine read `no attackers`
+    // every tick. Counting them as a fight kept the hatch shut forever.
+    bool HasSeenAttacker(Player* p);
 
     // Is a live enemy still on this player, close enough to keep swinging?
     //

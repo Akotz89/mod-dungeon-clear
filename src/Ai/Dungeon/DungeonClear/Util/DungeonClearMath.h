@@ -614,6 +614,12 @@ namespace DungeonClearMath
     // walks away from a stationary holder only makes the distance WORSE. The first
     // sample arms the watchdog and counts as closing, so the streak clock in
     // ShouldBreakStuckCombat only starts once the holder has demonstrably stopped.
+    //
+    // `holderDist` is the distance to the nearest holder the bot can SEE (+inf when
+    // none is in LOS), not to the nearest holder outright. "In engage range is a
+    // fight" assumes the two sides can trade blows; a holder 14yd away on the floor
+    // below cannot be targeted by any playerbots action (AttackersValue requires
+    // LOS), so it is only a fight while it is CLOSING (tr-20261018-101829-1).
     inline bool IsHolderProsecutingFight(bool haveHolder, float holderDist,
                                          float engageRange, bool closing)
     {
