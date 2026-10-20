@@ -354,6 +354,18 @@ namespace
         // targets. Reservists that aggro are still fought; General Angerforge's
         // summons (also 8901) are fought wherever he calls them.
         { 230, 8901, 1275.0f, 1480.0f, -560.0f, -305.0f },  // Blackrock Depths — Anvilrage Reservist, Lyceum only
+
+        // --- Upper Blackrock Spire (229): the Rookery Whelps ------------------
+        //
+        // Class 2. A Rookery Whelp (10161, level 56-57, rank 0) exists only
+        // because a Rookery Egg hatched — a party member came within 1.5yd of
+        // it, or a Rookery Hatcher walked to it. The Rookery floor carries 149
+        // eggs and the party crosses it on a measured lane that keeps every egg
+        // >= 3.8yd off (RegisterBlackrockSpireRoute). A clear that walks
+        // OFF that lane to hunt a whelp steps among the eggs and hatches more:
+        // killing one is negative progress. Whelps that aggro the party are
+        // fought where they come, by the stock combat engine.
+        { 229, 10161 },  // Upper Blackrock Spire — Rookery Whelp (hatched from the eggs)
     };
 }
 

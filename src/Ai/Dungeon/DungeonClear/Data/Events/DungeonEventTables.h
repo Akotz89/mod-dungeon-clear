@@ -514,6 +514,90 @@ namespace DcBlackrockSpire
     // from the stand point).
     constexpr float BINDING_SCAN = 60.0f;
 
+    // --- the Rookery crossing (no event) ----------------------------------
+    // The measured north lane from Emberseer Out to the upper floor, every egg
+    // >= 3.8yd off. Each point is on a navmesh poly at that z. Probed in
+    // t/TestBlackrockSpireRouteProbe.
+    struct LanePoint { float x, y, z; };
+    constexpr LanePoint ROOKERY_LANE[] = {
+        { 113.9f, -258.9f,  91.8f },   // Emberseer Out
+        {  96.0f, -258.5f,  91.6f },
+        {  80.0f, -258.0f,  91.6f },   // between egg clusters 12 and 15
+        {  66.5f, -257.5f,  96.3f },
+        {  67.5f, -244.5f,  98.9f },   // turn north
+        {  88.9f, -241.3f, 105.1f },   // the ramp, above cluster 15
+        { 100.6f, -252.8f, 106.6f },
+        { 108.1f, -266.0f, 106.7f },   // the upper floor
+    };
+    constexpr uint32 GO_ROOKERY_EGG = 175124;
+
+    // The anchor route Emberseer's room -> the stadium muster point
+    // (RegisterBlackrockSpireRoute): the lane above across the Rookery, then the
+    // navmesh's own corridor over the upper floor, the Hall of Blackhand and the
+    // z118 walkway, decimated to legs under 10yd from its verbatim vertices.
+    // Anchors 6-21 (the Rookery, Emberseer Out to the upper floor) are walked
+    // with ROOKERY_ANCHOR_ARRIVE so the tank cannot cut a corner into a cluster.
+    // Probed in t/TestBlackrockSpireRouteProbe.
+    constexpr LanePoint ROOKERY_ROUTE[] = {
+        { 143.00f, -265.75f, 95.66f },  //  0  Emberseer's room, off his platform
+        { 141.61f, -269.50f, 93.45f },  //  1
+        { 134.13f, -266.64f, 92.46f },  //  2
+        { 126.66f, -263.78f, 92.19f },  //  3
+        { 119.19f, -260.92f, 92.39f },  //  4
+        { 115.45f, -259.49f, 92.28f },  //  5
+        { 113.90f, -258.90f, 91.80f },  //  6  Emberseer Out
+        { 104.95f, -258.70f, 91.70f },  //  7
+        { 96.00f, -258.50f, 91.60f },  //  8
+        { 88.00f, -258.25f, 91.60f },  //  9
+        { 80.00f, -258.00f, 91.60f },  // 10  the pinch between egg clusters 12 and 15
+        { 73.25f, -257.75f, 93.95f },  // 11
+        { 66.50f, -257.50f, 96.30f },  // 12  the west end, turn north
+        { 67.00f, -251.00f, 97.60f },  // 13
+        { 67.50f, -244.50f, 98.90f },  // 14  the ramp foot
+        { 74.63f, -243.43f, 100.97f },  // 15
+        { 81.77f, -242.37f, 103.03f },  // 16
+        { 88.90f, -241.30f, 105.10f },  // 17  the ramp, above cluster 15
+        { 94.75f, -247.05f, 105.85f },  // 18
+        { 100.60f, -252.80f, 106.60f },  // 19
+        { 104.35f, -259.40f, 106.65f },  // 20
+        { 108.10f, -266.00f, 106.70f },  // 21  the upper floor
+        { 108.27f, -274.00f, 107.20f },  // 22
+        { 108.44f, -282.00f, 107.20f },  // 23
+        { 108.61f, -289.99f, 107.20f },  // 24
+        { 108.79f, -297.99f, 107.20f },  // 25
+        { 108.99f, -305.99f, 107.20f },  // 26
+        { 109.10f, -309.99f, 107.20f },  // 27
+        { 116.76f, -312.29f, 108.56f },  // 28
+        { 124.42f, -314.60f, 112.46f },  // 29
+        { 132.08f, -316.90f, 111.58f },  // 30
+        { 139.74f, -319.21f, 111.62f },  // 31  the Hall of Blackhand
+        { 138.73f, -327.14f, 111.53f },  // 32
+        { 137.72f, -335.08f, 111.47f },  // 33
+        { 136.71f, -343.01f, 111.56f },  // 34
+        { 135.70f, -350.95f, 113.12f },  // 35
+        { 134.47f, -358.85f, 117.97f },  // 36
+        { 133.73f, -362.78f, 118.04f },  // 37  the z118 walkway
+        { 125.88f, -364.33f, 118.17f },  // 38
+        { 118.04f, -365.88f, 118.44f },  // 39
+        { 110.19f, -367.42f, 118.37f },  // 40
+        { 102.34f, -368.97f, 117.66f },  // 41
+        { 97.11f, -375.02f, 118.52f },  // 42
+        { 94.49f, -378.05f, 118.28f },  // 43  the descent
+        { 94.78f, -386.05f, 117.72f },  // 44
+        { 95.06f, -394.04f, 115.51f },  // 45
+        { 95.35f, -402.04f, 112.66f },  // 46
+        { 96.23f, -409.96f, 112.80f },  // 47
+        { 101.84f, -415.68f, 112.17f },  // 48
+        { 104.64f, -418.53f, 112.27f },  // 49
+        { 112.59f, -419.41f, 111.45f },  // 50
+        { 118.00f, -420.00f, 110.87f },  // 51  the stadium muster point, inside portcullis 164726
+    };
+    constexpr uint32 ROOKERY_ROUTE_LANE_FIRST = 6;
+    constexpr uint32 ROOKERY_ROUTE_LANE_LAST = 21;
+    constexpr float ROOKERY_ANCHOR_ARRIVE = 2.0f;
+    constexpr uint32 NPC_ROOKERY_WHELP = 10161;
+    constexpr uint32 NPC_WARCHIEF_REND_BLACKHAND = 10429;
+
     inline bool InBox(Box const& b, float x, float y, float z)
     {
         return x >= b.minX && x <= b.maxX && y >= b.minY && y <= b.maxY && z >= b.minZ && z <= b.maxZ;
@@ -5836,6 +5920,11 @@ void RegisterHallsOfLightningRoute();
 // from where it stands and a row that starts somewhere else snaps the cursor to
 // the far end ([[dc-anchor-route-must-cover-where-the-party-stands]]).
 void RegisterUtgardePinnacleRoute();
+// Upper Blackrock Spire (229) — Emberseer's room -> the stadium, across the
+// Rookery's 149 egg traps. The navmesh's own corridor happens to keep 3.3yd off
+// them today; the measured north lane keeps 3.8yd and does not move when the
+// corridor does (a different start point, an mmaps regen, a penalty row).
+void RegisterBlackrockSpireRoute();
 
 // Pit of Saron (658) — TWO rows, Krick -> the ledge and the ledge -> Tyrannus.
 //

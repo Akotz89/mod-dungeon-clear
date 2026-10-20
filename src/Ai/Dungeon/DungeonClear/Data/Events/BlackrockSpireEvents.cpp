@@ -5,6 +5,7 @@
 
 #include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
 #include "Ai/Dungeon/DungeonClear/Data/Events/DungeonRosterBuilders.h"
+#include "Ai/Dungeon/DungeonClear/Data/DungeonClearRouteRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonWingRegistry.h"
 
 #include <cstddef>
@@ -546,6 +547,42 @@ void RegisterBlackrockSpireRoster(std::vector<BossRosterPatch>& t)
                       /*gateEntry*/ 0, /*hook*/ 0, EVENT_BLACKROCK_ALTAR),
     };
     t.push_back(std::move(p));
+}
+
+// --- anchor route ----------------------------------------------------------
+void RegisterBlackrockSpireRoute()
+{
+    using namespace DcBlackrockSpire;
+
+    // --- Emberseer's room -> the stadium, across the Rookery ---------------
+    // The Rookery floor has 149 Rookery Eggs, 1.5yd proximity traps that hatch
+    // a Whelp on any player. The navmesh's corridor across it is egg-clear today
+    // by 3.3yd and by accident: any change that moves it (taxing the egg
+    // clusters did, sending it round the south half 0.22yd from an egg — see
+    // the 229 note in DcNavPenaltyRegistry.cpp) walks the party into them. So
+    // the leg is authored: out through Emberseer Out, along the measured north
+    // lane (every egg >= 3.8yd off), up the north-wall ramp, then the navmesh's
+    // own corridor to the stadium muster point. Anchors are walked as
+    // straight legs; every leg is under 10yd and the Rookery's use a 2yd arrive
+    // radius, so the tank walks the lane rather than cutting its corners.
+    //
+    // Keyed on Warchief Rend Blackhand, the next roster target after Emberseer,
+    // and starting in Emberseer's room, where the party stands when he dies.
+    // Followers still path to the tank with the stock PathGenerator; a trailing
+    // bot can clip an egg, and one or two Whelps are a non-event at level 60.
+    std::vector<WaypointHint> hints;
+    for (uint32 i = 0; i < sizeof(ROOKERY_ROUTE) / sizeof(ROOKERY_ROUTE[0]); ++i)
+    {
+        WaypointHint h;
+        h.x = ROOKERY_ROUTE[i].x;
+        h.y = ROOKERY_ROUTE[i].y;
+        h.z = ROOKERY_ROUTE[i].z;
+        if (i >= ROOKERY_ROUTE_LANE_FIRST && i <= ROOKERY_ROUTE_LANE_LAST)
+            h.arriveRadius = ROOKERY_ANCHOR_ARRIVE;
+        hints.push_back(h);
+    }
+    DungeonClearRouteRegistry::Register(MAP_ID, DUNGEON_DIFFICULTY_NORMAL, NPC_WARCHIEF_REND_BLACKHAND,
+                                        std::move(hints));
 }
 
 // --- wing layout ---------------------------------------------------------

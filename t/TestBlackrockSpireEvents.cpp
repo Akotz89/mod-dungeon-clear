@@ -11,7 +11,13 @@
 #include <string>
 #include <vector>
 
+#include "BlackrockSpireRookeryEggs.h"
+
 #include "Ai/Dungeon/DungeonClear/Data/DcEventDoorRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/DcHazardRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/DcNavPenaltyRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/DcNeverTargetRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/DungeonClearRouteRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonEventRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonWingRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
@@ -354,6 +360,97 @@ TEST(DcBlackrockSpireTest, EmberseerFreedDecision)
     // Dead or DONE: nothing to wait for.
     EXPECT_EQ(DecideEmberseerFreed(B::STATE_DONE, false, false), FreedStep::Done);
     EXPECT_EQ(DecideEmberseerFreed(B::STATE_IN_PROGRESS, false, false), FreedStep::Done);
+}
+
+// ---- the Rookery crossing ---------------------------------------------------------
+
+// The measured lane is untaxed, and keeps 3.5yd+ off every north-floor egg.
+TEST(DcBlackrockSpireTest, RookeryLaneIsUntaxedAndEggClear)
+{
+    for (B::LanePoint const& p : B::ROOKERY_LANE)
+        for (char const* wing : { "", "ubrs" })
+            EXPECT_FLOAT_EQ(DcNavPenaltyRegistry::PenaltyAt(B::MAP_ID, p.x, p.y, p.z, wing), 1.0f)
+                << "(" << p.x << ", " << p.y << ") run wing '" << wing << "'";
+
+    for (std::size_t i = 0; i + 1 < sizeof(B::ROOKERY_LANE) / sizeof(B::ROOKERY_LANE[0]); ++i)
+    {
+        B::LanePoint const& a = B::ROOKERY_LANE[i];
+        B::LanePoint const& b = B::ROOKERY_LANE[i + 1];
+        for (int k = 0; k <= 20; ++k)
+        {
+            float const t = k / 20.0f;
+            float const x = a.x + (b.x - a.x) * t, y = a.y + (b.y - a.y) * t, z = a.z + (b.z - a.z) * t;
+            for (DcRookeryEggs::Egg const& e : DcRookeryEggs::NORTH_FLOOR)
+                if (std::fabs(z - e.z) < 4.0f)
+                    EXPECT_GE(std::hypot(x - e.x, y - e.y), 3.5f)
+                        << "lane segment " << i << " passes egg (" << e.x << ", " << e.y << ")";
+        }
+    }
+}
+
+// Nothing taxes the Rookery floor for a UBRS run: boxing its egg clusters pushed
+// the corridor round the south half into the eggs (DcNavPenaltyRegistry's 229
+// note). The fallback still reads the Rookery as UBRS.
+TEST(DcBlackrockSpireTest, NoPenaltyRowTaxesTheRookeryFloor)
+{
+    for (DcRookeryEggs::Egg const& e : DcRookeryEggs::NORTH_FLOOR)
+        EXPECT_FLOAT_EQ(DcNavPenaltyRegistry::PenaltyAt(B::MAP_ID, e.x, e.y, e.z, "ubrs"), 1.0f)
+            << "egg (" << e.x << ", " << e.y << ")";
+    char const* w = DcNavPenaltyRegistry::WingRegionAt(B::MAP_ID, 80.0f, -265.0f, 91.5f);
+    ASSERT_NE(w, nullptr);
+    EXPECT_STREQ(w, "ubrs");
+}
+
+// The authored crossing: registered for the leg out of Emberseer's room, every
+// leg short, the measured lane walked point for point with a tight arrive radius.
+TEST(DcBlackrockSpireTest, RookeryAnchorRouteWalksTheLane)
+{
+    std::vector<WaypointHint> const* hints =
+        DungeonClearRouteRegistry::Get(B::MAP_ID, DUNGEON_DIFFICULTY_NORMAL, B::NPC_WARCHIEF_REND_BLACKHAND);
+    ASSERT_NE(hints, nullptr);
+    constexpr std::size_t kN = sizeof(B::ROOKERY_ROUTE) / sizeof(B::ROOKERY_ROUTE[0]);
+    ASSERT_EQ(hints->size(), kN);
+
+    // Starts in Emberseer's room (where he dies), ends at the stadium muster point.
+    EXPECT_LT(std::hypot((*hints)[0].x - 144.4f, (*hints)[0].y - -258.0f), 10.0f);
+    EXPECT_LT(std::hypot(hints->back().x - 118.0f, hints->back().y - -420.0f), 0.5f);
+
+    for (std::size_t i = 0; i + 1 < kN; ++i)
+        EXPECT_LT(std::hypot((*hints)[i + 1].x - (*hints)[i].x, (*hints)[i + 1].y - (*hints)[i].y), 10.0f)
+            << "leg " << i;
+
+    // Every measured lane point is an anchor inside the tight-radius span.
+    for (B::LanePoint const& l : B::ROOKERY_LANE)
+    {
+        bool found = false;
+        for (uint32 i = B::ROOKERY_ROUTE_LANE_FIRST; i <= B::ROOKERY_ROUTE_LANE_LAST; ++i)
+            found = found || (std::fabs((*hints)[i].x - l.x) < 0.01f && std::fabs((*hints)[i].y - l.y) < 0.01f);
+        EXPECT_TRUE(found) << "lane point (" << l.x << ", " << l.y << ")";
+    }
+    for (std::size_t i = 0; i < kN; ++i)
+    {
+        bool const lane = i >= B::ROOKERY_ROUTE_LANE_FIRST && i <= B::ROOKERY_ROUTE_LANE_LAST;
+        EXPECT_FLOAT_EQ((*hints)[i].arriveRadius, lane ? B::ROOKERY_ANCHOR_ARRIVE : WaypointHint{}.arriveRadius)
+            << "anchor " << i;
+    }
+    // The tight radius keeps a corner cut inside the lane's clearance.
+    EXPECT_LT(B::ROOKERY_ANCHOR_ARRIVE, 3.8f - 1.5f);
+}
+
+TEST(DcBlackrockSpireTest, RookeryEggIsAKeepOutTrapWithNoVacate)
+{
+    DcTrapHazard const* egg = DcHazardRegistry::FindTrap(B::MAP_ID, B::GO_ROOKERY_EGG);
+    ASSERT_NE(egg, nullptr);
+    EXPECT_GT(egg->radius, 1.5f) << "wider than the egg's own trigger";
+    EXPECT_FLOAT_EQ(egg->vacateRadius, 0.0f) << "a fired egg is gone; retreating hatches more";
+    EXPECT_GT(egg->retreatSlack, egg->holdBand);
+    EXPECT_TRUE(DcHazardRegistry::HasTrapHazards(B::MAP_ID));
+}
+
+TEST(DcBlackrockSpireTest, RookeryWhelpsAreNeverHunted)
+{
+    EXPECT_TRUE(DcNeverTargetRegistry::IsNeverTarget(B::MAP_ID, B::NPC_ROOKERY_WHELP));
+    EXPECT_FALSE(DcNeverTargetRegistry::IsNeverTarget(230, B::NPC_ROOKERY_WHELP));
 }
 
 // ---- hooks and doors -------------------------------------------------------------

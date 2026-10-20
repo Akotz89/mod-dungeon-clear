@@ -718,10 +718,17 @@ namespace
     // Guard (17461 normal, SmartAI on-death SetData 2) or Porung (20923 heroic,
     // boss_porung::JustDied) cancels the scout's whole scheduler — waves and
     // arrows together. See ShatteredHallsEvents.cpp, which sequences exactly that.
-    constexpr std::array<DcTrapHazard, 1> kTrapHazards = {{
+    constexpr std::array<DcTrapHazard, 2> kTrapHazards = {{
         //                   radius  zBand  vacate  hold  slack
         // Blaze — the 60s fire patch a flame arrow leaves on the gauntlet floor.
         { 540, 181915, 5.0f, 6.0f, 3.5f, 2.0f, 6.0f },
+        // Rookery Egg (Upper Blackrock Spire) — a 1.5yd proximity trap that
+        // hatches a Rookery Whelp on any player; 149 on the Rookery floor, 73 on
+        // the stadium's edges. The row keeps camps, regroup points, standoffs
+        // and skirt points off them (3yd keep-out). NO active vacate (0): an egg
+        // that has fired is gone for 120s, so there is nothing left to step off,
+        // and a retreat across the Rookery would only hatch more.
+        { 229, 175124, 3.0f, 4.0f, 0.0f, 2.0f, 6.0f },
     }};
 }
 

@@ -154,6 +154,15 @@ namespace
     // Rend -> Beast -> Drakkisath (258) touches no lbrs box; portal -> door touches
     // neither. costMult 40, the shortcut class; a party that somehow stands inside
     // the other wing still routes out (a fence never cages — see the header).
+    //
+    // NOT HERE, ON PURPOSE: the Upper Blackrock Spire Rookery eggs. Boxing the
+    // five egg clusters that flank the measured north lane made the raw corridor
+    // from Emberseer Out to the upper floor WORSE: A* left the lane (whose polys
+    // straddle the boxes) and went round the south half, through the clusters
+    // nobody boxed — 193yd, 0.22yd from an egg — where the untaxed corridor is
+    // 113yd and keeps 3.29yd off every egg (t/TestBlackrockSpireRouteProbe,
+    // 2026-10-19). The tank's leg is an authored anchor route instead
+    // (RegisterBlackrockSpireRoute), and the probe pins the untaxed corridor.
     constexpr std::array<DcNavPenaltyVolume, 18> kVolumes = {{
         { 229, -134.0f, -406.0f, 33.0f, -118.0f, -374.0f, 56.0f, 40.0f },
         { 229,  -65.5f, -384.0f, 49.4f,  -60.5f, -377.0f, 54.2f, 40.0f },

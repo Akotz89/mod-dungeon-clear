@@ -28,6 +28,7 @@ namespace
             RegisterBlackwingLairRoute();
             RegisterHallsOfLightningRoute();
             RegisterUtgardePinnacleRoute();
+            RegisterBlackrockSpireRoute();
             RegisterPitOfSaronRoute();
             RegisterHallsOfReflectionRoute();
             RegisterKarazhanRoute();
