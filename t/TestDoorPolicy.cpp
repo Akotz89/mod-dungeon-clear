@@ -494,6 +494,9 @@ TEST(DcDoorPolicyTest, BlackrockBarDoorIsScriptOnly)
 {
     EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(170571));
     EXPECT_FALSE(DcEventDoorRegistry::IsKeyExempt(170571)) << "the Grim Guzzler Key is never waived";
+    // The Summoner's Tomb doors are the Seven's (map-230 event 6) alone.
+    EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(170576));   // entrance
+    EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(170577));   // exit
     // The Lyceum door stays a keyed traversal gate the walker opens.
     EXPECT_FALSE(DcEventDoorRegistry::IsScriptOnly(170558));
     EXPECT_TRUE(DcEventDoorRegistry::IsKeyExempt(170558));

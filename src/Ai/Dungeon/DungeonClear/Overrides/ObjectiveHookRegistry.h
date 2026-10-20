@@ -21,6 +21,15 @@ enum class ObjectiveArriveResult
     Done,     // objective satisfied — latch it cleared and advance the clear
     Running,  // still working (e.g. mid-interaction) — hold and call again next tick
     Blocked,  // cannot complete unaided (needs the human) — stall the run
+    // The encounter reset (or the work this event already did was undone)
+    // behind the party — REWIND the event to step 0 and run it again. Only
+    // meaningful from inside an event (a Custom step, or a garrison's
+    // WhileHolding hook, which otherwise has its result ignored); a legacy
+    // on-arrival hook treats it as Running. The same rewind the boss-state
+    // gate's RestartOnBossState performs, for encounters whose reset shows in
+    // something other than a boss state: Blackrock Depths' Tomb of the Seven
+    // (instance data) and Lyceum torches (an item that expires in the bags).
+    Restart,
 };
 
 // Optional per-objective behaviour run when the tank reaches a travel objective

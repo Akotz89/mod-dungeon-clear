@@ -2193,6 +2193,8 @@ bool DcObjectiveArriveAction::Execute(Event /*event*/)
         switch (ObjectiveHookRegistry::Run(next->onArriveHook, bot, context, *next))
         {
             case ObjectiveArriveResult::Running: outcome = EventDriveOutcome::Running; break;
+            // No event to rewind on a bare on-arrival hook: keep holding.
+            case ObjectiveArriveResult::Restart: outcome = EventDriveOutcome::Running; break;
             case ObjectiveArriveResult::Blocked: outcome = EventDriveOutcome::Stalled; break;
             case ObjectiveArriveResult::Done:
             default:                             outcome = EventDriveOutcome::Completed; break;

@@ -171,6 +171,19 @@ namespace
     // Issue a one-shot move toward (x,y,z) if not already moving there. Short,
     // intra-room hops — the surrounding objective travel got the party into the
     // room; this just closes the last few yards to an interactable.
+    // Rewind an event to step 0 because the encounter reset under it — the
+    // boss-state gate's RestartOnBossState, and a hook returning
+    // ObjectiveArriveResult::Restart. The forward-progress watchdog is re-based
+    // with it, or the old high-water mark makes the new pass look wedged.
+    void RewindToStart(DungeonEventProgress& prog, uint32 nowMs)
+    {
+        prog.stepIndex = 0;
+        prog.attempts = 0;
+        prog.stepStartMs = nowMs;
+        prog.maxStepIndex = 0;
+        prog.progressMs = nowMs;
+    }
+
     void HopTo(Player* bot, float x, float y, float z)
     {
         if (bot->isMoving())
@@ -517,13 +530,8 @@ StepResult DungeonEventExecutor::RunStep(Player* bot, AiObjectContext* context,
                                  "reset, rewinding the event to step 0 (was step {})",
                                  bot->GetName(), step.bossStateId, state, prog.stepIndex);
                         // The same rewind DcRunEventAction does for a repeatable
-                        // event, forward-progress watchdog included, or the old
-                        // high-water mark makes the new pass look wedged.
-                        prog.stepIndex = 0;
-                        prog.attempts = 0;
-                        prog.stepStartMs = nowMs;
-                        prog.maxStepIndex = 0;
-                        prog.progressMs = nowMs;
+                        // event, forward-progress watchdog included.
+                        RewindToStart(prog, nowMs);
                         return StepResult::Running;
                     case BossStateGateVerdict::Hold:
                         break;
@@ -543,12 +551,25 @@ StepResult DungeonEventExecutor::RunStep(Player* bot, AiObjectContext* context,
             //
             // A garrison may also carry a hook to run WHILE it holds (see
             // EventBuilder::WhileHolding), for a gate that can go BACKWARDS behind
-            // the party's back. The hook's result is deliberately ignored: the gate
-            // below is still the only thing that ends the step.
+            // the party's back. The hook's result is ignored — the gate below is
+            // still the only thing that ends the step — with one exception: a
+            // Restart says the encounter reset under the garrison, and rewinds
+            // the event so its start steps run again (the Tomb of the Seven,
+            // whose reset puts the instance data back to NOT_STARTED and gives
+            // Doom'rel his gossip back).
             if (step.hookId != 0)
             {
                 DungeonBossInfo dummy;  // hooks key off bot/context, not info
-                ObjectiveHookRegistry::Run(step.hookId, bot, context, dummy);
+                if (ObjectiveHookRegistry::Run(step.hookId, bot, context, dummy) ==
+                    ObjectiveArriveResult::Restart)
+                {
+                    LOG_INFO("playerbots.dungeonclear",
+                             "[DC:{}] event garrison hook {} reports the encounter reset — "
+                             "rewinding the event to step 0 (was step {})",
+                             bot->GetName(), step.hookId, prog.stepIndex);
+                    RewindToStart(prog, nowMs);
+                    return StepResult::Running;
+                }
             }
             //
             // Instance-data gate (preferred for a value killed mid-combat): hold
@@ -804,6 +825,13 @@ StepResult DungeonEventExecutor::RunStep(Player* bot, AiObjectContext* context,
                 case ObjectiveArriveResult::Done:    return StepResult::Done;
                 case ObjectiveArriveResult::Running: return StepResult::Running;
                 case ObjectiveArriveResult::Blocked: return StepResult::Blocked;
+                case ObjectiveArriveResult::Restart:
+                    LOG_INFO("playerbots.dungeonclear",
+                             "[DC:{}] event hook {} asks for a restart — rewinding the "
+                             "event to step 0 (was step {})",
+                             bot->GetName(), step.hookId, prog.stepIndex);
+                    RewindToStart(prog, nowMs);
+                    return StepResult::Running;
             }
             return StepResult::Done;
         }

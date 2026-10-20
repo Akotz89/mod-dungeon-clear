@@ -6,6 +6,7 @@
 #include "gtest/gtest.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include "Ai/Dungeon/DungeonClear/Data/DungeonEventRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
@@ -703,6 +704,56 @@ TEST(DungeonEventRegistryTest, BlackrockRocknotAleRunEventShape)
     for (EventStep const& st : e->steps)
         EXPECT_NE(st.instanceDataId, static_cast<int32>(B::TYPE_BAR))
             << "TYPE_BAR is SPECIAL (>= DONE) for the whole escort";
+}
+
+// Blackrock Depths Tomb of the Seven (map 230 event 6): garrison Doom'rel's tier,
+// muster everyone inside (the gossip seals both doors), take his challenge, then
+// hold until TYPE_TOMB_OF_SEVEN is DONE. The hold carries the reset watch, whose
+// Restart rewinds the event to re-muster and re-challenge after the 15s reset.
+TEST(DungeonEventRegistryTest, BlackrockTombOfSevenEventShape)
+{
+    namespace B = DcBlackrockDepths;
+    DungeonEvent const* e = DungeonEventRegistry::Find(B::MAP_ID, B::EVENT_TOMB_OF_SEVEN);
+    ASSERT_NE(e, nullptr);
+    EXPECT_EQ(e->activation, EventActivation::Anchored);
+    EXPECT_EQ(e->orderIndex, 16u);  // Anger'rel's credit bit
+    EXPECT_TRUE(e->persistent);
+    EXPECT_TRUE(e->required);
+
+    ASSERT_EQ(e->steps.size(), 4u);
+    EXPECT_EQ(e->steps[0].kind, EventStepKind::MoveTo);
+    EXPECT_FLOAT_EQ(e->steps[0].x, B::TOMB_HOLD_X);
+    EXPECT_EQ(e->steps[1].kind, EventStepKind::Custom);
+    EXPECT_EQ(e->steps[1].hookId, B::HOOK_TOMB_MUSTER);
+    EXPECT_EQ(e->steps[2].kind, EventStepKind::Gossip);
+    EXPECT_EQ(e->steps[2].creatureEntry, B::NPC_DOOMREL);
+    EXPECT_EQ(e->steps[2].gossipOption, 0);
+    EXPECT_EQ(e->steps[3].kind, EventStepKind::MoveTo);
+    EXPECT_EQ(e->steps[3].instanceDataId, static_cast<int32>(B::TYPE_TOMB_OF_SEVEN));
+    EXPECT_EQ(e->steps[3].instanceDataMin, B::STATE_DONE);
+    EXPECT_EQ(e->steps[3].hookId, B::HOOK_TOMB_RESET_WATCH);
+    EXPECT_FLOAT_EQ(e->steps[3].radius, e->steps[0].radius)
+        << "walk-in and hold must agree on where the garrison is";
+    EXPECT_GE(e->steps[3].timeoutMs, 7u * 30000u) << "seven ghosts wake 30s apart";
+    EXPECT_TRUE(ObjectiveHookRegistry::Has(B::HOOK_TOMB_MUSTER));
+    EXPECT_TRUE(ObjectiveHookRegistry::Has(B::HOOK_TOMB_RESET_WATCH));
+}
+
+// The garrison has to be a spot every ghost can wake onto: each one picks the
+// nearest player within 130yd of its OWN spawn, and a ghost that wakes with
+// nobody in range sits idle out of combat until the 15s reset. And a member
+// standing inside the muster must be well inside the tomb's entrance door.
+TEST(DungeonEventRegistryTest, BlackrockTombGarrisonReachesEveryGhost)
+{
+    namespace B = DcBlackrockDepths;
+    for (B::TombGhost const& g : B::TOMB_GHOSTS)
+    {
+        float const d = std::hypot(g.x - B::TOMB_HOLD_X, g.y - B::TOMB_HOLD_Y);
+        // The whole muster circle, not just its centre.
+        EXPECT_LT(d + B::TOMB_MUSTER_RADIUS, B::TOMB_WAKE_RANGE) << "ghost " << g.entry << " at " << d << "yd";
+    }
+    // Entrance door 170576 at (1230.33, -205.21).
+    EXPECT_GT(std::hypot(1230.33f - B::TOMB_HOLD_X, -205.21f - B::TOMB_HOLD_Y), B::TOMB_MUSTER_RADIUS + 30.0f);
 }
 
 // Deadmines Defias Cannon: walk to the cannon, fire it (Custom hook 2 casts the

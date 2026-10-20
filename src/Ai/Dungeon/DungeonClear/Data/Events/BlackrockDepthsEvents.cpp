@@ -7,12 +7,14 @@
 #include "Ai/Dungeon/DungeonClear/Data/Events/DungeonRosterBuilders.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonWingRegistry.h"
 
+#include <cmath>
 #include <list>
 #include <unordered_map>
 
 #include "Creature.h"
 #include "CreatureAI.h"
 #include "GameObject.h"
+#include "Group.h"
 #include "InstanceScript.h"
 #include "Log.h"
 #include "ObjectMgr.h"
@@ -433,10 +435,87 @@ namespace
                      "doorway ({:.1f}yd from it)", bot->GetName(), phalanx->GetExactDist2d(PHALANX_DOOR_X, PHALANX_DOOR_Y));
         return ObjectiveArriveResult::Running;
     }
+
+    // --- the Tomb of the Seven (event 6) -----------------------------------
+    // Talking to Doom'rel (9039; menu 1947 opt 0 -> 1950 opt 0) is the start:
+    // boss_doomrel::sGossipSelect sets TYPE_TOMB_OF_SEVEN to IN_PROGRESS, and
+    // that CLOSES BOTH TOMB DOORS (instance SetData). Anyone outside stays
+    // outside for the whole fight. The instance then wakes one ghost 1s later and
+    // one every 30s after, each attacking the nearest player within 130yd, until
+    // seven kills set DONE and open the doors again.
+    //
+    // The reset is the danger: if every woken ghost still alive spends 15s out
+    // of combat, TombOfSevenReset respawns the dead ones, makes them all friendly,
+    // reopens the entrance and drops the state to NOT_STARTED. A garrison on a
+    // `>= DONE` gate would then hold an empty tomb until it timed out.
+
+    // --- TombMuster (hook 51) ----------------------------------------------
+    // Running until every living party member stands within TOMB_MUSTER_RADIUS of
+    // the garrison, on the tomb's floors — i.e. INSIDE when the gossip seals the
+    // doors. A member that cannot get in is still bounded: the step's timeout
+    // stalls the run visibly, and stranded recovery pulls a stuck bot to the tank
+    // well inside it. Done straight away once the encounter is running or over,
+    // so a rewind into a live tomb does not wait on a party that is fighting.
+    ObjectiveArriveResult TombMuster(Player* bot, AiObjectContext* context,
+                                     DungeonBossInfo const& /*info*/)
+    {
+        InstanceScript* inst = DcTargeting::GetInstanceScript(bot);
+        if (!inst)
+            return ObjectiveArriveResult::Running;
+        uint32 const state = inst->GetData(TYPE_TOMB_OF_SEVEN);
+        if (state == STATE_IN_PROGRESS || state == STATE_DONE)
+            return ObjectiveArriveResult::Done;
+
+        Group* group = bot->GetGroup();
+        if (!group)
+            return ObjectiveArriveResult::Done;
+
+        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+        {
+            Player* member = ref->GetSource();
+            if (!member || !member->IsInWorld() || !member->IsAlive() ||
+                member->GetMapId() != bot->GetMapId())
+                continue;
+            bool const inside =
+                member->GetExactDist2d(TOMB_HOLD_X, TOMB_HOLD_Y) <= TOMB_MUSTER_RADIUS &&
+                std::fabs(member->GetPositionZ() - TOMB_HOLD_Z) <= TOMB_MUSTER_ZBAND;
+            if (inside)
+                continue;
+            if (!DcRun::Of(context).Throttled(DcThrottle::BrdEventLog, 10000))
+                LOG_INFO("playerbots.dungeonclear",
+                         "[DC:{}] Tomb of the Seven — mustering before Doom'rel seals the "
+                         "doors: {} is {:.1f}yd out", bot->GetName(), member->GetName(),
+                         member->GetExactDist2d(TOMB_HOLD_X, TOMB_HOLD_Y));
+            return ObjectiveArriveResult::Running;
+        }
+        return ObjectiveArriveResult::Done;
+    }
+
+    // --- TombResetWatch (hook 53) ------------------------------------------
+    // Runs every tick of the garrison (.WhileHolding). NOT_STARTED there means
+    // the tomb reset under the party — or the gossip never took — so ask for a
+    // Restart: the event rewinds, re-musters, and talks to Doom'rel again (he
+    // gets his gossip back in his Reset()). The Ring of Law self-restart, keyed
+    // on instance data instead of an areatrigger. Anything else is Done, and is
+    // ignored: the garrison's own DONE gate ends the hold.
+    ObjectiveArriveResult TombResetWatch(Player* bot, AiObjectContext* /*context*/,
+                                         DungeonBossInfo const& /*info*/)
+    {
+        InstanceScript* inst = DcTargeting::GetInstanceScript(bot);
+        if (!inst || inst->GetData(TYPE_TOMB_OF_SEVEN) != STATE_NOT_STARTED)
+            return ObjectiveArriveResult::Done;
+        LOG_INFO("playerbots.dungeonclear",
+                 "[DC:{}] Tomb of the Seven reads NOT_STARTED under the garrison (the "
+                 "15s out-of-combat reset, or the challenge never started) — restarting "
+                 "the challenge", bot->GetName());
+        return ObjectiveArriveResult::Restart;
+    }
 }
 
 void RegisterBlackrockDepthsHooks(ObjectiveHookRegistry::HookTable& out)
 {
+    ObjectiveHookRegistry::AddHook(out, HOOK_TOMB_MUSTER, &TombMuster);
+    ObjectiveHookRegistry::AddHook(out, HOOK_TOMB_RESET_WATCH, &TombResetWatch);
     ObjectiveHookRegistry::AddHook(out, HOOK_START_ROCKNOT_ALE_RUN, &StartRocknotAleRun);
     ObjectiveHookRegistry::AddHook(out, HOOK_WAKE_HURLEY, &WakeHurley);
     ObjectiveHookRegistry::AddHook(out, HOOK_BUY_ROCKNOT_ALE, &BuyRocknotAle);
@@ -589,6 +668,39 @@ void RegisterBlackrockDepthsEvents(std::vector<DungeonEvent>& out)
             .Custom(HOOK_PHALANX_AT_DOOR)
             .Timeout(BRD_PHALANX_WAKE_TIMEOUT_MS)
             .Build());
+
+    // --- THE TOMB OF THE SEVEN, ANCHORED ahead of Anger'rel (index 16) ---
+    // Garrison Doom'rel's tier, muster the whole party inside (hook 51), take
+    // his challenge (the Gossip step drills 1947 -> 1950 itself), and hold until
+    // TYPE_TOMB_OF_SEVEN is DONE while the ghosts come to the party one by one.
+    // The hold re-checks for the 15s reset every tick (hook 53) and restarts the
+    // whole challenge if it happened.
+    //
+    // THE CREDIT TRAP this objective exists to defuse: the encounter's credit is
+    // Anger'rel (bit 16), the FIRST ghost to wake. A boss-only roster would see
+    // bit 16 the moment he died and walk the party out of a sealed tomb with five
+    // ghosts still to come — straight into the reset. The objective shares his
+    // index, sorts ahead of him, and latches only on DONE; his own row is then
+    // already dead and the picker moves on.
+    //
+    // PERSISTENT: seven fights, each a combat gap. Ghosts that have not woken yet
+    // are faction 35 and IMMUNE_TO_PC, which IsPossibleTarget already rejects,
+    // so the clear never pulls one early.
+    out.push_back(
+        EventBuilder(MAP_ID, EVENT_TOMB_OF_SEVEN, "Tomb of the Seven")
+            .Anchored(/*orderIndex*/ 16)
+            .Persistent()
+            .MoveTo(TOMB_HOLD_X, TOMB_HOLD_Y, TOMB_HOLD_Z, TOMB_HOLD_RADIUS)
+            .Custom(HOOK_TOMB_MUSTER)
+            .Timeout(90000)
+            .Gossip(NPC_DOOMREL, /*option*/ 0, /*searchRadius*/ 40.0f)
+            .MoveToHoldUntilInstanceData(TOMB_HOLD_X, TOMB_HOLD_Y, TOMB_HOLD_Z, TOMB_HOLD_RADIUS,
+                                         TYPE_TOMB_OF_SEVEN, /*minValue*/ STATE_DONE)
+            .WhileHolding(HOOK_TOMB_RESET_WATCH)
+            // Seven ghosts on a 30s cadence plus the fights. Only out-of-combat
+            // time counts (Drive re-bases the step clock after every fight).
+            .Timeout(420000)
+            .Build());
 }
 
 // --- roster patch (relocated from BossRosterRegistry) --------------------
@@ -667,6 +779,16 @@ void RegisterBlackrockDepthsRoster(std::vector<BossRosterPatch>& t)
                           DcBlackrockDepths::ROCKNOT_HOLD_Y, DcBlackrockDepths::ROCKNOT_HOLD_Z,
                           /*arriveRadius*/ 8.0f, /*gateEntry*/ 0, /*hook*/ 0,
                           DcBlackrockDepths::EVENT_ROCKNOT),
+            // --- Blackrock Depths — the Tomb of the Seven --------------------
+            // Shares Anger'rel's index 16 — he is the encounter's credit and the
+            // FIRST of seven to die, so the objective (latching only on the
+            // instance's DONE) is what keeps the party in the tomb for the
+            // other six. See BlackrockDepthsEvents' event 6.
+            MakeObjective(OBJ(DcBlackrockDepths::OBJ_TOMB_OF_SEVEN), /*encounterIndex*/ 16, 230,
+                          "Tomb of the Seven", DcBlackrockDepths::TOMB_HOLD_X,
+                          DcBlackrockDepths::TOMB_HOLD_Y, DcBlackrockDepths::TOMB_HOLD_Z,
+                          /*arriveRadius*/ 8.0f, /*gateEntry*/ 0, /*hook*/ 0,
+                          DcBlackrockDepths::EVENT_TOMB_OF_SEVEN),
         };
         // --- Blackrock Depths — Stilgiss and Darkvire before Incendius ---
         // DBC order runs Loregrain -> Incendius (bit 5) -> Stilgiss (6) ->
@@ -749,6 +871,7 @@ void RegisterBlackrockDepthsWings(std::unordered_map<uint32, DungeonWingLayout>&
             9502,    // Phalanx
             9499,    // Plugger Spazzring
             9156,    // Ambassador Flamelash
+            OBJ(DcBlackrockDepths::OBJ_TOMB_OF_SEVEN),  // Tomb of the Seven (event 6)
             9035,    // Anger'rel (The Seven)
             9938,    // Magmus
             9019,    // Emperor Dagran Thaurissan

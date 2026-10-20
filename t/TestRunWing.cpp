@@ -430,14 +430,14 @@ TEST(DcRunWingTest, BlackrockDepthsLfgDungeonPicksTheWing)
 
 TEST(DcRunWingTest, EveryBlackrockDepthsRosterRowIsInExactlyOneWing)
 {
-    // The whole live list — bosses AND every objective — splits 9 / 14 with
+    // The whole live list — bosses AND every objective — splits 9 / 15 with
     // nothing dropped: a row in no wing would never be cleared by either run.
     std::vector<DungeonBossInfo> const roster = BrdRoster();
-    ASSERT_EQ(roster.size(), 23u);
+    ASSERT_EQ(roster.size(), 24u);
     std::size_t const db = DcRunWing::FilterToWing(roster, *DungeonWingRegistry::FindWing(Brd(), "brd-db")).size();
     std::size_t const uc = DcRunWing::FilterToWing(roster, *DungeonWingRegistry::FindWing(Brd(), "brd-uc")).size();
     EXPECT_EQ(db, 9u);
-    EXPECT_EQ(uc, 14u);
+    EXPECT_EQ(uc, 15u);
     EXPECT_EQ(db + uc, roster.size());
     for (DungeonBossInfo const& b : roster)
         EXPECT_NE(DungeonWingRegistry::WingOf(BRD, b.entry), nullptr) << b.name;
@@ -470,7 +470,7 @@ TEST(DcRunWingTest, UpperCityRunGoesToTheShadowforgeLockThenAngerforge)
 {
     std::vector<DungeonBossInfo> const uc =
         DcRunWing::FilterToWing(BrdRoster(), *DungeonWingRegistry::FindWing(Brd(), "brd-uc"));
-    ASSERT_EQ(uc.size(), 14u);
+    ASSERT_EQ(uc.size(), 15u);
     EXPECT_EQ(uc[0].kind, DungeonAnchorKind::Objective);
     EXPECT_EQ(uc[0].eventId, 2u) << "an Upper City run opens at the Shadowforge Lock";
     EXPECT_EQ(uc[1].entry, 9033u) << "then General Angerforge";
@@ -482,7 +482,7 @@ TEST(DcRunWingTest, UpperCityRunGoesToTheShadowforgeLockThenAngerforge)
 // Ribbly -> Rocknot's ale run -> Phalanx -> Plugger: Plugger's death turns the
 // bar's 68 patrons hostile, so he goes last, after the ale run has opened the
 // Bar Door the party leaves by.
-TEST(DcRunWingTest, UpperCityRunClearsTheGrimGuzzlerInScriptOrder)
+TEST(DcRunWingTest, UpperCityRunClearsEachScriptedGateBeforeItsBoss)
 {
     auto const ObjectiveEntry = [](uint32 seq) { return BossRosterRegistry::ObjectiveEntry(seq); };
     std::vector<DungeonBossInfo> const uc =
@@ -494,7 +494,9 @@ TEST(DcRunWingTest, UpperCityRunClearsTheGrimGuzzlerInScriptOrder)
         ObjectiveEntry(DcBlackrockDepths::OBJ_RIBBLY), 9543,
         ObjectiveEntry(DcBlackrockDepths::OBJ_ROCKNOT), 9502,
         9499,                                                // Plugger, last in the bar
-        9156, 9035, 9938, 9019,                              // Flamelash .. Thaurissan
+        9156,                                                // Flamelash
+        ObjectiveEntry(DcBlackrockDepths::OBJ_TOMB_OF_SEVEN), 9035,  // the Seven, then Anger'rel's row
+        9938, 9019,                                          // Magmus, Thaurissan
     };
     ASSERT_EQ(uc.size(), want.size());
     for (std::size_t i = 0; i < want.size(); ++i)
@@ -510,6 +512,8 @@ TEST(DcRunWingTest, UpperCityRunClearsTheGrimGuzzlerInScriptOrder)
             EXPECT_EQ(b.eventId, DcBlackrockDepths::EVENT_RIBBLY);
         if (b.entry == ObjectiveEntry(DcBlackrockDepths::OBJ_ROCKNOT))
             EXPECT_EQ(b.eventId, DcBlackrockDepths::EVENT_ROCKNOT);
+        if (b.entry == ObjectiveEntry(DcBlackrockDepths::OBJ_TOMB_OF_SEVEN))
+            EXPECT_EQ(b.eventId, DcBlackrockDepths::EVENT_TOMB_OF_SEVEN);
         if (b.entry == 9543)
             EXPECT_EQ(b.encounterIndex, 13u) << "Ribbly keeps kill-bit 13";
         if (b.entry == 9502)

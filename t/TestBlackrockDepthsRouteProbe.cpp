@@ -180,6 +180,9 @@ TEST(BlackrockDepthsRouteProbe, UpperCityEventSpotsAreOnTheNavmesh)
         { B::ROCKNOT_HOLD_X, B::ROCKNOT_HOLD_Y, B::ROCKNOT_HOLD_Z, "Rocknot hold" },
         { 868.97f, -224.98f, -43.72f, "Phalanx" },
         { B::PLUGGER_CAMP_X, B::PLUGGER_CAMP_Y, B::PLUGGER_CAMP_Z, "Plugger camp" },
+        { 1009.75f, -239.02f, -61.3f, "Flamelash" },
+        { B::TOMB_HOLD_X, B::TOMB_HOLD_Y, B::TOMB_HOLD_Z, "Tomb garrison" },
+        { 1281.14f, -282.15f, -78.14f, "Doom'rel" },
     };
 
     std::printf("Blackrock Depths — Upper City event spots\n");

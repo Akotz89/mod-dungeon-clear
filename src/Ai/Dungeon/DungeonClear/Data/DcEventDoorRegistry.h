@@ -336,6 +336,15 @@ namespace DcEventDoorRegistry
             // pickpocketed Plugger drops it); this row keeps it refused if that
             // ever changes. Map-230 event 5 owns it.
             case 170571:  // Blackrock Depths — Bar Door (opens at the end of Rocknot's ale run)
+            // The Summoner's Tomb doors, both empty-lock-85 and both driven only by
+            // instance_blackrock_depths' TYPE_TOMB_OF_SEVEN: IN_PROGRESS shuts both,
+            // DONE opens both, a reset reopens the entrance. 170576 spawns open, so
+            // it is only ever "blocking" while the Seven are up — and a bot that
+            // clicked it then would let the party walk out mid-encounter into the
+            // 15s reset. 170577 (the exit) spawns shut and is the way on to the
+            // Lyceum; opening it early would skip the Seven. Map-230 event 6 owns both.
+            case 170576:  // Blackrock Depths — Summoner's Tomb entrance (shut while the Seven are up)
+            case 170577:  // Blackrock Depths — Summoner's Tomb exit (opens on the Seven DONE)
                 return true;
             default:
                 return false;

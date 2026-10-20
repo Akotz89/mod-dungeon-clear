@@ -163,6 +163,43 @@ namespace DcBlackrockDepths
     constexpr float PLUGGER_CAMP_X = 871.0f;
     constexpr float PLUGGER_CAMP_Y = -235.0f;
     constexpr float PLUGGER_CAMP_Z = -43.27f;
+
+    // --- the Tomb of the Seven (event 6) ---------------------------------
+    constexpr uint32 TYPE_TOMB_OF_SEVEN = 4;
+    constexpr uint32 EVENT_TOMB_OF_SEVEN = 6;
+    constexpr uint32 OBJ_TOMB_OF_SEVEN = 6;
+    constexpr uint32 HOOK_TOMB_MUSTER = 51;
+    constexpr uint32 HOOK_TOMB_RESET_WATCH = 53;
+    constexpr uint32 NPC_DOOMREL = 9039;
+    constexpr uint32 GO_TOMB_ENTER = 170576;
+    constexpr uint32 GO_TOMB_EXIT = 170577;
+
+    // The garrison: Doom'rel's upper tier, a few yards in front of him and off
+    // the exit door. Every ghost wakes by SelectNearestPlayer(130) from its own
+    // spawn, and this spot is inside 130yd of all six; it is also 90+yd from the
+    // entrance door, so a member mustered on it is inside the tomb when the
+    // gossip closes both doors. Probed in t/TestBlackrockDepthsRouteProbe.
+    constexpr float TOMB_HOLD_X = 1268.0f;
+    constexpr float TOMB_HOLD_Y = -272.0f;
+    constexpr float TOMB_HOLD_Z = -78.1f;
+    constexpr float TOMB_HOLD_RADIUS = 6.0f;
+    // Muster: every living member this close to the hold (and on the tomb's
+    // floors) before the gossip that seals the doors.
+    constexpr float TOMB_MUSTER_RADIUS = 25.0f;
+    constexpr float TOMB_MUSTER_ZBAND = 12.0f;
+    // The core's wake range (instance_blackrock_depths::TombOfSevenEvent).
+    constexpr float TOMB_WAKE_RANGE = 130.0f;
+
+    // The six ghosts the instance wakes before Doom'rel, in wake order.
+    struct TombGhost { uint32 entry; float x, y, z; };
+    constexpr TombGhost TOMB_GHOSTS[] = {
+        { 9035, 1215.05f, -220.66f, -85.59f },   // Anger'rel (encounter credit, bit 16)
+        { 9038, 1286.56f, -253.33f, -78.06f },   // Seeth'rel
+        { 9040, 1236.55f, -291.53f, -78.14f },   // Dope'rel
+        { 9037, 1226.69f, -246.12f, -85.59f },   // Gloom'rel
+        { 9036, 1272.32f, -199.82f, -85.59f },   // Vile'rel
+        { 9034, 1246.18f, -189.97f, -85.59f },   // Hate'rel
+    };
 }
 
 void RegisterHellfireRampartsEvents(std::vector<DungeonEvent>& out);
