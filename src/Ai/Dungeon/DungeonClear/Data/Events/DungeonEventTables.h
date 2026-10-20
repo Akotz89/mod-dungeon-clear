@@ -462,6 +462,62 @@ namespace DcBlackrockSpire
     // Floor between two sweep rewinds, so a mob nothing can reach cannot spin
     // the event.
     constexpr uint32 HALL_RESTART_FLOOR_MS = 30000;
+
+    // --- the Blackrock Altar and Pyroguard Emberseer (event 3) -----------
+    constexpr uint32 EVENT_BLACKROCK_ALTAR = 3;
+    constexpr uint32 OBJ_BLACKROCK_ALTAR = 3;
+    constexpr uint32 HOOK_MUSTER_HALL_OF_BINDING = 58;
+    constexpr uint32 HOOK_EMBERSEER_FREED = 59;
+    // Not in the plan's 56-61 block: the plan's bare UseGO step does not hold
+    // the ritual's channel (see UseBlackrockAltar), so the altar got a hook.
+    constexpr uint32 HOOK_USE_BLACKROCK_ALTAR = 62;
+
+    constexpr uint32 NPC_PYROGUARD_EMBERSEER = 9816;
+    constexpr uint32 NPC_BLACKHAND_INCARCERATOR = 10316;
+    constexpr uint32 GO_BLACKROCK_ALTAR = 175706;
+    constexpr uint32 GO_EMBERSEER_OUT = 175153;
+    // The altar's ritual spell 16533 sends this event; the instance's
+    // ProcessEvent starts Emberseer's release when his state is NOT_STARTED.
+    constexpr uint32 EVENT_PYROGUARD_EMBERSEER = 4884;
+    // The ritual's anim spell: the user channels it, and GameObject::Update
+    // drops a participant who is no longer channelling it before the 5s
+    // ritual completes.
+    constexpr uint32 SPELL_ALTAR_CHANNEL = 16532;
+
+    // The altar (144.4,-280.9,91.5) and the stand point on the room floor 4.9yd
+    // north of it — also the objective anchor.
+    constexpr float ALTAR_X = 144.445f;
+    constexpr float ALTAR_Y = -280.941f;
+    constexpr float ALTAR_STAND_X = 144.4f;
+    constexpr float ALTAR_STAND_Y = -276.0f;
+    constexpr float ALTAR_STAND_Z = 91.6f;
+    constexpr float ALTAR_SCAN = 15.0f;
+    // One Use() per this floor while the ritual has not taken.
+    constexpr uint32 ALTAR_USE_FLOOR_MS = 3000;
+    // A ritual that has not started his release in this long is not going to
+    // (the channel broke, every time): enter the script's own entry point.
+    constexpr uint32 ALTAR_FALLBACK_MS = 15000;
+    // The seven incarcerators stand at x 126-162, y -241..-277, z 91.6; the
+    // farthest is 39.5yd from the stand point.
+    constexpr float INCARCERATOR_CLEAR_RADIUS = 45.0f;
+
+    // The Hall of Binding: the incarcerators' aggro shuts Emberseer In and the
+    // Doors two seconds after the altar, so everyone must be in here first. The
+    // room floor is z 91.6 with his platform at 96.4; the hall below is z 71 and
+    // the Rookery floor west of Emberseer Out is x < 113.
+    struct Box { float minX, minY, minZ, maxX, maxY, maxZ; };
+    constexpr Box HALL_OF_BINDING = { 115.0f, -284.0f, 88.0f, 174.0f, -236.0f, 100.0f };
+    // The muster's cap (DC_SEALED_MUSTER_TIMEOUT_MS's 20s): then proceed and
+    // name who is outside.
+    constexpr uint32 MUSTER_CAP_MS = 20000;
+    // Emberseer's room, for the event-level completion on Emberseer Out (35yd
+    // from the stand point).
+    constexpr float BINDING_SCAN = 60.0f;
+
+    inline bool InBox(Box const& b, float x, float y, float z)
+    {
+        return x >= b.minX && x <= b.maxX && y >= b.minY && y <= b.maxY && z >= b.minZ && z <= b.maxZ;
+    }
 }
 
 void RegisterHellfireRampartsEvents(std::vector<DungeonEvent>& out);

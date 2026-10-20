@@ -115,6 +115,8 @@ enum class DcThrottle : uint8
                          // stamp is also how the hook knows the click was used
     UbrsHallRestart,     // floor between two hall-sweep rewinds onto the rune packs
     UbrsHallRearm,       // floor between two re-fires of AT 2046's script
+    UbrsAltarUse,        // floor between two Blackrock Altar uses (its ritual
+                         // takes 5s; a re-use mid-ritual is swallowed)
 
     Count
 };

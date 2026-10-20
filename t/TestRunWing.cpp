@@ -83,7 +83,7 @@ TEST(DcRunWingTest, BlackrockSpireIsAnExplicitTwoWingLayout)
     EXPECT_EQ(lbrs->terminalBossEntry, 9568u);    // Overlord Wyrmthalak
     EXPECT_EQ(ubrs->terminalBossEntry, 10363u);   // General Drakkisath
     EXPECT_EQ(lbrs->bossEntries.size(), 9u);      // incl. Urok, Gizrul
-    EXPECT_EQ(ubrs->bossEntries.size(), 7u);      // incl. Solakar, + the door and hall objectives
+    EXPECT_EQ(ubrs->bossEntries.size(), 8u);      // incl. Solakar, + the door, hall and altar objectives
 
     // The DBC bits split cleanly: 0-8 LBRS, 9-13 UBRS.
     EXPECT_EQ(lbrs->encounterMask & ubrs->encounterMask, 0u);

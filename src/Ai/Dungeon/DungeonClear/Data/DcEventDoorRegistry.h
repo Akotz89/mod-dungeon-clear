@@ -373,6 +373,9 @@ namespace DcEventDoorRegistry
             case 164725:  // Upper Blackrock Spire — Dragonspine Door
             case 175244:  // Upper Blackrock Spire — Emberseer In (hall runes)
             case 175705:  // Upper Blackrock Spire — Doors (ramp into Emberseer's room)
+            //   175153 EMBERSEER OUT — spawns shut, opens on Emberseer's death:
+            //     the way on into the Rookery. A click would skip him.
+            case 175153:  // Upper Blackrock Spire — Emberseer Out (opens on his death)
                 return true;
             default:
                 return false;

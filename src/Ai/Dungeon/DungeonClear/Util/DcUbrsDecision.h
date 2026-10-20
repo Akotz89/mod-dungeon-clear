@@ -87,6 +87,72 @@ namespace DcUbrs
             return HallStep::Rearm;
         return HallStep::Wait;
     }
+
+    // --- musters (hooks 58, 60) -------------------------------------------
+    // Done once nobody living is outside the room, or once the cap has run out
+    // (CapReached: proceed, and say who is still outside).
+    enum class MusterStep : uint8
+    {
+        Done,
+        Wait,
+        CapReached,
+    };
+
+    inline MusterStep DecideMuster(uint32 outside, uint32 elapsedMs, uint32 capMs)
+    {
+        if (outside == 0)
+            return MusterStep::Done;
+        return elapsedMs >= capMs ? MusterStep::CapReached : MusterStep::Wait;
+    }
+
+    // --- the Blackrock Altar (hook 62) ------------------------------------
+    // The altar is a summoning ritual (type 18, one participant): Use() makes the
+    // user channel 16532, and 5s later GameObject::Update casts 16533 -> event
+    // 4884 -> Emberseer's release — but only if the user is STILL channelling.
+    // A bot that moves or casts in those five seconds drops out and the altar
+    // resets to READY.
+    enum class AltarStep : uint8
+    {
+        Done,       // his release has started (IN_PROGRESS) or he is dead
+        Hold,       // channelling: stand still
+        Use,        // altar ready: use it
+        Fallback,   // the ritual never took: ProcessEvent(4884) directly
+        Wait,       // altar busy (mid-ritual or cooling down)
+    };
+
+    inline AltarStep DecideAltar(uint32 bossState, bool channelling, bool altarReady, uint32 elapsedMs)
+    {
+        namespace B = DcBlackrockSpire;
+        if (bossState != B::STATE_NOT_STARTED)
+            return AltarStep::Done;
+        if (channelling)
+            return AltarStep::Hold;
+        if (elapsedMs >= B::ALTAR_FALLBACK_MS)
+            return AltarStep::Fallback;
+        return altarReady ? AltarStep::Use : AltarStep::Wait;
+    }
+
+    // --- Emberseer freed (hook 59) ----------------------------------------
+    // He is unselectable and immune to players for ~69s after the altar; the
+    // roster's Emberseer row must not be handed over before then. NOT_STARTED
+    // here (after the altar has set IN_PROGRESS) is an incarcerator's Reset
+    // putting the whole encounter back: rewind and run it again.
+    enum class FreedStep : uint8
+    {
+        Done,
+        Restart,
+        Wait,
+    };
+
+    inline FreedStep DecideEmberseerFreed(uint32 bossState, bool alive, bool attackable)
+    {
+        namespace B = DcBlackrockSpire;
+        if (bossState == B::STATE_DONE || !alive)
+            return FreedStep::Done;
+        if (bossState == B::STATE_NOT_STARTED)
+            return FreedStep::Restart;
+        return attackable ? FreedStep::Done : FreedStep::Wait;
+    }
 }
 
 #endif  // _PLAYERBOT_DCUBRSDECISION_H

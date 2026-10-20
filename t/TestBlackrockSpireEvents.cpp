@@ -88,7 +88,7 @@ TEST(DcBlackrockSpireTest, UbrsRunOpensTheDoorThenClearsTheHallBeforeEmberseer)
 {
     std::vector<DungeonBossInfo> const ubrs = Wing("ubrs");
     std::vector<uint32> const want = {
-        Obj(B::OBJ_DRAGONSPINE_DOOR), Obj(B::OBJ_DRAGONSPIRE_HALL),
+        Obj(B::OBJ_DRAGONSPINE_DOOR), Obj(B::OBJ_DRAGONSPIRE_HALL), Obj(B::OBJ_BLACKROCK_ALTAR),
         9816, 10429, 10430, 10363,
     };
     ASSERT_GE(ubrs.size(), want.size());
@@ -260,12 +260,111 @@ TEST(DcBlackrockSpireTest, HallSweepDecision)
     EXPECT_GT(B::HALL_REARM_AFTER_MS, 3000u * 2) << "two CHECK periods before a re-arm";
 }
 
+// ---- event 3: the Blackrock Altar ---------------------------------------------------
+
+TEST(DcBlackrockSpireTest, BlackrockAltarEventShape)
+{
+    DungeonEvent const& e = Event(B::EVENT_BLACKROCK_ALTAR);
+    EXPECT_EQ(e.orderIndex, 9u);
+    EXPECT_TRUE(e.persistent);
+    EXPECT_EQ(e.completeGoEntry, B::GO_EMBERSEER_OUT);
+    EXPECT_EQ(e.completeGoState, B::GO_STATE_OPEN);
+    // Emberseer Out is 35yd from the stand point: past the 20yd default.
+    EXPECT_GT(e.completeGoRadius, std::hypot(113.751f - B::ALTAR_STAND_X, -258.945f - B::ALTAR_STAND_Y));
+
+    ASSERT_EQ(e.steps.size(), 5u);
+    EXPECT_EQ(e.steps[0].kind, EventStepKind::MoveTo);
+    // Muster BEFORE the altar: the incarcerators seal the room 2s after it.
+    EXPECT_EQ(e.steps[1].kind, EventStepKind::Custom);
+    EXPECT_EQ(e.steps[1].hookId, B::HOOK_MUSTER_HALL_OF_BINDING);
+    EXPECT_GT(e.steps[1].timeoutMs, B::MUSTER_CAP_MS) << "the cap, not the timeout, ends the muster";
+    EXPECT_EQ(e.steps[2].kind, EventStepKind::Custom);
+    EXPECT_EQ(e.steps[2].hookId, B::HOOK_USE_BLACKROCK_ALTAR);
+    EXPECT_GT(e.steps[2].timeoutMs, B::ALTAR_FALLBACK_MS) << "the fallback must fire before the timeout";
+    EXPECT_EQ(e.steps[3].kind, EventStepKind::ClearRadius);
+    EXPECT_EQ(e.steps[3].entryFilter, (std::vector<uint32>{ B::NPC_BLACKHAND_INCARCERATOR }));
+    EXPECT_EQ(e.steps[4].kind, EventStepKind::Custom);
+    EXPECT_EQ(e.steps[4].hookId, B::HOOK_EMBERSEER_FREED);
+    EXPECT_GE(e.steps[4].timeoutMs, 69000u) << "his release takes ~69s from the altar";
+}
+
+// Every incarcerator corner of x 126-162, y -241..-277 is inside the clear, and the
+// clear is judged from where it is centred: the stand point, not his platform.
+TEST(DcBlackrockSpireTest, IncarceratorClearReachesAllSevenFromTheStandPoint)
+{
+    DungeonEvent const& e = Event(B::EVENT_BLACKROCK_ALTAR);
+    EventStep const& c = e.steps[3];
+    EXPECT_FLOAT_EQ(c.x, B::ALTAR_STAND_X);
+    EXPECT_FLOAT_EQ(c.y, B::ALTAR_STAND_Y);
+    for (float x : { 126.0f, 162.0f })
+        for (float y : { -241.0f, -277.0f })
+            EXPECT_LT(std::hypot(x - c.x, y - c.y), c.radius) << x << "," << y;
+}
+
+TEST(DcBlackrockSpireTest, HallOfBindingMusterBox)
+{
+    auto const in = [](float x, float y, float z) { return B::InBox(B::HALL_OF_BINDING, x, y, z); };
+    EXPECT_TRUE(in(B::ALTAR_STAND_X, B::ALTAR_STAND_Y, B::ALTAR_STAND_Z));
+    EXPECT_TRUE(in(144.4f, -258.0f, 96.4f)) << "Emberseer's platform";
+    EXPECT_TRUE(in(126.0f, -241.0f, 91.6f)) << "an incarcerator";
+    // The ramp foot inside the Doors (175.1,-258.9) is the way in, not the room.
+    EXPECT_FALSE(in(176.0f, -258.9f, 91.6f));
+    // The hall floor under the room is z 71: outside, however close in XY.
+    EXPECT_FALSE(in(155.3f, -270.0f, 70.9f));
+    // The Rookery floor west of Emberseer Out.
+    EXPECT_FALSE(in(100.0f, -258.5f, 91.6f));
+}
+
+TEST(DcBlackrockSpireTest, MusterDecision)
+{
+    using DcUbrs::MusterStep;
+    EXPECT_EQ(DcUbrs::DecideMuster(0, 0, B::MUSTER_CAP_MS), MusterStep::Done);
+    EXPECT_EQ(DcUbrs::DecideMuster(2, 0, B::MUSTER_CAP_MS), MusterStep::Wait);
+    EXPECT_EQ(DcUbrs::DecideMuster(2, B::MUSTER_CAP_MS - 1, B::MUSTER_CAP_MS), MusterStep::Wait);
+    EXPECT_EQ(DcUbrs::DecideMuster(1, B::MUSTER_CAP_MS, B::MUSTER_CAP_MS), MusterStep::CapReached);
+}
+
+TEST(DcBlackrockSpireTest, AltarDecisionHoldsTheRitualChannel)
+{
+    using DcUbrs::AltarStep;
+    using DcUbrs::DecideAltar;
+    // Released (or a human beat us to it): done.
+    EXPECT_EQ(DecideAltar(B::STATE_IN_PROGRESS, false, false, 0), AltarStep::Done);
+    EXPECT_EQ(DecideAltar(B::STATE_DONE, false, true, 0), AltarStep::Done);
+    // Ready: use it; channelling: stand still — even past the fallback time, a
+    // channel up is a ritual about to land.
+    EXPECT_EQ(DecideAltar(B::STATE_NOT_STARTED, false, true, 0), AltarStep::Use);
+    EXPECT_EQ(DecideAltar(B::STATE_NOT_STARTED, true, false, 2000), AltarStep::Hold);
+    EXPECT_EQ(DecideAltar(B::STATE_NOT_STARTED, true, false, B::ALTAR_FALLBACK_MS + 1), AltarStep::Hold);
+    // Busy (mid-ritual / reset cooldown): wait.
+    EXPECT_EQ(DecideAltar(B::STATE_NOT_STARTED, false, false, 2000), AltarStep::Wait);
+    // The ritual never took: the script's own entry point.
+    EXPECT_EQ(DecideAltar(B::STATE_NOT_STARTED, false, true, B::ALTAR_FALLBACK_MS), AltarStep::Fallback);
+}
+
+TEST(DcBlackrockSpireTest, EmberseerFreedDecision)
+{
+    using DcUbrs::FreedStep;
+    using DcUbrs::DecideEmberseerFreed;
+    // Still bound (IN_PROGRESS, unselectable/immune): hold the roster's row back.
+    EXPECT_EQ(DecideEmberseerFreed(B::STATE_IN_PROGRESS, true, false), FreedStep::Wait);
+    EXPECT_EQ(DecideEmberseerFreed(B::STATE_IN_PROGRESS, true, true), FreedStep::Done);
+    // An incarcerator's Reset put the encounter back: run it again.
+    EXPECT_EQ(DecideEmberseerFreed(B::STATE_NOT_STARTED, true, false), FreedStep::Restart);
+    // Dead or DONE: nothing to wait for.
+    EXPECT_EQ(DecideEmberseerFreed(B::STATE_DONE, false, false), FreedStep::Done);
+    EXPECT_EQ(DecideEmberseerFreed(B::STATE_IN_PROGRESS, false, false), FreedStep::Done);
+}
+
 // ---- hooks and doors -------------------------------------------------------------
 
 TEST(DcBlackrockSpireTest, HooksAreRegistered)
 {
     EXPECT_TRUE(ObjectiveHookRegistry::Has(B::HOOK_OPEN_DRAGONSPINE_DOOR));
     EXPECT_TRUE(ObjectiveHookRegistry::Has(B::HOOK_HALL_RUNES_SWEEP));
+    EXPECT_TRUE(ObjectiveHookRegistry::Has(B::HOOK_MUSTER_HALL_OF_BINDING));
+    EXPECT_TRUE(ObjectiveHookRegistry::Has(B::HOOK_USE_BLACKROCK_ALTAR));
+    EXPECT_TRUE(ObjectiveHookRegistry::Has(B::HOOK_EMBERSEER_FREED));
 }
 
 TEST(DcBlackrockSpireTest, EventOwnedDoorsAreScriptOnly)
@@ -277,6 +376,7 @@ TEST(DcBlackrockSpireTest, EventOwnedDoorsAreScriptOnly)
     // saved flag; the event, not the walker, owns it.
     EXPECT_FALSE(DcEventDoorRegistry::IsLockFreeClickable(B::GO_DRAGONSPINE_DOOR));
     // Real gates: navigation must still see them shut.
-    for (uint32 go : { B::GO_DRAGONSPINE_DOOR, B::GO_EMBERSEER_IN, B::GO_DOORS })
+    EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(B::GO_EMBERSEER_OUT));
+    for (uint32 go : { B::GO_DRAGONSPINE_DOOR, B::GO_EMBERSEER_IN, B::GO_DOORS, B::GO_EMBERSEER_OUT })
         EXPECT_FALSE(DcEventDoorRegistry::IsNavigationIgnored(go)) << go;
 }

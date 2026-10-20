@@ -14,12 +14,14 @@
 
 #include "Creature.h"
 #include "GameObject.h"
+#include "Group.h"
 #include "InstanceScript.h"
 #include "Log.h"
 #include "ObjectMgr.h"
 #include "Player.h"
 #include "Playerbots.h"
 #include "ScriptMgr.h"
+#include "Spell.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 #include "Ai/Dungeon/DungeonClear/Overrides/ObjectiveHookRegistry.h"
@@ -233,12 +235,189 @@ namespace
                      bot->GetName(), stillLit.empty() ? "none" : stillLit);
         return ObjectiveArriveResult::Running;
     }
+
+    uint32 BossState(InstanceScript* inst, uint32 slot)
+    {
+        return inst ? static_cast<uint32>(inst->GetBossState(slot)) : STATE_NOT_STARTED;
+    }
+
+    // Every living party member on the bot's map outside `box`, by name.
+    std::string MembersOutside(Player* bot, Box const& box, uint32& count)
+    {
+        count = 0;
+        std::string names;
+        auto check = [&](Player* m)
+        {
+            if (!m || !m->IsInWorld() || !m->IsAlive() || m->GetMapId() != bot->GetMapId() ||
+                InBox(box, m->GetPositionX(), m->GetPositionY(), m->GetPositionZ()))
+                return;
+            ++count;
+            names += (names.empty() ? "" : ", ") + m->GetName();
+        };
+        if (Group* group = bot->GetGroup())
+            for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+                check(ref->GetSource());
+        else
+            check(bot);
+        return names;
+    }
+
+    // Shared body of the two musters (hooks 58, 60): Running while a living
+    // member is outside `box`, for at most MUSTER_CAP_MS — then proceed, naming
+    // who is outside, because a member that cannot get in is better fought
+    // around than stalled on (stranded recovery pulls a stuck bot to the tank).
+    ObjectiveArriveResult Muster(Player* bot, AiObjectContext* context, Box const& box, char const* room)
+    {
+        uint32 outside = 0;
+        std::string const names = MembersOutside(bot, box, outside);
+        uint32 const elapsed = StepElapsedMs(context);
+        switch (DcUbrs::DecideMuster(outside, elapsed, MUSTER_CAP_MS))
+        {
+            case DcUbrs::MusterStep::Done:
+                LOG_INFO("playerbots.dungeonclear", "[DC:{}] {} — the whole party is inside",
+                         bot->GetName(), room);
+                return ObjectiveArriveResult::Done;
+            case DcUbrs::MusterStep::CapReached:
+                LOG_WARN("playerbots.dungeonclear",
+                         "[DC:{}] {} — muster cap ({}s) reached with {} member(s) outside: {}; "
+                         "going on without them", bot->GetName(), room, MUSTER_CAP_MS / IN_MILLISECONDS,
+                         outside, names);
+                return ObjectiveArriveResult::Done;
+            case DcUbrs::MusterStep::Wait:
+                if (!DcRun::Of(context).Throttled(DcThrottle::UbrsEventLog, 5000))
+                    LOG_INFO("playerbots.dungeonclear", "[DC:{}] {} — mustering: waiting on {}",
+                             bot->GetName(), room, names);
+                return ObjectiveArriveResult::Running;
+        }
+        return ObjectiveArriveResult::Running;
+    }
+
+    // --- MusterInHallOfBinding (hook 58) -----------------------------------
+    // Before the altar: the incarcerators' aggro shuts both doors into the room
+    // two seconds after it, until Emberseer dies. SealedEncounterRegistry does
+    // not fit — it musters on the ENGAGE, and here the seal comes ~70s before
+    // any engage. Done at once if the encounter is already running or over, so
+    // a rewind into a live room does not wait on a party that is fighting.
+    ObjectiveArriveResult MusterInHallOfBinding(Player* bot, AiObjectContext* context,
+                                                DungeonBossInfo const& /*info*/)
+    {
+        if (BossState(DcTargeting::GetInstanceScript(bot), DATA_PYROGUARD_EMBERSEER) != STATE_NOT_STARTED)
+            return ObjectiveArriveResult::Done;
+        return Muster(bot, context, HALL_OF_BINDING, "Hall of Binding");
+    }
+
+    // --- UseBlackrockAltar (hook 62) ---------------------------------------
+    // The plan had a bare UseGO here. The altar is a one-participant summoning
+    // ritual, and GameObject::Use only STARTS it: the user channels 16532 and
+    // GameObject::Update completes the ritual five seconds later only if that
+    // channel is still up (CheckRitualList). An event step that clicks and moves
+    // on leaves a bot free to walk or cast through the channel, and the altar
+    // silently resets. So this hook clicks, then holds the leader still while
+    // it channels, and is Done only on what the ritual causes: Emberseer's
+    // state leaving NOT_STARTED. If the ritual has not taken in
+    // ALTAR_FALLBACK_MS it enters the same entry point the ritual's spell
+    // reaches, the instance's ProcessEvent(4884) — which itself ignores the call
+    // unless the state is NOT_STARTED, so a late ritual cannot double-start it.
+    ObjectiveArriveResult UseBlackrockAltar(Player* bot, AiObjectContext* context,
+                                            DungeonBossInfo const& /*info*/)
+    {
+        InstanceScript* inst = DcTargeting::GetInstanceScript(bot);
+        if (!inst)
+            return ObjectiveArriveResult::Running;
+
+        Spell const* channel = bot->GetCurrentSpell(CURRENT_CHANNELED_SPELL);
+        bool const channelling = channel && channel->m_spellInfo->Id == SPELL_ALTAR_CHANNEL;
+        GameObject* altar = bot->FindNearestGameObject(GO_BLACKROCK_ALTAR, ALTAR_SCAN);
+        bool const ready = altar && altar->getLootState() == GO_READY;
+        uint32 const elapsed = StepElapsedMs(context);
+
+        switch (DcUbrs::DecideAltar(BossState(inst, DATA_PYROGUARD_EMBERSEER), channelling, ready, elapsed))
+        {
+            case DcUbrs::AltarStep::Done:
+                LOG_INFO("playerbots.dungeonclear",
+                         "[DC:{}] Blackrock Altar — Emberseer's release has started ({}s after arriving); "
+                         "the incarcerators are next", bot->GetName(), elapsed / IN_MILLISECONDS);
+                return ObjectiveArriveResult::Done;
+            case DcUbrs::AltarStep::Hold:
+                if (bot->isMoving())
+                    bot->StopMoving();
+                return ObjectiveArriveResult::Running;
+            case DcUbrs::AltarStep::Use:
+                if (DcRun::Of(context).Throttled(DcThrottle::UbrsAltarUse, ALTAR_USE_FLOOR_MS))
+                    return ObjectiveArriveResult::Running;
+                bot->StopMoving();
+                bot->SetFacingToObject(altar);
+                altar->Use(bot);
+                LOG_INFO("playerbots.dungeonclear",
+                         "[DC:{}] Blackrock Altar — used it (channel {}: {})", bot->GetName(),
+                         SPELL_ALTAR_CHANNEL, bot->GetCurrentSpell(CURRENT_CHANNELED_SPELL) ? "up" : "not up");
+                return ObjectiveArriveResult::Running;
+            case DcUbrs::AltarStep::Fallback:
+                LOG_WARN("playerbots.dungeonclear",
+                         "[DC:{}] Blackrock Altar — the ritual has not started Emberseer's release in "
+                         "{}s (altar {}, channel broken?); entering the instance's ProcessEvent({}) "
+                         "directly", bot->GetName(), elapsed / IN_MILLISECONDS,
+                         !altar ? "not found" : ready ? "ready" : "busy", EVENT_PYROGUARD_EMBERSEER);
+                inst->ProcessEvent(bot, EVENT_PYROGUARD_EMBERSEER);
+                return ObjectiveArriveResult::Running;
+            case DcUbrs::AltarStep::Wait:
+                return ObjectiveArriveResult::Running;
+        }
+        return ObjectiveArriveResult::Running;
+    }
+
+    // --- EmberseerFreed (hook 59) ------------------------------------------
+    // Holds the event — and so the roster's Emberseer row — through the ~69s in
+    // which he is NOT_SELECTABLE and immune to players (Growing stacks to 20,
+    // then he breaks free and DoZoneInCombats). The Nethekurse / Novos shape.
+    // NOT_STARTED is the encounter resetting under the party (any incarcerator
+    // evading resets it, 5s later): Restart, so the event re-musters and uses the
+    // altar again.
+    ObjectiveArriveResult EmberseerFreed(Player* bot, AiObjectContext* context,
+                                         DungeonBossInfo const& /*info*/)
+    {
+        InstanceScript* inst = DcTargeting::GetInstanceScript(bot);
+        if (!inst)
+            return ObjectiveArriveResult::Running;
+        uint32 const state = BossState(inst, DATA_PYROGUARD_EMBERSEER);
+        Creature* emberseer = bot->FindNearestCreature(NPC_PYROGUARD_EMBERSEER, BINDING_SCAN, /*alive*/ false);
+        if (!emberseer && state != STATE_DONE)
+            return ObjectiveArriveResult::Running;  // grid not loaded yet
+
+        bool const alive = emberseer && emberseer->IsAlive();
+        bool const attackable = alive && !emberseer->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE) &&
+                                !emberseer->IsImmuneToPC();
+        switch (DcUbrs::DecideEmberseerFreed(state, alive, attackable))
+        {
+            case DcUbrs::FreedStep::Done:
+                LOG_INFO("playerbots.dungeonclear",
+                         "[DC:{}] Pyroguard Emberseer is free of his bonds (state {}) — engaging",
+                         bot->GetName(), state);
+                return ObjectiveArriveResult::Done;
+            case DcUbrs::FreedStep::Restart:
+                LOG_INFO("playerbots.dungeonclear",
+                         "[DC:{}] Pyroguard Emberseer reads NOT_STARTED again (an incarcerator "
+                         "evaded and reset the encounter) — mustering and using the altar again",
+                         bot->GetName());
+                return ObjectiveArriveResult::Restart;
+            case DcUbrs::FreedStep::Wait:
+                if (!DcRun::Of(context).Throttled(DcThrottle::UbrsEventLog, 15000))
+                    LOG_INFO("playerbots.dungeonclear",
+                             "[DC:{}] Hall of Binding — waiting for Emberseer to break free ({}s since "
+                             "the incarcerators fell)", bot->GetName(), StepElapsedMs(context) / IN_MILLISECONDS);
+                return ObjectiveArriveResult::Running;
+        }
+        return ObjectiveArriveResult::Running;
+    }
 }
 
 void RegisterBlackrockSpireHooks(ObjectiveHookRegistry::HookTable& out)
 {
     ObjectiveHookRegistry::AddHook(out, HOOK_OPEN_DRAGONSPINE_DOOR, &OpenDragonspineDoor);
     ObjectiveHookRegistry::AddHook(out, HOOK_HALL_RUNES_SWEEP, &HallRunesSweep);
+    ObjectiveHookRegistry::AddHook(out, HOOK_MUSTER_HALL_OF_BINDING, &MusterInHallOfBinding);
+    ObjectiveHookRegistry::AddHook(out, HOOK_USE_BLACKROCK_ALTAR, &UseBlackrockAltar);
+    ObjectiveHookRegistry::AddHook(out, HOOK_EMBERSEER_FREED, &EmberseerFreed);
 }
 
 void RegisterBlackrockSpireEvents(std::vector<DungeonEvent>& out)
@@ -295,6 +474,46 @@ void RegisterBlackrockSpireEvents(std::vector<DungeonEvent>& out)
     // every 20s; five minutes here is a hall that will not finish.
     hall.Custom(HOOK_HALL_RUNES_SWEEP).Timeout(300000);
     out.push_back(hall.Build());
+
+    // --- THE BLACKROCK ALTAR, ANCHORED third on index 9 -------------------
+    // Pyroguard Emberseer is unselectable and immune until a player uses the
+    // Blackrock Altar; seven Blackhand Incarcerators (immune to all) channel on
+    // him until then. The altar starts it (hook 62): +2s the incarcerators wake
+    // and DoZoneInCombat the room — their aggro SHUTS Emberseer In and the Doors
+    // until he dies — and ~69s after the altar he is freed whether they are dead
+    // or not. So:
+    //   0. stand on the room floor north of the altar
+    //   1. hook 58: everyone inside the room before it is sealed
+    //   2. hook 62: use the altar and hold its 5s ritual channel
+    //   3. kill the incarcerators (rank 0, Strike only; they flee at 30% toward
+    //      each other, and nobody can leave the sealed room, so an evade takes a
+    //      wipe)
+    //   4. hook 59: hold until Emberseer is attackable; Restart if the encounter
+    //      reset (any incarcerator evading resets the whole thing)
+    // The event then completes and the roster's Emberseer row engages him on his
+    // platform. It also completes, at any step, on Emberseer Out opening — his
+    // death, or a reload with him DONE.
+    //
+    // PERSISTENT: the incarcerator fight and the 69s release span combat gaps.
+    out.push_back(
+        EventBuilder(MAP_ID, EVENT_BLACKROCK_ALTAR, "Blackrock Altar")
+            .Anchored(/*orderIndex*/ 9)
+            .Persistent()
+            .CompleteWhenGOState(GO_EMBERSEER_OUT, GO_STATE_OPEN, BINDING_SCAN)
+            .MoveTo(ALTAR_STAND_X, ALTAR_STAND_Y, ALTAR_STAND_Z, /*radius*/ 4.0f)
+            .Custom(HOOK_MUSTER_HALL_OF_BINDING)
+            .Timeout(MUSTER_CAP_MS + 10000)
+            .Custom(HOOK_USE_BLACKROCK_ALTAR)
+            .Timeout(ALTAR_FALLBACK_MS + 15000)
+            // Centred on the stand point, not on Emberseer's platform: a
+            // ClearRadius walks back to its centre to certify the room clear.
+            .ClearRadius(ALTAR_STAND_X, ALTAR_STAND_Y, ALTAR_STAND_Z, INCARCERATOR_CLEAR_RADIUS,
+                         /*zBand*/ 8.0f)
+            .OnlyEntries({ NPC_BLACKHAND_INCARCERATOR })
+            .Timeout(180000)
+            .Custom(HOOK_EMBERSEER_FREED)
+            .Timeout(120000)
+            .Build());
 }
 
 // --- roster patch ----------------------------------------------------------
@@ -322,6 +541,9 @@ void RegisterBlackrockSpireRoster(std::vector<BossRosterPatch>& t)
         MakeObjective(OBJ(OBJ_DRAGONSPIRE_HALL), /*encounterIndex*/ 9, MAP_ID, "Dragonspire Hall",
                       HALL_ANCHOR_X, HALL_ANCHOR_Y, HALL_ANCHOR_Z, /*arriveRadius*/ 6.0f,
                       /*gateEntry*/ 0, /*hook*/ 0, EVENT_DRAGONSPIRE_HALL),
+        MakeObjective(OBJ(OBJ_BLACKROCK_ALTAR), /*encounterIndex*/ 9, MAP_ID, "Blackrock Altar",
+                      ALTAR_STAND_X, ALTAR_STAND_Y, ALTAR_STAND_Z, /*arriveRadius*/ 5.0f,
+                      /*gateEntry*/ 0, /*hook*/ 0, EVENT_BLACKROCK_ALTAR),
     };
     t.push_back(std::move(p));
 }
@@ -366,6 +588,7 @@ void RegisterBlackrockSpireWings(std::unordered_map<uint32, DungeonWingLayout>& 
         {"Blackrock Spire (Upper)", {
             OBJ(DcBlackrockSpire::OBJ_DRAGONSPINE_DOOR),  // Dragonspine Door (event 1)
             OBJ(DcBlackrockSpire::OBJ_DRAGONSPIRE_HALL),  // Dragonspire Hall runes (event 2)
+            OBJ(DcBlackrockSpire::OBJ_BLACKROCK_ALTAR),   // Blackrock Altar, Emberseer's release (event 3)
             9816,   // Pyroguard Emberseer
             10264,  // Solakar Flamewreath
             10429,  // Warchief Rend Blackhand
