@@ -64,6 +64,7 @@ void RegisterShadowfangKeepEvents(std::vector<DungeonEvent>& out);
 void RegisterScarletMonasteryEvents(std::vector<DungeonEvent>& out);
 void RegisterRazorfenDownsEvents(std::vector<DungeonEvent>& out);
 void RegisterBlackrockDepthsEvents(std::vector<DungeonEvent>& out);
+void RegisterBlackrockSpireEvents(std::vector<DungeonEvent>& out);
 void RegisterDeadminesEvents(std::vector<DungeonEvent>& out);
 void RegisterWailingCavernsEvents(std::vector<DungeonEvent>& out);
 void RegisterStratholmeEvents(std::vector<DungeonEvent>& out);
@@ -367,6 +368,100 @@ namespace DcBlackrockDepths
     constexpr HallPoint IRON_HALL_SLOT_OFFSETS[IRON_HALL_SLOT_COUNT] = {
         { 0.0f, 0.0f }, { 2.5f, 0.0f }, { -2.5f, 0.0f }, { 0.0f, 2.5f }, { 0.0f, -2.5f },
     };
+}
+
+// Upper Blackrock Spire (map 229) — the numbers BlackrockSpireEvents.cpp's events,
+// hooks and roster patch share with the gtests (t/TestBlackrockSpireEvents,
+// t/TestDungeonEvent). The reasoning for each is in that file.
+//
+// mod-individual-progression re-registers the UBRS instance and area-trigger
+// scripts under the core's ScriptNames, so either may be running. Nothing here
+// includes an IP header: its values are literals, named as such.
+namespace DcBlackrockSpire
+{
+    constexpr uint32 MAP_ID = 229;
+
+    // blackrock_spire.h DataTypes (boss-state slots, NOT DungeonEncounter bits).
+    constexpr uint32 DATA_PYROGUARD_EMBERSEER = 9;
+    constexpr uint32 DATA_WARCHIEF_REND_BLACKHAND = 10;
+    constexpr uint32 DATA_DRAGONSPIRE_ROOM = 15;
+    constexpr uint32 STATE_NOT_STARTED = 0;
+    constexpr uint32 STATE_IN_PROGRESS = 1;
+    constexpr uint32 STATE_FAIL = 2;
+    constexpr uint32 STATE_DONE = 3;
+    constexpr uint32 GO_STATE_OPEN = 0;    // GOState ACTIVE: an open door, a lit rune
+    constexpr uint32 GO_STATE_CLOSED = 1;  // GOState READY
+
+    // mod-individual-progression's blackrock_spire.h DATA_UBRS_DOOR_OPEN: its
+    // instance script opens the Dragonspine Door on SetData(2046, 26). The core
+    // script has no case for type 2046, so the same call is a no-op there.
+    constexpr uint32 IP_DATA_UBRS_DOOR_OPEN = 26;
+
+    constexpr uint32 AT_DRAGONSPIRE_HALL = 2046;
+
+    // Event ids (map-229 latch keys), the roster objective sequence numbers that
+    // carry them, and the ObjectiveHookRegistry ids (one flat space).
+    constexpr uint32 EVENT_DRAGONSPINE_DOOR = 1;
+    constexpr uint32 EVENT_DRAGONSPIRE_HALL = 2;
+    constexpr uint32 OBJ_DRAGONSPINE_DOOR = 1;
+    constexpr uint32 OBJ_DRAGONSPIRE_HALL = 2;
+    constexpr uint32 HOOK_OPEN_DRAGONSPINE_DOOR = 56;
+    constexpr uint32 HOOK_HALL_RUNES_SWEEP = 57;
+
+    constexpr uint32 NPC_BLACKHAND_DREADWEAVER = 9817;
+    constexpr uint32 NPC_BLACKHAND_SUMMONER = 9818;
+    constexpr uint32 NPC_BLACKHAND_VETERAN = 9819;
+
+    constexpr uint32 GO_DRAGONSPINE_DOOR = 164725;
+    constexpr uint32 GO_EMBERSEER_IN = 175244;
+    constexpr uint32 GO_DOORS = 175705;
+
+    // The door event's stand point: the ubrs test row's entrance, inside AT 2046
+    // (r10 around (102.43,-319.17)). The door itself is 22yd east of it at
+    // (126.9,-319.1,70.9), past the executor's default 20yd GO search, so every
+    // door lookup passes DOOR_SCAN.
+    constexpr float DOOR_STAND_X = 105.0f;
+    constexpr float DOOR_STAND_Y = -320.0f;
+    constexpr float DOOR_STAND_Z = 65.5f;
+    constexpr float DOOR_SCAN = 40.0f;
+    // How long IP's brazier sequence gets before the click fallback (its door
+    // opens ~3s after SetData), and how long the click gets before Blocked.
+    constexpr uint32 DOOR_SCRIPT_WAIT_MS = 5000;
+    constexpr uint32 DOOR_CLICK_WAIT_MS = 15000;
+
+    // The hall objective's anchor, just inside the door.
+    constexpr float HALL_ANCHOR_X = 131.0f;
+    constexpr float HALL_ANCHOR_Y = -318.0f;
+    constexpr float HALL_ANCHOR_Z = 71.0f;
+
+    // The seven hall runes, in the clear order (lower floor 3, 1, 4, 2, then up
+    // the ramp 7, 6, 5), each with the 9817/9818/9819 pack the instance script
+    // lists for it (every one within 15yd at STORE time).
+    struct HallRune { uint32 goEntry; uint32 room; float x, y, z; };
+    constexpr HallRune HALL_RUNES[] = {
+        { 175195, 3, 124.8f, -298.0f, 70.9f },
+        { 175197, 1, 125.4f, -340.5f, 70.9f },
+        { 175200, 4, 155.3f, -286.1f, 70.9f },
+        { 175199, 2, 155.3f, -353.0f, 70.8f },
+        { 175194, 7, 192.7f, -258.4f, 76.9f },
+        { 175196, 6, 228.8f, -301.5f, 76.9f },
+        { 175198, 5, 215.2f, -334.7f, 76.8f },
+    };
+    // The script's 15yd list radius plus melee reach: the ClearRadius steps and
+    // the sweep share it, so a mob the sweep finds is one a rewound step clears.
+    constexpr float HALL_RUNE_CLEAR_RADIUS = 18.0f;
+    constexpr float HALL_RUNE_CLEAR_ZBAND = 6.0f;
+    // Every rune and Emberseer In from anywhere in the hall (rune room 1 to the
+    // door is 106yd).
+    constexpr float HALL_SCAN = 130.0f;
+    // The script's CHECK runs every 3s; a lit rune with no pack near it for
+    // longer than this means CHECK is not running (STORE never armed) or the
+    // snapshot holds a mob that is not coming back — re-fire the area trigger.
+    constexpr uint32 HALL_REARM_AFTER_MS = 8000;
+    constexpr uint32 HALL_REARM_FLOOR_MS = 20000;
+    // Floor between two sweep rewinds, so a mob nothing can reach cannot spin
+    // the event.
+    constexpr uint32 HALL_RESTART_FLOOR_MS = 30000;
 }
 
 void RegisterHellfireRampartsEvents(std::vector<DungeonEvent>& out);
@@ -5547,6 +5642,7 @@ void RegisterSunkenTempleRoster(std::vector<BossRosterPatch>& t);
 void RegisterRazorfenDownsRoster(std::vector<BossRosterPatch>& t);
 void RegisterZulFarrakRoster(std::vector<BossRosterPatch>& t);
 void RegisterBlackrockDepthsRoster(std::vector<BossRosterPatch>& t);
+void RegisterBlackrockSpireRoster(std::vector<BossRosterPatch>& t);
 void RegisterBlackwingLairRoster(std::vector<BossRosterPatch>& t);
 void RegisterDeadminesRoster(std::vector<BossRosterPatch>& t);
 void RegisterWailingCavernsRoster(std::vector<BossRosterPatch>& t);
@@ -5644,7 +5740,7 @@ void RegisterDireMaulWings(std::unordered_map<uint32, DungeonWingLayout>& store)
 void RegisterScarletMonasteryWings(std::unordered_map<uint32, DungeonWingLayout>& store);
 void RegisterMaraudonWings(std::unordered_map<uint32, DungeonWingLayout>& store);
 // Blackrock Spire (229) — LBRS / UBRS, chosen per run (WingSelect::Explicit).
-// No events or roster patch yet; lives in BlackrockSpireEvents.cpp.
+// Lives in BlackrockSpireEvents.cpp beside UBRS's events and roster patch.
 void RegisterBlackrockSpireWings(std::unordered_map<uint32, DungeonWingLayout>& store);
 // Blackrock Depths (230) — Detention Block / Upper City, chosen per run.
 void RegisterBlackrockDepthsWings(std::unordered_map<uint32, DungeonWingLayout>& store);

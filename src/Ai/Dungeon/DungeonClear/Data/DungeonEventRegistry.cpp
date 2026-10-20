@@ -483,6 +483,7 @@ namespace
             RegisterSunkenTempleEvents(t);
             RegisterZulFarrakEvents(t);
             RegisterBlackrockDepthsEvents(t);
+            RegisterBlackrockSpireEvents(t);
             RegisterDeadminesEvents(t);
             RegisterWailingCavernsEvents(t);
             RegisterStratholmeEvents(t);

@@ -355,6 +355,24 @@ namespace DcEventDoorRegistry
             // DONE — Magmus's death. Clicking them would walk the party past
             // Magmus to the Emperor.
             case 170575:  // Blackrock Depths — Throne Room doors (opens on Magmus's death)
+            // Upper Blackrock Spire (map 229) — the event-owned doors. Every one
+            // is a lock-free TYPE_DOOR that BotCanOpenDoorLikePlayer could read as
+            // clickable, and every one is moved by the instance script or by a
+            // DC event that enters the script's own entry points
+            // (BlackrockSpireEvents.cpp):
+            //
+            //   164725 DRAGONSPINE DOOR — spawns open on the stock core, shut
+            //     under mod-individual-progression (opened by its AT 2046 seal
+            //     check). Event 1 owns it: it arms the hall's rune tracking
+            //     before it opens the door, which a walker click would skip, and
+            //     under IP a bare click would open it without the braziers or
+            //     the saved flag. The run reaches it as the door objective, so
+            //     the walker's pause only ever sees it if that event failed.
+            //   175244 EMBERSEER IN / 175705 DOORS — opened when all seven hall
+            //     runes are out; shut again when the incarcerators aggro.
+            case 164725:  // Upper Blackrock Spire — Dragonspine Door
+            case 175244:  // Upper Blackrock Spire — Emberseer In (hall runes)
+            case 175705:  // Upper Blackrock Spire — Doors (ramp into Emberseer's room)
                 return true;
             default:
                 return false;

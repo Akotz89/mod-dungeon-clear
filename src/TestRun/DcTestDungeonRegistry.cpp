@@ -79,8 +79,12 @@ namespace DcTestDungeonRegistry
             // LBRS enters at the shared portal; UBRS drops the party inside the
             // shared hall facing the Dragonspine Door (GO 164725), where a UBRS
             // run starts in practice. The retired `brs` token aliases to `lbrs`.
+            // UBRS gets the Upper City's 900s no-progress budget: Emberseer's
+            // ~69s release after the altar and the stadium's five waves are
+            // legitimate quiet stretches between objective latches.
             { "lbrs",            "Lower Blackrock Spire",         229,    78.51f,  -225.04f,   49.84f, 5.100f, 58, "LBRS" },
-            { "ubrs",            "Upper Blackrock Spire",         229,   105.00f,  -320.00f,   65.50f, 0.041f, 60, "UBRS" },
+            { "ubrs",            "Upper Blackrock Spire",         229,   105.00f,  -320.00f,   65.50f, 0.041f, 60, "UBRS",
+              0, nullptr, {}, {}, 0, 0, /*noProgressS*/ 900 },
             { "dm-east",         "Dire Maul: East",               429,    44.45f,  -154.82f,   -2.71f, 0.000f, 58, "East" },
             { "dm-west",         "Dire Maul: West",               429,   -62.97f,   159.87f,   -3.46f, 3.148f, 60, "West" },
             { "dm-north",        "Dire Maul: North",              429,   255.25f,   -16.06f,   -2.59f, 4.700f, 60, "North" },

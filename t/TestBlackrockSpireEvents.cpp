@@ -1,0 +1,282 @@
+/*
+ * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license, you may redistribute it
+ * and/or modify it under version 3 of the License, or (at your option), any later version.
+ */
+
+#include "gtest/gtest.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <string>
+#include <vector>
+
+#include "Ai/Dungeon/DungeonClear/Data/DcEventDoorRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/DungeonEventRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/DungeonWingRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
+#include "Ai/Dungeon/DungeonClear/Overrides/BossRosterRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Overrides/ObjectiveHookRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRunWing.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcUbrsDecision.h"
+#include "TestRun/DcTestDungeonRegistry.h"
+
+// Upper Blackrock Spire (map 229): the event shapes, the roster order the wing
+// filter leaves a UBRS run, the event-owned doors, and the pure kernels the hooks
+// decide with (BlackrockSpireEvents.cpp, Util/DcUbrsDecision.h). All pure — no
+// world, no bots.
+
+namespace
+{
+    namespace B = DcBlackrockSpire;
+
+    DungeonBossInfo Boss(uint32 entry, uint32 bit, float x, float y, float z)
+    {
+        DungeonBossInfo b;
+        b.entry = entry;
+        b.encounterIndex = bit;
+        b.name = std::to_string(entry);
+        b.mapId = B::MAP_ID;
+        b.x = x;
+        b.y = y;
+        b.z = z;
+        return b;
+    }
+
+    // BossSpawnIndex for 229 (Urok, Gizrul and Solakar are summoned), through the
+    // map-229 roster patch.
+    std::vector<DungeonBossInfo> BrsRoster()
+    {
+        std::vector<DungeonBossInfo> const index = {
+            Boss(9196,  0,  -22.8f, -300.7f,  31.8f),   // Omokk
+            Boss(9236,  1, -121.2f, -482.2f,  24.7f),   // Vosh'gajin
+            Boss(9237,  2,  -17.0f, -459.1f, -18.6f),   // Voone
+            Boss(10596, 3, -135.5f, -565.8f,  10.2f),   // Smolderweb
+            Boss(9736,  5, -190.5f, -475.6f,  87.4f),   // Zigris
+            Boss(10220, 7, -193.9f, -338.1f,  64.5f),   // Halycon
+            Boss(9568,  8,  -22.6f, -486.2f,  90.8f),   // Wyrmthalak
+            Boss(9816,  9,  144.4f, -258.0f,  96.4f),   // Emberseer
+            Boss(10429, 11, 159.3f, -443.6f, 122.1f),   // Rend
+            Boss(10430, 12, 124.2f, -563.8f, 107.4f),   // The Beast
+            Boss(10363, 13,  36.5f, -286.0f, 111.0f),   // Drakkisath
+        };
+        return BossRosterRegistry::Apply(B::MAP_ID, DcDiffKey::Dungeon(DUNGEON_DIFFICULTY_NORMAL), index);
+    }
+
+    std::vector<DungeonBossInfo> Wing(char const* token)
+    {
+        DungeonWingLayout const* layout = DungeonWingRegistry::Get(B::MAP_ID);
+        EXPECT_NE(layout, nullptr);
+        return DcRunWing::FilterToWing(BrsRoster(), *DungeonWingRegistry::FindWing(*layout, token));
+    }
+
+    uint32 Obj(uint32 seq) { return BossRosterRegistry::ObjectiveEntry(seq); }
+
+    DungeonEvent const& Event(uint32 id)
+    {
+        DungeonEvent const* e = DungeonEventRegistry::Find(B::MAP_ID, id);
+        EXPECT_NE(e, nullptr) << "map 229 event " << id;
+        return *e;
+    }
+}
+
+// ---- the roster ------------------------------------------------------------------
+
+// A UBRS run, in clear order: each gate objective just ahead of the boss it
+// unlocks. Solakar has no static spawn and is never in the run.
+TEST(DcBlackrockSpireTest, UbrsRunOpensTheDoorThenClearsTheHallBeforeEmberseer)
+{
+    std::vector<DungeonBossInfo> const ubrs = Wing("ubrs");
+    std::vector<uint32> const want = {
+        Obj(B::OBJ_DRAGONSPINE_DOOR), Obj(B::OBJ_DRAGONSPIRE_HALL),
+        9816, 10429, 10430, 10363,
+    };
+    ASSERT_GE(ubrs.size(), want.size());
+    // Only the door, the hall and the bosses are pinned here; later objectives
+    // slot between them.
+    std::vector<uint32> got;
+    for (DungeonBossInfo const& b : ubrs)
+        for (uint32 w : want)
+            if (b.entry == w)
+                got.push_back(b.entry);
+    EXPECT_EQ(got, want);
+    EXPECT_EQ(ubrs.front().eventId, B::EVENT_DRAGONSPINE_DOOR);
+    EXPECT_EQ(ubrs.back().entry, 10363u) << "Drakkisath is terminal";
+    for (DungeonBossInfo const& b : ubrs)
+        EXPECT_NE(b.entry, 10264u) << "Solakar has no static spawn";
+}
+
+TEST(DcBlackrockSpireTest, LbrsRunIsUntouchedByTheUbrsObjectives)
+{
+    std::vector<DungeonBossInfo> const lbrs = Wing("lbrs");
+    ASSERT_EQ(lbrs.size(), 7u);
+    for (DungeonBossInfo const& b : lbrs)
+        EXPECT_NE(b.kind, DungeonAnchorKind::Objective) << b.name;
+    EXPECT_EQ(lbrs.back().entry, 9568u);
+}
+
+TEST(DcBlackrockSpireTest, ObjectivesCarryTheirEventsAndAnchorAtTheirFirstStep)
+{
+    for (DungeonBossInfo const& b : BrsRoster())
+    {
+        if (b.kind != DungeonAnchorKind::Objective)
+            continue;
+        DungeonEvent const& e = Event(b.eventId);
+        EXPECT_EQ(e.activation, EventActivation::Anchored) << b.name;
+        EXPECT_EQ(e.orderIndex, b.encounterIndex) << b.name;
+        ASSERT_FALSE(e.steps.empty());
+        EXPECT_EQ(e.steps[0].kind, EventStepKind::MoveTo) << b.name;
+        // The objective delivers the tank onto its event's first MoveTo.
+        EXPECT_LT(std::hypot(e.steps[0].x - b.x, e.steps[0].y - b.y), 0.5f) << b.name;
+    }
+}
+
+TEST(DcBlackrockSpireTest, UbrsTestRowHasTheLongNoProgressBudget)
+{
+    DcTestDungeonRegistry::Row const* row = DcTestDungeonRegistry::Find("ubrs");
+    ASSERT_NE(row, nullptr);
+    EXPECT_EQ(row->noProgressS, 900u);
+}
+
+// ---- event 1: the Dragonspine Door -------------------------------------------------
+
+TEST(DcBlackrockSpireTest, DragonspineDoorEventShape)
+{
+    DungeonEvent const& e = Event(B::EVENT_DRAGONSPINE_DOOR);
+    EXPECT_EQ(e.orderIndex, 9u);
+    EXPECT_TRUE(e.persistent);
+    // Completing on the door would skip the hall arming under the stock core,
+    // where the door spawns open.
+    EXPECT_EQ(e.completeGoEntry, 0u);
+
+    ASSERT_EQ(e.steps.size(), 3u);
+    EXPECT_EQ(e.steps[0].kind, EventStepKind::MoveTo);
+    EXPECT_FLOAT_EQ(e.steps[0].x, B::DOOR_STAND_X);
+    EXPECT_EQ(e.steps[1].kind, EventStepKind::Custom);
+    EXPECT_EQ(e.steps[1].hookId, B::HOOK_OPEN_DRAGONSPINE_DOOR);
+    EXPECT_GT(e.steps[1].timeoutMs, B::DOOR_SCRIPT_WAIT_MS + B::DOOR_CLICK_WAIT_MS)
+        << "the hook must reach Blocked before the step times out";
+    EXPECT_EQ(e.steps[2].kind, EventStepKind::WaitForGameObjectState);
+    EXPECT_EQ(e.steps[2].goEntry, B::GO_DRAGONSPINE_DOOR);
+    EXPECT_EQ(e.steps[2].wantState, B::GO_STATE_OPEN);
+    // The door is 22yd from the stand point: past the 20yd default search.
+    float const door = std::hypot(126.879f - B::DOOR_STAND_X, -319.109f - B::DOOR_STAND_Y);
+    EXPECT_GT(door, 20.0f);
+    EXPECT_GT(e.steps[2].radius, door);
+    EXPECT_GT(B::DOOR_SCAN, door);
+}
+
+// The stand point is inside AT 2046 (r10 around (102.43,-319.17)), so arriving
+// there trips it for a client — and the test relay — before the hook fires it.
+TEST(DcBlackrockSpireTest, DoorStandIsInsideTheDragonspireHallTrigger)
+{
+    EXPECT_LT(std::hypot(B::DOOR_STAND_X - 102.43f, B::DOOR_STAND_Y - -319.17f), 10.0f);
+}
+
+// The three states mod-individual-progression can leave the door in.
+TEST(DcBlackrockSpireTest, DoorDecisionCoversAllThreeIndividualProgressionStates)
+{
+    using DcUbrs::DoorStep;
+    using DcUbrs::DecideDragonspineDoor;
+
+    // Stock core: the door spawns open — Done on the first tick.
+    EXPECT_EQ(DecideDragonspineDoor(true, 0), DoorStep::Done);
+    EXPECT_STREQ(DcUbrs::DoorOpenedVia(0, false), "already-open");
+
+    // IP compiled: shut, SetData opens it ~3s later — Wait, then Done.
+    EXPECT_EQ(DecideDragonspineDoor(false, 0), DoorStep::Wait);
+    EXPECT_EQ(DecideDragonspineDoor(false, 3000), DoorStep::Wait);
+    EXPECT_EQ(DecideDragonspineDoor(true, 3200), DoorStep::Done);
+    EXPECT_STREQ(DcUbrs::DoorOpenedVia(3200, false), "ip-script");
+
+    // IP SQL without its code: shut forever — Click once the script had its
+    // chance, Done if the click took, Blocked if nothing did.
+    EXPECT_EQ(DecideDragonspineDoor(false, B::DOOR_SCRIPT_WAIT_MS), DoorStep::Click);
+    EXPECT_EQ(DecideDragonspineDoor(true, B::DOOR_SCRIPT_WAIT_MS + 500), DoorStep::Done);
+    EXPECT_STREQ(DcUbrs::DoorOpenedVia(B::DOOR_SCRIPT_WAIT_MS + 500, true), "click");
+    EXPECT_EQ(DecideDragonspineDoor(false, B::DOOR_SCRIPT_WAIT_MS + B::DOOR_CLICK_WAIT_MS - 1), DoorStep::Click);
+    EXPECT_EQ(DecideDragonspineDoor(false, B::DOOR_SCRIPT_WAIT_MS + B::DOOR_CLICK_WAIT_MS), DoorStep::Blocked);
+
+    // An open door always wins, however late.
+    EXPECT_EQ(DecideDragonspineDoor(true, 600000), DoorStep::Done);
+}
+
+// ---- event 2: the Dragonspire Hall -------------------------------------------------
+
+TEST(DcBlackrockSpireTest, DragonspireHallEventShape)
+{
+    DungeonEvent const& e = Event(B::EVENT_DRAGONSPIRE_HALL);
+    EXPECT_EQ(e.orderIndex, 9u);
+    EXPECT_TRUE(e.persistent);
+    EXPECT_EQ(e.completeGoEntry, B::GO_EMBERSEER_IN);
+    EXPECT_EQ(e.completeGoState, B::GO_STATE_OPEN);
+    EXPECT_GE(e.completeGoRadius, B::HALL_SCAN);
+
+    constexpr std::size_t kRunes = sizeof(B::HALL_RUNES) / sizeof(B::HALL_RUNES[0]);
+    ASSERT_EQ(kRunes, 7u);
+    ASSERT_EQ(e.steps.size(), 1 + kRunes + 1);
+
+    // Step 0 is Done anywhere in the hall, so a sweep Restart never walks the
+    // tank back to the door.
+    EXPECT_EQ(e.steps[0].kind, EventStepKind::MoveTo);
+    EXPECT_GE(e.steps[0].radius, B::HALL_SCAN);
+
+    for (std::size_t i = 0; i < kRunes; ++i)
+    {
+        EventStep const& s = e.steps[1 + i];
+        EXPECT_EQ(s.kind, EventStepKind::ClearRadius) << "room " << B::HALL_RUNES[i].room;
+        EXPECT_FLOAT_EQ(s.x, B::HALL_RUNES[i].x);
+        EXPECT_FLOAT_EQ(s.radius, B::HALL_RUNE_CLEAR_RADIUS);
+        EXPECT_GE(s.radius, 15.0f) << "the instance lists every pack mob within 15yd";
+        EXPECT_EQ(s.entryFilter, (std::vector<uint32>{ B::NPC_BLACKHAND_DREADWEAVER,
+                                                       B::NPC_BLACKHAND_SUMMONER,
+                                                       B::NPC_BLACKHAND_VETERAN }));
+    }
+    EXPECT_EQ(e.steps.back().kind, EventStepKind::Custom);
+    EXPECT_EQ(e.steps.back().hookId, B::HOOK_HALL_RUNES_SWEEP);
+}
+
+// The Veteran/Summoner pack at (217-226, -258..-266, z 82) is not rune-tied (30yd
+// from rune 7); no room volume may reach it.
+TEST(DcBlackrockSpireTest, RuneRoomVolumesStayOffTheUnlistedPack)
+{
+    for (B::HallRune const& r : B::HALL_RUNES)
+        EXPECT_GT(std::hypot(217.0f - r.x, -258.0f - r.y), B::HALL_RUNE_CLEAR_RADIUS) << "room " << r.room;
+}
+
+TEST(DcBlackrockSpireTest, HallSweepDecision)
+{
+    using DcUbrs::HallStep;
+    using DcUbrs::DecideHallSweep;
+
+    // Emberseer In open: done, whatever else reads.
+    EXPECT_EQ(DecideHallSweep(true, 3, 0), HallStep::Done);
+    // A lit rune with its pack still at it: back over the rooms.
+    EXPECT_EQ(DecideHallSweep(false, 1, 0), HallStep::Restart);
+    // Nobody left at a lit rune: give CHECK (every 3s) time, then re-arm.
+    EXPECT_EQ(DecideHallSweep(false, 0, 0), HallStep::Wait);
+    EXPECT_EQ(DecideHallSweep(false, 0, B::HALL_REARM_AFTER_MS - 1), HallStep::Wait);
+    EXPECT_EQ(DecideHallSweep(false, 0, B::HALL_REARM_AFTER_MS), HallStep::Rearm);
+    EXPECT_GT(B::HALL_REARM_AFTER_MS, 3000u * 2) << "two CHECK periods before a re-arm";
+}
+
+// ---- hooks and doors -------------------------------------------------------------
+
+TEST(DcBlackrockSpireTest, HooksAreRegistered)
+{
+    EXPECT_TRUE(ObjectiveHookRegistry::Has(B::HOOK_OPEN_DRAGONSPINE_DOOR));
+    EXPECT_TRUE(ObjectiveHookRegistry::Has(B::HOOK_HALL_RUNES_SWEEP));
+}
+
+TEST(DcBlackrockSpireTest, EventOwnedDoorsAreScriptOnly)
+{
+    EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(B::GO_DRAGONSPINE_DOOR));
+    EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(B::GO_EMBERSEER_IN));
+    EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(B::GO_DOORS));
+    // Under IP a bare click would open the door without the braziers or its
+    // saved flag; the event, not the walker, owns it.
+    EXPECT_FALSE(DcEventDoorRegistry::IsLockFreeClickable(B::GO_DRAGONSPINE_DOOR));
+    // Real gates: navigation must still see them shut.
+    for (uint32 go : { B::GO_DRAGONSPINE_DOOR, B::GO_EMBERSEER_IN, B::GO_DOORS })
+        EXPECT_FALSE(DcEventDoorRegistry::IsNavigationIgnored(go)) << go;
+}

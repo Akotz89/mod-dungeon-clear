@@ -106,6 +106,12 @@ void RegisterBlackMorassHooks(ObjectiveHookRegistry::HookTable& out);
 // and the instance-data constants they read.
 void RegisterBlackrockDepthsHooks(ObjectiveHookRegistry::HookTable& out);
 
+// Upper Blackrock Spire (map 229) — the Dragonspine Door, the hall runes, the
+// Blackrock Altar and the stadium (ids 56-61). They live beside the events in
+// BlackrockSpireEvents.cpp, which owns the geometry and the instance constants
+// (and the mod-individual-progression layering) they read.
+void RegisterBlackrockSpireHooks(ObjectiveHookRegistry::HookTable& out);
+
 // Stratholme (map 329) — ziggurat crystal repair (ids 44-46). Lives beside the
 // ziggurat events in StratholmeEvents.cpp, which owns the chamber geometry.
 void RegisterStratholmeHooks(ObjectiveHookRegistry::HookTable& out);
