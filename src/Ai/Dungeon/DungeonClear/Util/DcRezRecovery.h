@@ -15,6 +15,7 @@
 #include "Ai/Dungeon/DungeonClear/Util/DcRezDecision.h"
 
 class Player;
+class SpellInfo;
 
 // Engine glue for post-combat party resurrection (see DcRezDecision.h for the
 // kernel semantics). This is the only place the feature touches game objects:
@@ -36,6 +37,16 @@ namespace DcRezRecovery
 {
     // DungeonClear.PostCombatRez, per-run override -> conf -> default.
     bool Enabled(Player* bot);
+
+    // A non-passive resurrect spell (SPELL_EFFECT_RESURRECT / _RESURRECT_NEW)
+    // that `p` knows and that is off cooldown right now, or nullptr. The
+    // rezzer test for classes beyond the ten stock ones: servers with custom
+    // classes give those classes their own resurrects, which a class switch
+    // cannot know. Prefers a spell with no recovery time over a cooldown-gated
+    // battle rez. The spellbook scan is cached per player for 60s (it is read
+    // for every member on every evaluation); the cooldown is checked live on
+    // every call.
+    SpellInfo const* KnownResurrectSpell(Player const* p);
 
     // The kernel verdict resolved to live identities. rezzer/target are only
     // meaningful for Hold outcomes; deadName always names the first same-map
