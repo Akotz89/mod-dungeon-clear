@@ -669,17 +669,24 @@ public:
 // WORKAROUND for Stratholme's (map 329) gate-trap critters falling out of the
 // world. instance_stratholme's DoSpawnPlaguedCritters summons 30 Plagued Rats /
 // Insects / Maggots at random points within 8yd of the triggering player, at the
-// player's z+1, with no ground check; in the Scarlet-side alley (3612,-3335) some
-// land inside wall geometry and drop ~66yd onto a floor under Festival Lane. They
-// are summoned already attacking, so the tank chases them through the floor, the
-// party follows, and the run ends trapped ~70yd under Hearthsinger Forresten
-// ("Stuck near" / "route dead-ends" — five of five such failures in
-// sk-20261003-174711 started with a critter 66-68yd below its summon point).
+// player's z+1, with no ground check. They are summoned already attacking, so
+// when one drops through the floor the tank chases it and the party follows.
+// Both gate traps have such a gap:
+// - Scarlet side, the alley at (3612,-3335): some land inside wall geometry and
+//   drop ~66yd onto a floor under Festival Lane, and the run ends trapped ~70yd
+//   under Hearthsinger Forresten ("Stuck near" / "route dead-ends" — five of
+//   five such failures in sk-20261003-174711 started with a critter 66-68yd
+//   below its summon point).
+// - Undead side, the trap at portcullis 175354 (around 3917,-3556): in
+//   tr-20261011-100956-1 a rat dropped there, and by the time it was 20yd down
+//   the tank had already followed it through the floor (z 132 -> 45).
 //
 // Surgical: only these three critter entries on map 329, and only once one sits
-// more than STRAT_CRITTER_FALL_YD below its home (= summon point). A critter on
-// the street never drifts more than a few yards vertically; there is nothing to
-// fight down there.
+// more than STRAT_CRITTER_FALL_YD (6yd) below its home (= summon point), low
+// enough that it should be gone before the tank follows it down. There is
+// nothing to fight down there, and despawning a critter that merely walked
+// down a slope costs nothing: the trap gates reopen on a timer, not on critter
+// kills.
 class DungeonClearStratFallenCritterScript : public AllCreatureScript
 {
 public:
@@ -695,7 +702,7 @@ public:
             return;
         if (!creature->IsSummon() || !creature->IsAlive() || !DcModule::IsEnabled())
             return;
-        constexpr float STRAT_CRITTER_FALL_YD = 20.0f;
+        constexpr float STRAT_CRITTER_FALL_YD = 6.0f;
         float const homeZ = creature->GetHomePosition().GetPositionZ();
         if (creature->GetPositionZ() >= homeZ - STRAT_CRITTER_FALL_YD)
             return;
