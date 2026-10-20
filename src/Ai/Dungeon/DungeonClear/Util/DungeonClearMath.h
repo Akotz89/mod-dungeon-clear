@@ -1652,6 +1652,25 @@ namespace DungeonClearMath
         return !bossInCombat && chaseEndToBoss < wakeSphere;
     }
 
+    // The stalled fallback (DungeonClearClearStalledAction) pulls one nearby mob
+    // and is then done: once that mob is gone and the fight is over, the stall is
+    // cleared and Advance tries the route again.
+    inline bool StallPullIsDone(bool pullTargetAlive, bool inCombat)
+    {
+        return !pullTargetAlive && !inCombat;
+    }
+
+    // Advance's per-point MoveTo fallback: does this refused move count toward
+    // DC_STUCK_LIMIT? Not when the movement arbiter only deferred it — an
+    // equal-or-higher priority move still holds, which is a wait, not a shut way.
+    // Counting those turned ~1s of a post-pull hold into a "movement isn't
+    // progressing" stall (tr-20261019-182249-2). Pursuit already reads a deferred
+    // move as alive.
+    inline bool MoveToFallbackCountsStuck(bool moved, bool deferred)
+    {
+        return !moved && !deferred;
+    }
+
     // Engage-trash's walk-in on one target: is it getting any nearer? True once the
     // distance has not improved by `minClose` for `limitMs` of walking. A gap
     // between ticks longer than `gapMs` (the action lost the tick to a leash

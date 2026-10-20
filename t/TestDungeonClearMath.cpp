@@ -3544,6 +3544,28 @@ TEST(DungeonClearEngageTrashTest, AWalkInThatGainsNoGroundIsGivenUp)
     EXPECT_FALSE(EngageWalkGivenUp(held, 30.0f, 0.5f, 10000, 8000, 2000));
 }
 
+// tr-20261019-182249-1: the stall outlived its own pull — the fallback went on
+// pulling every reachable mob and Advance never got the tick that clears it.
+TEST(DungeonClearStallTest, TheStallEndsWithItsPull)
+{
+    EXPECT_TRUE(DungeonClearMath::StallPullIsDone(false, false));
+    // Still fighting it, or anything else: not yet.
+    EXPECT_FALSE(DungeonClearMath::StallPullIsDone(true, false));
+    EXPECT_FALSE(DungeonClearMath::StallPullIsDone(false, true));
+    EXPECT_FALSE(DungeonClearMath::StallPullIsDone(true, true));
+}
+
+TEST(DungeonClearStallTest, AnArbiterDeferralIsNotStuck)
+{
+    // A refused move counts toward DC_STUCK_LIMIT...
+    EXPECT_TRUE(DungeonClearMath::MoveToFallbackCountsStuck(false, false));
+    // ...unless the arbiter only deferred it behind a move that still holds.
+    EXPECT_FALSE(DungeonClearMath::MoveToFallbackCountsStuck(false, true));
+    // An issued move is never stuck.
+    EXPECT_FALSE(DungeonClearMath::MoveToFallbackCountsStuck(true, false));
+    EXPECT_FALSE(DungeonClearMath::MoveToFallbackCountsStuck(true, true));
+}
+
 TEST(DungeonClearRoomTrashTest, AKillDropsTheRefusals)
 {
     EXPECT_TRUE(DungeonClearMath::ShouldDropLaneRefusals(23u, 24u));

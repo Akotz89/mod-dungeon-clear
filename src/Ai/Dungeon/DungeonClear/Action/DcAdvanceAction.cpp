@@ -2071,9 +2071,14 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::DoMoveToFallback(Adva
                               /*exact_waypoint*/ false, MovementPriority::MOVEMENT_NORMAL);
     if (!moved)
     {
+        // Deferred by the movement arbiter: a higher move still holds and will
+        // expire. Wait without counting it (MoveToFallbackCountsStuck).
+        if (!DungeonClearMath::MoveToFallbackCountsStuck(
+                moved, DcMoveDeferred(MovementPriority::MOVEMENT_NORMAL)))
+            return Step::ReturnFalse;
         // MoveTo returned false. Benign in the common case (duplicate
-        // move queued / waiting on last move). Only treat as a real
-        // stall after several consecutive failures.
+        // move queued). Only treat as a real stall after several
+        // consecutive failures.
         if (++stuck >= DC_STUCK_LIMIT)
         {
             // Force a fresh chunked rebuild — the cached path's first

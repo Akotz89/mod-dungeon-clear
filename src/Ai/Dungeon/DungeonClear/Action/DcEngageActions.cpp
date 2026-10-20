@@ -1277,6 +1277,30 @@ bool DungeonClearRoomPreClearHoldAction::Execute(Event /*event*/)
 
 bool DungeonClearClearStalledAction::Execute(Event /*event*/)
 {
+    // The stall's own pull is over (DungeonClearMath::StallPullIsDone): clear the
+    // stall and hand the tick back to Advance, which re-stalls within
+    // DC_STUCK_LIMIT refused moves if the way really is shut. Waiting for Advance
+    // to clear it could never work — this trigger outranks Advance (20 vs 15), so
+    // while ANY reachable hostile was left the tank went on pulling them, 115yd
+    // from the boss in tr-20261019-182249-1, until the 120s stall watchdog ended a
+    // run with the whole party alive and out of combat.
+    ObjectGuid const lastAnnounced =
+        context->GetValue<ObjectGuid>(DcKey::FallbackTarget)->Get();
+    if (!lastAnnounced.IsEmpty())
+    {
+        Unit* const prev = ObjectAccessor::GetUnit(*bot, lastAnnounced);
+        if (DungeonClearMath::StallPullIsDone(prev && prev->IsAlive(), bot->IsInCombat()))
+        {
+            LOG_INFO("playerbots.dungeonclear",
+                     "[DC:{}] clear stalled: the stall's pull {} is done -> stall cleared, "
+                     "advance retries", bot->GetName(), lastAnnounced.ToString());
+            context->GetValue<ObjectGuid>(DcKey::FallbackTarget)->Set(ObjectGuid::Empty);
+            context->GetValue<DcApproachState&>(DcKey::ApproachState)->Get().stuckCount = 0;
+            ClearStall(context);
+            return false;
+        }
+    }
+
     Unit* target = DcTargeting::FindNearestReachableHostile(bot);
     if (!target)
     {
@@ -1293,17 +1317,13 @@ bool DungeonClearClearStalledAction::Execute(Event /*event*/)
 
     // Announce target on first selection. Suppress repeats while we're still
     // working on the same one.
-    ObjectGuid const lastAnnounced =
-        context->GetValue<ObjectGuid>(DcKey::FallbackTarget)->Get();
     if (lastAnnounced != target->GetGUID())
     {
         context->GetValue<ObjectGuid>(DcKey::FallbackTarget)->Set(target->GetGUID());
         DcStatusPublisher::SendAddonMessage(botAI, "CHAT\tClearing path \xe2\x80\x94 pulling " + std::string(target->GetName()) + ".");
     }
 
-    // Don't clear the stall reason here — only a successful Advance does that.
-    // If pathing to the boss is still blocked after this kill, we want the
-    // stall trigger to fire again next tick.
+    // The stall stays until this pull is done (top of this action).
     return EngageDirect(target);
 }
 
