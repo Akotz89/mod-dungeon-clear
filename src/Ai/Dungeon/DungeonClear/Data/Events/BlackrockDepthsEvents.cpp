@@ -10,6 +10,7 @@
 #include <cmath>
 #include <list>
 #include <map>
+#include <optional>
 #include <set>
 #include <unordered_map>
 #include <vector>
@@ -35,6 +36,7 @@
 #include "WorldSession.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Ai/Dungeon/DungeonClear/Data/Events/BlackrockDepthsLyceum.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 #include "Ai/Dungeon/DungeonClear/Overrides/ObjectiveHookRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcStatusPublisher.h"
@@ -883,9 +885,30 @@ namespace DcLyceum
                    o->GetPositionZ() >= LYCEUM_BOX_Z_MIN && o->GetPositionZ() <= LYCEUM_BOX_Z_MAX;
         }
 
+        // Emperor Dagran Thaurissan's throne room while it is pre-cleared and he
+        // sleeps. Pets are held there too: the chase ban around his sphere
+        // (DungeonClearMultiplier, ChaseWakesSleepingRoomBoss) rules on bot
+        // actions, and a pet is no bot. sk-20261019-105358: four of fifteen fatal
+        // wakes were a hunter's or warlock's pet attacked by him at 19.8-21.4yd,
+        // no player inside 27yd. Released the moment he is in combat, so the pets
+        // fight the boss.
+        constexpr uint32 NPC_EMPEROR_DAGRAN = 9019;
+
+        bool ThroneRoomPreClear(Player* tank, PlayerbotAI* tankAI)
+        {
+            AiObjectContext* ctx = tankAI->GetAiObjectContext();
+            std::optional<DungeonBossInfo> const next =
+                ctx->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)->Get();
+            if (!next.has_value() || next->entry != NPC_EMPEROR_DAGRAN ||
+                !DcTargeting::IsRoomClearActive(tank, ctx))
+                return false;
+            Creature* const boss = DcTargeting::GetLiveBoss(tank, ctx, next->entry);
+            return boss && !boss->IsInCombat();
+        }
+
         // Hold one bot's pet: passive, and back on follow if it is fighting or
-        // has been told to do anything but follow.
-        void HoldPet(Player* owner, PlayerbotAI* ownerAI)
+        // has been told to do anything but follow. `room` names the hold in the log.
+        void HoldPet(Player* owner, PlayerbotAI* ownerAI, char const* room)
         {
             Pet* pet = owner->GetPet();
             if (!pet || !pet->IsAlive())
@@ -896,8 +919,8 @@ namespace DcLyceum
                 g_lyceumPets.emplace(owner->GetGUID(), pet->GetReactState());
                 pet->SetReactState(REACT_PASSIVE);
                 LOG_INFO("playerbots.dungeonclear",
-                         "[DC:{}] Lyceum — {}'s pet {} held passive on follow for the room",
-                         owner->GetName(), owner->GetName(), pet->GetName());
+                         "[DC:{}] {} — {}'s pet {} held passive on follow for the room",
+                         owner->GetName(), room, owner->GetName(), pet->GetName());
             }
             if (!g_lyceumPets.count(owner->GetGUID()))
                 return;  // passive by its owner's choice; not ours to steer
@@ -916,7 +939,7 @@ namespace DcLyceum
             {
                 pet->SetReactState(prior);
                 LOG_INFO("playerbots.dungeonclear",
-                         "[DC:{}] Lyceum — {}'s pet {} released from the room hold",
+                         "[DC:{}] BRD — {}'s pet {} released from the room hold",
                          owner->GetName(), owner->GetName(), pet->GetName());
             }
         }
@@ -969,15 +992,19 @@ namespace DcLyceum
                 if (tank->IsAlive() && InLyceum(tank))
                     LootTorchesInReach(tank);
 
+                bool const throne = tank->IsAlive() && ThroneRoomPreClear(tank, tankAI);
                 ForEachLivingMember(tank, [&](Player* m)
                 {
-                    if (m->GetInstanceId() != tank->GetInstanceId() || !InLyceum(m))
+                    if (m->GetInstanceId() != tank->GetInstanceId())
+                        return;
+                    bool const lyceum = InLyceum(m);
+                    if (!lyceum && !throne)
                         return;
                     PlayerbotAI* mAI = GET_PLAYERBOT_AI(m);
                     if (!mAI)
                         return;  // a human's pet is the human's
                     held.insert(m->GetGUID());
-                    HoldPet(m, mAI);
+                    HoldPet(m, mAI, lyceum ? "Lyceum" : "Throne room");
                 });
             }
         }

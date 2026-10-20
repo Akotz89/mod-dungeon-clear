@@ -1040,10 +1040,32 @@ std::optional<Position> DcPullPlanner::ComputeSafeCamp(PlayerbotAI* botAI, Unit*
     // the camp. When nothing inside qualifies, the search falls through to its
     // last resort, the tank's own spot.
     RoomAggroBoss const* const campBox = DcTargeting::ActiveRoomCampBox(bot, ctx);
-    auto outsideCampBox = [campBox](Position const& p) -> bool
+
+    // Nor may the camp stand inside the sleeping room-aggro boss's sphere, plus the
+    // party's margin: the camp is where the pack is fought, and a fight there wakes
+    // him. Live (sk-20261019-105358, two of fifteen fatal Emperor wakes): the
+    // ranged-pack search took a camp 13yd and 18.5yd from the throne — its LOS
+    // fallback keeps poor clearance on purpose, and nothing else knew of him.
+    Creature* sleeper = nullptr;
+    float sleeperKeep = 0.0f;
+    // Cheap gates first (registry Find) — every pull in every dungeon gets here.
+    if (std::optional<DungeonBossInfo> const next =
+            ctx->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)->Get())
+        if (RoomAggroRegistry::Find(bot->GetMapId(), next->entry) &&
+            DcTargeting::IsRoomClearActive(bot, ctx))
+            if (Creature* const boss = DcTargeting::GetLiveBoss(bot, ctx, next->entry))
+                if (!boss->IsInCombat())
+                {
+                    sleeper = boss;
+                    sleeperKeep = std::max(DcEngageGeometry::RoomAggroSphereRadius(bot, boss),
+                                           DcTargeting::ActiveRoomSkirt(bot, ctx)) +
+                                  DcSettings::GetFloat(bot, "RoomAggroPartyMargin");
+                }
+    auto campOffLimits = [campBox, sleeper, sleeperKeep](Position const& p) -> bool
     {
-        return campBox &&
-               !RoomAggroRegistry::InCampBox(*campBox, p.GetPositionX(), p.GetPositionY());
+        if (campBox && !RoomAggroRegistry::InCampBox(*campBox, p.GetPositionX(), p.GetPositionY()))
+            return true;
+        return sleeper && sleeper->GetExactDist2d(&p) < sleeperKeep;
     };
 
     // Resolve the other-pack hostiles once (alive, hostile, not the target, not a
@@ -1130,7 +1152,7 @@ std::optional<Position> DcPullPlanner::ComputeSafeCamp(PlayerbotAI* botAI, Unit*
             // dungeon's first pull the oldest crumbs are ALL over the line, so
             // short-circuiting here is the difference between rejecting them for
             // free and paying a path build apiece to reject them anyway.
-            if (outsideCampBox(c) || CampOverZoneLine(bot, c) || !IsNavReachable(bot, c) ||
+            if (campOffLimits(c) || CampOverZoneLine(bot, c) || !IsNavReachable(bot, c) ||
                 CampBlockedByDoor(bot, c) || CampInHazard(bot, live, c))
                 return true;
             float const clear = clearanceAt(c);
@@ -1209,7 +1231,7 @@ std::optional<Position> DcPullPlanner::ComputeSafeCamp(PlayerbotAI* botAI, Unit*
                 DungeonPathFollower::PointBehind(bot, path, follower, setback))
         {
             Position cand(back->x, back->y, back->z);
-            if (!outsideCampBox(cand) && IsNavReachable(bot, cand) &&
+            if (!campOffLimits(cand) && IsNavReachable(bot, cand) &&
                 !CampBlockedByDoor(bot, cand) && !CampInHazard(bot, live, cand) &&
                 !CampOverZoneLine(bot, cand))
             {
@@ -1261,7 +1283,7 @@ std::optional<Position> DcPullPlanner::ComputeSafeCamp(PlayerbotAI* botAI, Unit*
             // but on the far side of a wall / on another level. Only keep it if a
             // complete generated path reaches it, so the move never straight-lines
             // through the geometry in between — and never across/into a shut door.
-            if (outsideCampBox(cand) || !IsNavReachable(bot, cand) ||
+            if (campOffLimits(cand) || !IsNavReachable(bot, cand) ||
                 CampBlockedByDoor(bot, cand) || CampInHazard(bot, live, cand) ||
                 CampOverZoneLine(bot, cand))
                 continue;

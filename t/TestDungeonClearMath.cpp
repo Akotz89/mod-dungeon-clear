@@ -553,6 +553,34 @@ TEST(DungeonClearEngageWalkYieldTest, SurvivesMsTimeWrap)
 }
 
 // ---------------------------------------------------------------------------
+// ShouldTagBossFromStandoff — the boss engage's walk-in is refused outright.
+// ---------------------------------------------------------------------------
+using DungeonClearMath::ShouldTagBossFromStandoff;
+
+// sk-20261019-003633 tr-…-12: the walk to Emperor Dagran Thaurissan on his raised
+// throne refused at 30.5yd, tank parked, boss in sight — tag once it has lasted.
+TEST(DungeonClearBossStandoffTagTest, TagsAPersistentRefusalInSight)
+{
+    EXPECT_FALSE(ShouldTagBossFromStandoff(true, false, true, 30.5f, 40.0f, 10000u, 12999u, 3000u));
+    EXPECT_TRUE(ShouldTagBossFromStandoff(true, false, true, 30.5f, 40.0f, 10000u, 13000u, 3000u));
+}
+
+TEST(DungeonClearBossStandoffTagTest, HoldsWhileWalkingOrOutOfSightOrFar)
+{
+    EXPECT_FALSE(ShouldTagBossFromStandoff(false, false, true, 30.5f, 40.0f, 10000u, 20000u, 3000u));
+    EXPECT_FALSE(ShouldTagBossFromStandoff(true, true, true, 30.5f, 40.0f, 10000u, 20000u, 3000u));
+    EXPECT_FALSE(ShouldTagBossFromStandoff(true, false, false, 30.5f, 40.0f, 10000u, 20000u, 3000u));
+    EXPECT_FALSE(ShouldTagBossFromStandoff(true, false, true, 40.1f, 40.0f, 10000u, 20000u, 3000u));
+    EXPECT_FALSE(ShouldTagBossFromStandoff(true, false, true, 30.5f, 40.0f, 0u, 20000u, 3000u));
+}
+
+TEST(DungeonClearBossStandoffTagTest, SurvivesMsTimeWrap)
+{
+    EXPECT_TRUE(ShouldTagBossFromStandoff(true, false, true, 30.5f, 40.0f, 0xFFFFFF00u, 0x00000C00u, 3000u));
+    EXPECT_FALSE(ShouldTagBossFromStandoff(true, false, true, 30.5f, 40.0f, 0xFFFFFF00u, 0x00000064u, 3000u));
+}
+
+// ---------------------------------------------------------------------------
 // ShouldDropTrashSticky — a stale engage-trash sticky yields to the fresh pick.
 // ---------------------------------------------------------------------------
 using DungeonClearMath::ShouldDropTrashSticky;
@@ -3397,6 +3425,72 @@ TEST(DungeonClearRoomTrashTest, AllRefusedFallsBackToTheNearest)
     EXPECT_EQ(DungeonClearMath::PickRoomTrashIndex(dist, {true}), 1);
 }
 
+// sk-20261019-003633: the throne-side floor (Ambassador 29.9yd from the Emperor)
+// sorted ahead of both balconies, and every wake there met the full balconies. A
+// boss-side ring puts it behind everything, ledges included; outside the ring the
+// off-level order is unchanged.
+TEST(DungeonClearRoomTrashTest, BossSidePacksGoLast)
+{
+    using DungeonClearMath::RoomTrashPickDistance;
+    float const corner = RoomTrashPickDistance(10.0f, 0.0f, 5.0f, true, 29.9f, 36.0f);
+    float const balcony = RoomTrashPickDistance(45.0f, 6.9f, 5.0f, true, 39.6f, 36.0f);
+    float const floor = RoomTrashPickDistance(50.0f, 0.0f, 5.0f, true, 60.0f, 36.0f);
+    EXPECT_LT(floor, balcony);
+    EXPECT_LT(balcony, corner);
+    EXPECT_FLOAT_EQ(floor, 50.0f);
+    // Nearest-first still holds inside the ring.
+    EXPECT_LT(corner, RoomTrashPickDistance(20.0f, 0.0f, 5.0f, true, 25.0f, 36.0f));
+    // No ring, or no live boss: the old order exactly.
+    EXPECT_FLOAT_EQ(RoomTrashPickDistance(10.0f, 0.0f, 5.0f, true, 29.9f, 0.0f), 10.0f);
+    EXPECT_FLOAT_EQ(RoomTrashPickDistance(10.0f, 0.0f, 5.0f, true, -1.0f, 36.0f), 10.0f);
+}
+
+// sk-20261019-105358: every balcony pack refused "no clean lane", so the
+// unrefused throne-side ring became the only pick and its walk woke the Emperor
+// with both balconies up. The ring now waits for everything outside it, refused
+// or not.
+TEST(DungeonClearRoomTrashTest, TheRingWaitsForRefusedPacksOutsideIt)
+{
+    // 0: balcony, refused. 1: ring Senator 28.6yd off him, unrefused. 2: ring, nearer.
+    std::vector<float> const dist = {2045.0f, 2030.0f, 2020.0f};
+    std::vector<bool> const ring = {false, true, true};
+    EXPECT_EQ(DungeonClearMath::PickRoomTrashIndex(dist, {true, false, false}, ring), 0);
+    // An unrefused pack outside the ring still beats a refused one.
+    std::vector<float> const four = {45.0f, 60.0f, 2030.0f, 2020.0f};
+    std::vector<bool> const ring4 = {false, false, true, true};
+    EXPECT_EQ(DungeonClearMath::PickRoomTrashIndex(four, {false, true, false, false}, ring4), 0);
+    EXPECT_EQ(DungeonClearMath::PickRoomTrashIndex(four, {true, false, false, false}, ring4), 1);
+    // Only the ring left: unrefused before refused, nearest first.
+    std::vector<float> const left = {2030.0f, 2020.0f, 2010.0f};
+    EXPECT_EQ(DungeonClearMath::PickRoomTrashIndex(left, {false, false, true}, {true, true, true}), 1);
+    EXPECT_EQ(DungeonClearMath::PickRoomTrashIndex(left, {true, true, true}, {true, true, true}), 2);
+    // No ring vector: the old order exactly.
+    EXPECT_EQ(DungeonClearMath::PickRoomTrashIndex(dist, {true, false, false}), 2);
+}
+
+// sk-20261019-105358 (-61/-57/-47): the planted Doomforge Dragoon 26.4yd from the
+// Emperor (sphere 28.3) woke and nothing could reach it. A caster stopping at
+// spell range on the camp side ends well outside the sphere; melee and a leap end
+// on it, inside.
+TEST(DungeonClearRoomTrashTest, TheChaseBanRulesOnWhereTheChaseEnds)
+{
+    using DungeonClearMath::ChaseEndToBoss;
+    using DungeonClearMath::ChaseWakesSleepingBoss;
+    // Boss at the origin, the Dragoon 26.4yd east, a caster 48yd past it.
+    float const caster = ChaseEndToBoss(74.4f, 0.0f, 26.4f, 0.0f, 0.0f, 0.0f, 30.0f);
+    EXPECT_NEAR(caster, 56.4f, 0.01f);
+    EXPECT_FALSE(ChaseWakesSleepingBoss(caster, 28.3f, false));
+    float const melee = ChaseEndToBoss(74.4f, 0.0f, 26.4f, 0.0f, 0.0f, 0.0f, 0.0f);
+    EXPECT_NEAR(melee, 26.4f, 0.01f);
+    EXPECT_TRUE(ChaseWakesSleepingBoss(melee, 28.3f, false));
+    // Already inside range: the mover stays where it is.
+    EXPECT_NEAR(ChaseEndToBoss(40.0f, 0.0f, 26.4f, 0.0f, 0.0f, 0.0f, 30.0f), 40.0f, 0.01f);
+    // Coming at it from beyond the boss, spell range ends 3.6yd from him: banned.
+    float const fromBehind = ChaseEndToBoss(-10.0f, 0.0f, 26.4f, 0.0f, 0.0f, 0.0f, 30.0f);
+    EXPECT_NEAR(fromBehind, 3.6f, 0.01f);
+    EXPECT_TRUE(ChaseWakesSleepingBoss(fromBehind, 28.3f, false));
+}
+
 TEST(DungeonClearRoomTrashTest, AKillDropsTheRefusals)
 {
     EXPECT_TRUE(DungeonClearMath::ShouldDropLaneRefusals(23u, 24u));
@@ -3418,4 +3512,59 @@ TEST(DungeonClearMathTest, RegroupAnchorKeepsAFightablePack)
 {
     EXPECT_TRUE(DungeonClearMath::IsRegroupAnchorCandidate(25.0f, 100.0f, true));
     EXPECT_TRUE(DungeonClearMath::IsRegroupAnchorCandidate(100.0f, 100.0f, true));
+}
+
+// Emperor's throne room: a balcony pack straight overhead is "nearest" on the 2D
+// line and a ramp walk away, so off-level packs go after every floor pack — and
+// only in a room that asks for it.
+TEST(DungeonClearRoomTrashTest, OffLevelPacksGoLastWhenTheRoomAsks)
+{
+    float const overhead = DungeonClearMath::RoomTrashPickDistance(8.0f, 6.8f, 5.0f, true);
+    float const farFloor = DungeonClearMath::RoomTrashPickDistance(60.0f, 0.4f, 5.0f, true);
+    EXPECT_GT(overhead, farFloor);
+    EXPECT_FLOAT_EQ(farFloor, 60.0f);
+    EXPECT_FLOAT_EQ(DungeonClearMath::RoomTrashPickDistance(8.0f, -6.8f, 5.0f, true),
+                    overhead);
+    // Among the ledge packs the nearest still goes first.
+    EXPECT_LT(overhead, DungeonClearMath::RoomTrashPickDistance(30.0f, 6.8f, 5.0f, true));
+    // Every other room ranks on the plain 2D distance.
+    EXPECT_FLOAT_EQ(DungeonClearMath::RoomTrashPickDistance(8.0f, 6.8f, 5.0f, false), 8.0f);
+
+    std::vector<float> const dist = {overhead, farFloor};
+    EXPECT_EQ(DungeonClearMath::PickRoomTrashIndex(dist, {false, false}), 1);
+}
+
+// tr-20261018-230400-6: the camp sat at the throne-room door, 105yd from the tank at
+// the Emperor's standoff. No member can be near both, so the camp anchor is stale.
+TEST(DungeonClearSpreadGateTest, ACampTheTankLeftBehindIsStale)
+{
+    float const maxTankGap = 25.0f + 35.0f;
+    EXPECT_TRUE(DungeonClearMath::CampAnchorIsStale(104.7f, maxTankGap));
+    // A camp a legitimate standoff behind the tank anchors as before.
+    EXPECT_FALSE(DungeonClearMath::CampAnchorIsStale(35.0f, maxTankGap));
+    EXPECT_FALSE(DungeonClearMath::CampAnchorIsStale(maxTankGap, maxTankGap));
+    // No backstop, nothing to call stale.
+    EXPECT_FALSE(DungeonClearMath::CampAnchorIsStale(500.0f, 0.0f));
+}
+
+// tr-20261018-230400-9: the fight carried the tank 22yd from a sleeping Emperor
+// (sphere 28.3) and woke the room.
+TEST(DungeonClearRoomTrashTest, NoChaseIntoASleepingBossSphere)
+{
+    EXPECT_TRUE(DungeonClearMath::ChaseWakesSleepingBoss(21.0f, 28.3f, false));
+    EXPECT_FALSE(DungeonClearMath::ChaseWakesSleepingBoss(35.0f, 28.3f, false));
+    // Once he is up, the room clear is over and the chase is free.
+    EXPECT_FALSE(DungeonClearMath::ChaseWakesSleepingBoss(21.0f, 28.3f, true));
+}
+
+// tr-20261019-183728-12: the tank on the throne-room floor (z -92.7) rounded a
+// pack on the SW balcony (z -85.06) on its 2D commit ring and bounced between two
+// spots beside itself for 6m39s instead of taking the ramp.
+TEST(DungeonClearRoomTrashTest, TheStandWalkRoundsAPackOnlyOnItsOwnFloor)
+{
+    EXPECT_FALSE(DungeonClearMath::StandWalkRoundsPack(-92.7f, -85.06f, 5.0f));
+    EXPECT_FALSE(DungeonClearMath::StandWalkRoundsPack(-85.06f, -92.7f, 5.0f));
+    // Same floor, or a gentle slope across it: round the pack as before.
+    EXPECT_TRUE(DungeonClearMath::StandWalkRoundsPack(-92.6f, -91.9f, 5.0f));
+    EXPECT_TRUE(DungeonClearMath::StandWalkRoundsPack(-90.0f, -85.0f, 5.0f));
 }

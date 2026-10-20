@@ -76,6 +76,12 @@ struct DcApproachState
     // DungeonClearMath::ShouldYieldToEngageWalk.
     ObjectGuid engageWalkTarget;
     uint32 engageWalkMs = 0;
+    // The boss whose engage walk-in stock refused, since when (getMSTime, 0 = not
+    // refused) and the latest refusal — a refusal that lapses restarts the window.
+    // See DungeonClearMath::ShouldTagBossFromStandoff.
+    ObjectGuid bossWalkRefusedTarget;
+    uint32 bossWalkRefusedMs = 0;
+    uint32 bossWalkRefusedLastMs = 0;
     uint32 stuckCount          = 0;  // MoveTo-returned-false backup (was "stuck count")
     uint32 rebuildAttempts     = 0;  // consecutive rebuilds w/o progress ("stride rebuild attempts")
     uint32 resnapAttempts      = 0;  // consecutive Resnap recoveries w/o progress (rung-1 give-up)
@@ -122,6 +128,13 @@ struct DcApproachState
     // changes, and by the approach reset below.
     int8 avoidOrbitDir         = 0;  // 0 = unlatched, +/-1 = committed rotation
     ObjectGuid avoidOrbitSphere;     // pack GUID the current avoid orbit is for
+
+    // The walk to a room-clear stand spot rounds the pack itself on its commit
+    // ring (MoveToStandSkirtingRoomAggro). It ran unlatched, so the long arc it
+    // took one tick was re-decided the next — the same two-point bounce, logged
+    // 45 times in tr-20261019-183728-12. Keyed by the pack; reset with the rest.
+    int8 standOrbitDir         = 0;  // 0 = unlatched, +/-1 = committed rotation
+    ObjectGuid standOrbitPack;       // pack GUID the current stand orbit is for
 
     // --- off-line rejoin latches ------------------------------------------
     // HYSTERESIS on the off-line rung. The rung engages at OFF_PATH_THRESHOLD
@@ -381,6 +394,8 @@ struct DcApproachState
         skirtOrbitTarget.Clear();
         avoidOrbitDir       = 0;
         avoidOrbitSphere.Clear();
+        standOrbitDir       = 0;
+        standOrbitPack.Clear();
         chaseTarget.Clear();
         chaseAnchor         = Position();
         chaseOrigin         = Position();

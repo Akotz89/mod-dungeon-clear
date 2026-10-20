@@ -302,6 +302,41 @@ TEST(DcStrandedRecoveryTest, CampAnchoredGateIsNotBorrowed)
     EXPECT_FALSE(Decide(in, party).recover);
 }
 
+// sk-20261019-003633 (Emperor's throne room, three runs): a camp-anchored gate
+// held the tank on a member 29.6-40yd from the camp while it stood 14-23yd from
+// the tank, so the tank-only test never saw it. The camp test, with the camp's
+// own radius, does.
+TEST(DcStrandedRecoveryTest, PastTheCampSpreadIsStrandedWhileNearTheTank)
+{
+    Inputs in = StaleInputs();
+    in.gateSpread = 25.0f;
+    std::vector<Member> party = BaseParty();
+    for (Member& m : party)
+        m.distToGate = 10.0f;            // everyone set at the camp...
+    Strand(party, 2, 14.2f);
+    party[2].distToGate = 29.6f;         // ...but Zesh, up on the balcony
+
+    Result const r = Decide(in, party);
+    ASSERT_TRUE(r.recover);
+    ASSERT_EQ(r.strandedIdx.size(), 1u);
+    EXPECT_EQ(r.strandedIdx[0], 2);
+}
+
+// The camp test is the gate's own test, nothing stricter: inside its spread of
+// the camp nobody is yanked, and a tank-anchored gate (no camp distance) never
+// takes the camp branch at all.
+TEST(DcStrandedRecoveryTest, CampTestUsesOnlyTheCampsOwnRadius)
+{
+    using DcStrandedDecision::IsStranded;
+    EXPECT_FALSE(IsStranded(14.0f, 25.0f, 25.0f, 25.0f));   // on the camp's edge
+    EXPECT_TRUE(IsStranded(14.0f, 25.1f, 25.0f, 25.0f));
+    EXPECT_FALSE(IsStranded(14.0f, -1.0f, 25.0f, 25.0f));   // no camp distance
+    EXPECT_FALSE(IsStranded(14.0f, 40.0f, 25.0f, 0.0f));    // tank-anchored gate
+    EXPECT_TRUE(IsStranded(26.0f, 5.0f, 25.0f, 25.0f));     // the tank test still holds
+    // A waived gate (100000 while a pull maneuver holds) waives the camp test too.
+    EXPECT_FALSE(IsStranded(14.0f, 60.0f, 25.0f, 100000.0f));
+}
+
 // Degenerate gate readings fall back to the setting rather than to zero — a 0
 // threshold would strand-and-teleport the entire party every timeout.
 TEST(DcStrandedRecoveryTest, RescueSpreadIgnoresANonPositiveGate)

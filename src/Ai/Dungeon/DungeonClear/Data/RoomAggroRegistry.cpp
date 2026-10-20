@@ -72,7 +72,15 @@ namespace
         // flickering on 18309/18311/18313, far=108+, never 0).
         { 557, 18341, 70.0f, { 18309, 18311, 18313 }, true, -145.0f, -50.0f },
         { 601, 28684,  40.0f, {} }, // Azjol-Nerub — Krik'thir the Gatewatcher
-        { 230, 9019,  166.0f, {} }, // Blackrock Depths — Emperor Dagran Thaurissan
+        // Blackrock Depths — Emperor Dagran Thaurissan. CallForHelp(VISIBLE_RANGE)
+        // wakes the whole throne room, the two balconies included, so their packs
+        // count however long the ramp walk is (see RoomAggroBoss::detourReachable).
+        // The throne-side floor goes last (bossSideLastRadius): 36yd takes in the
+        // flanking packs (<= 29.9yd from him) and stops short of the balconies'
+        // nearest mob (39.6yd).
+        { 230, 9019, 166.0f, {}, false, 0.0f, 0.0f, /*pullOutRadius*/ 0.0f,
+          /*skirtRadius*/ 0.0f, /*hasCampBox*/ false, 0.0f, 0.0f, 0.0f, 0.0f,
+          /*detourReachable*/ true, /*bossSideLastRadius*/ 36.0f },
         { 429, 14354,  50.0f, {} }, // Dire Maul East — Pusillin
 
         // Deadmines (36) — Gilnid, the goblin foundry.

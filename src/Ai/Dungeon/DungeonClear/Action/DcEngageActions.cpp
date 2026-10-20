@@ -642,12 +642,24 @@ bool DungeonClearEngageActionBase::MoveToStandSkirtingRoomAggro(Unit* pack,
     // Boss sphere first, as in MoveToSkirtingRoomAggro. Then the pack itself:
     // the stand spot is on its commit ring, and the tank may be starting from
     // its side or behind it, so round it on the ring instead of cutting across.
+    // Only on the pack's own floor: from another tier the ring is meaningless and
+    // the navmesh path to the stand spot is the way up (StandWalkRoundsPack).
     std::optional<Position> wp = RoomAggroSkirtPoint(pack, &dest);
-    if (!wp)
+    if (!wp && DungeonClearMath::StandWalkRoundsPack(bot->GetPositionZ(), pack->GetPositionZ(),
+                                                     DC_Z_LEVEL_TOLERANCE))
+    {
+        DcApproachState& appr =
+            context->GetValue<DcApproachState&>(DcKey::ApproachState)->Get();
+        if (appr.standOrbitPack != pack->GetGUID())
+        {
+            appr.standOrbitPack = pack->GetGUID();
+            appr.standOrbitDir = 0;
+        }
         wp = DcEngageGeometry::AggroSafeApproachPoint(
             bot, pack->GetPositionX(), pack->GetPositionY(), pack->GetPositionZ(),
-            packRadius, dest.GetPositionX(), dest.GetPositionY(), nullptr,
+            packRadius, dest.GetPositionX(), dest.GetPositionY(), &appr.standOrbitDir,
             DcEngageGeometry::OrbitProfile::Bystander);
+    }
     Position const to = wp ? *wp : dest;
 
     bool const moved = DcMoveTo(pack->GetMapId(), to.GetPositionX(), to.GetPositionY(),
@@ -1078,8 +1090,45 @@ bool DungeonClearEngageBossAction::Execute(Event event)
         return true;
     }
 
+    DcApproachState& appr = context->GetValue<DcApproachState&>(DcKey::ApproachState)->Get();
     if (!EngageDirect(static_cast<Unit*>(boss)))
-        return false;
+    {
+        // The walk-in was refused (stock finds no route to the boss's own spot) and
+        // the tank is standing still: nothing else on the ladder pulls from here —
+        // Advance's engage hold parks the tank and clears the stall every tick. Once
+        // the refusal has lasted, tag the boss from the standoff and let him come to
+        // the party. See DungeonClearMath::ShouldTagBossFromStandoff.
+        uint32 const now = getMSTime();
+        if (appr.bossWalkRefusedTarget != boss->GetGUID() || appr.bossWalkRefusedMs == 0 ||
+            now - appr.bossWalkRefusedLastMs > DC_BOSS_STANDOFF_TAG_GRACE_MS)
+        {
+            appr.bossWalkRefusedTarget = boss->GetGUID();
+            appr.bossWalkRefusedMs = now;
+        }
+        appr.bossWalkRefusedLastMs = now;
+        float const dist = bot->GetExactDist(boss);
+        if (!DungeonClearMath::ShouldTagBossFromStandoff(
+                /*walkRefused*/ true, bot->isMoving(), bot->IsWithinLOSInMap(boss), dist,
+                DC_BOSS_STANDOFF_TAG_RANGE, appr.bossWalkRefusedMs, now,
+                DC_BOSS_STANDOFF_TAG_GRACE_MS))
+            return false;
+
+        LOG_INFO("playerbots.dungeonclear",
+                 "[DC:{}] engage boss: no route to {} ({:.1f}yd, refused {} ms) -> tagging "
+                 "it from the standoff",
+                 bot->GetName(), next->name, dist, now - appr.bossWalkRefusedMs);
+        appr.bossWalkRefusedMs = 0;
+        bot->SetSelection(boss->GetGUID());
+        if (!bot->HasInArc(CAST_ANGLE_IN_FRONT, boss))
+            ServerFacade::instance().SetFacingTo(bot, boss);
+        context->GetValue<Unit*>(DcKey::Stock::CurrentTarget)->Set(boss);
+        bot->Attack(boss, botAI->IsMelee(bot));
+        boss->EngageWithTarget(bot);
+        botAI->ChangeEngine(BOT_STATE_COMBAT);
+        ClearStall(context);
+        return true;
+    }
+    appr.bossWalkRefusedMs = 0;
 
     ClearStall(context);
     return true;

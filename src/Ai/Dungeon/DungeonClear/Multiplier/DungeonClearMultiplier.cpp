@@ -240,6 +240,68 @@ static bool LyceumChaseLeavesThePack(Player* bot, AiObjectContext* context, Acti
                                                          tank->GetPositionX(), tank->GetPositionY());
 }
 
+// ROOM-AGGRO PRE-CLEAR: no stock reach / chase toward a target standing inside the
+// sleeping boss's wake sphere, for any member, tank included. The room clear keeps
+// every DC driver out of that sphere, but a fight with room trash runs on the stock
+// combat movers, and those follow a mob wherever it stands. Live
+// (tr-20261018-230400-9): a pull that woke a Senator pack carried the fight south
+// until the tank stood 22yd from Emperor Dagran Thaurissan; he engaged, his
+// CallForHelp woke the room, and four of five died. A mob in there that cannot be
+// chased is shot by the ranged or walks out to the melee — and the boss sleeps.
+//
+// The ban rules on where the chase ENDS, not where the target stands: a caster's
+// `reach spell` stops at spell range on its own side, often well outside the
+// sphere. Testing the target's spot banned the ranged too, and a planted mob in
+// there (the throne-side Doomforge Dragoon, no combat movement) then could never
+// be killed — sk-20261019-105358 held three runs 900s on it at 46-98% HP.
+//
+// The GAP-CLOSERS too: Charge, Intercept, Feral Charge (bear and cat) are spell
+// casts (CastReachTargetSpellAction), not ReachTargetAction, and they cross the
+// same yards in one jump. Live (sk-20261019-003633, eight throne-room wipes, the
+// chase ban already in place): `reach melee` zeroed, then `feral charge - bear` /
+// `charge` landed the tank on a Senator or the planted Dragoon by the throne and
+// the Emperor engaged within three seconds, 16-22yd away.
+static bool ChaseWakesSleepingRoomBoss(Player* bot, AiObjectContext* context, Action* action)
+{
+    std::string targetName;
+    // How far short of the target the chase stops (ChaseEndToBoss). Only `reach
+    // spell` stops at range; melee and the leaps end on the target.
+    float range = 0.0f;
+    if (auto* reach = dynamic_cast<ReachTargetAction*>(action))
+    {
+        targetName = reach->GetTargetName();
+        if (action->getName() == "reach spell")
+            if (PlayerbotAI* const botAI = GET_PLAYERBOT_AI(bot))
+                range = botAI->GetRange("spell");
+    }
+    else if (auto* leap = dynamic_cast<CastReachTargetSpellAction*>(action))
+        targetName = leap->GetTargetName();
+    else
+        return false;
+    Player* tank = context->GetValue<Player*>(DcKey::PartyTank)->Get();
+    if (!tank || !tank->IsAlive() || tank->GetInstanceId() != bot->GetInstanceId())
+        return false;
+    PlayerbotAI* tankAI = GET_PLAYERBOT_AI(tank);
+    if (!tankAI)
+        return false;  // a real-player tank runs no room clear
+    AiObjectContext* tankCtx = tankAI->GetAiObjectContext();
+    if (!DcTargeting::IsRoomClearActive(tank, tankCtx))
+        return false;
+    std::optional<DungeonBossInfo> const next =
+        tankCtx->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)->Get();
+    if (!next.has_value())
+        return false;
+    Creature* const boss = DcTargeting::GetLiveBoss(tank, tankCtx, next->entry);
+    Unit* const target = context->GetValue<Unit*>(targetName)->Get();
+    if (!boss || !target || target == boss)
+        return false;
+    float const chaseEnd = DungeonClearMath::ChaseEndToBoss(
+        bot->GetPositionX(), bot->GetPositionY(), target->GetPositionX(), target->GetPositionY(),
+        boss->GetPositionX(), boss->GetPositionY(), range);
+    return DungeonClearMath::ChaseWakesSleepingBoss(
+        chaseEnd, DcEngageGeometry::RoomAggroSphereRadius(tank, boss), boss->IsInCombat());
+}
+
 float DungeonClearMultiplier::GetValue(Action* action)
 {
     if (!action || !botAI || !bot)
@@ -511,6 +573,11 @@ float DungeonClearCombatMultiplier::GetValue(Action* action)
 
     // The Lyceum's close-up, chase half — see LyceumChaseLeavesThePack above.
     if (LyceumChaseLeavesThePack(bot, context, action))
+        return 0.0f;
+
+    // The sleeping room-aggro boss's sphere — see ChaseWakesSleepingRoomBoss above.
+    // A raid encounter's stand-down hands the fight to the raid strategy.
+    if (ChaseWakesSleepingRoomBoss(bot, context, action) && !DcBossStandDown::IsActive(bot))
         return 0.0f;
 
     bool const isDcAction = name.compare(0, 13, "dungeon clear") == 0;

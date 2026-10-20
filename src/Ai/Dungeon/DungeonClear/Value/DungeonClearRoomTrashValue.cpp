@@ -6,6 +6,7 @@
 #include "DungeonClearRoomTrashValue.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 
+#include <cmath>
 #include <map>
 #include <optional>
 #include <string>
@@ -266,7 +267,14 @@ GuidVector DungeonClearRoomTrashValue::Calculate()
         // Don't count a unit the tank can't actually reach (different floor with
         // no route) or one behind a closed door — clearing it isn't possible
         // without help, and the no-progress timeout would otherwise livelock.
-        if (!DcEngageGeometry::IsLevelReachable(bot, u))
+        // A detourReachable room keeps an off-level unit any route reaches (the
+        // seek form of the probe), not only one whose route is near-direct.
+        bool const reachable =
+            room->detourReachable &&
+                    std::fabs(u->GetPositionZ() - bot->GetPositionZ()) > DC_Z_LEVEL_TOLERANCE
+                ? DcEngageGeometry::IsEngageReachable(bot, u, /*requireDirect*/ false)
+                : DcEngageGeometry::IsLevelReachable(bot, u);
+        if (!reachable)
         {
             ++exReach;
             continue;

@@ -100,6 +100,35 @@ struct RoomAggroBoss
     float  campMaxX{0.0f};
     float  campMinY{0.0f};
     float  campMaxY{0.0f};
+
+    // Optional: room trash on another level counts whenever ANY route reaches it,
+    // however long. The default reach filter (DcEngageGeometry::IsLevelReachable)
+    // also drops an off-level mob whose route is a long detour against the straight
+    // line — right for a gallery the boss's pull never touches, wrong for a boss
+    // whose engage wakes the whole room. Emperor Dagran Thaurissan is the case: two
+    // side balconies 7yd above the throne-room floor hold 21 Senators, Ambassadors,
+    // Dragoons and Captains, reached by ramps at mid-room. From under a balcony the
+    // route is ~75yd against ~20yd straight, so the filter dropped whichever balcony
+    // the tank stood beneath (the room-trash "reach=" count swung 0..11 as it moved),
+    // and his CallForHelp(VISIBLE_RANGE) brought every survivor into the boss fight
+    // (tr-20261018-230400-9: all 21 on one member, four dead). Set, the off-level
+    // packs are also pulled LAST (DungeonClearMath::RoomTrashPickDistance), so the
+    // floor around a ramp is clear before the tank climbs it. false (every other
+    // row) keeps the detour filter.
+    bool   detourReachable{false};
+
+    // Optional (yd): room trash standing within this distance of the boss is pulled
+    // LAST, behind every other pack, off-level and lane-refused ones included
+    // (DungeonClearMath::RoomTrashPickDistance, PickRoomTrashIndex). For a boss whose wake brings the
+    // whole room, the packs flanking him are the pulls most likely to wake him —
+    // their lanes run at him and their fights carry onto his steps — so the rest of
+    // the room must already be dead when they go. Emperor Dagran Thaurissan is the
+    // case: the floor beside the throne 18-30yd out (an Ambassador at 29.9yd, a
+    // Senator at 28.6yd, the planted Dragoon between) sorted ahead of both balconies
+    // under the off-level-last order, and every one of eight wipes in
+    // sk-20261019-003633 was a wake there with 16-21 balcony mobs still alive to
+    // answer his CallForHelp. 0 (every other row) = no boss-side ordering.
+    float  bossSideLastRadius{0.0f};
 };
 
 class RoomAggroRegistry

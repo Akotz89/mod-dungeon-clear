@@ -23,6 +23,8 @@ namespace DcLyceum
     //     Its prior stance is put back the moment the owner leaves the box, the
     //     run stops or pauses, or the module goes off — which is why this ticks
     //     ahead of the module gate and is told whether the module is on.
+    //     The same hold covers every member while the Emperor's throne room is
+    //     pre-cleared and he still sleeps (a pet waking him brings the room).
     //   * TORCHES LOOTED IN COMBAT. A Flame Keeper corpse holding its torch is
     //     looted by any member standing at it, fight or no fight: the corpse
     //     decays in 60s and the Reservists can keep the party fighting longer.

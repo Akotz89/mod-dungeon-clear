@@ -1371,6 +1371,36 @@ namespace
         return std::find(pull.laneRefused.begin(), pull.laneRefused.end(), guid) !=
                pull.laneRefused.end();
     }
+
+    // The room's ordering rules for the next boss: off-level packs last
+    // (RoomAggroBoss::detourReachable) and the boss-side ring last of all
+    // (bossSideLastRadius, `boss` set only when there is a ring and a live boss).
+    struct RoomPickOrder
+    {
+        bool offLevelLast = false;
+        float bossSideLast = 0.0f;
+        Creature* boss = nullptr;
+
+        bool InRing(Unit const* u) const
+        {
+            return boss && boss->GetExactDist2d(u) < bossSideLast;
+        }
+    };
+
+    RoomPickOrder RoomPickOrderFor(Player* bot, AiObjectContext* ctx)
+    {
+        RoomPickOrder order;
+        if (std::optional<DungeonBossInfo> const next =
+                ctx->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)->Get())
+            if (RoomAggroBoss const* const room = RoomAggroRegistry::Find(bot->GetMapId(), next->entry))
+            {
+                order.offLevelLast = room->detourReachable;
+                order.bossSideLast = room->bossSideLastRadius;
+                if (order.bossSideLast > 0.0f)
+                    order.boss = DcTargeting::GetLiveBoss(bot, ctx, next->entry);
+            }
+        return order;
+    }
 }
 
 Unit* DcTargeting::NearestRoomTrash(Player* bot, AiObjectContext* ctx)
@@ -1381,16 +1411,29 @@ Unit* DcTargeting::NearestRoomTrash(Player* bot, AiObjectContext* ctx)
     std::vector<Unit*> const live = LiveRoomTrash(bot, ctx);
     DcPullContext const& pull = PrunedLaneRefusals(ctx, live.size());
 
+    // A room whose off-level packs count however long their route is
+    // (RoomAggroBoss::detourReachable) pulls them last: a balcony straight
+    // overhead is "nearest" on the 2D line and a ramp walk away.
+    // A boss-side ring (RoomAggroBoss::bossSideLastRadius) pulls the packs flanking
+    // the boss after everything else, refused packs included (PickRoomTrashIndex).
+    RoomPickOrder const order = RoomPickOrderFor(bot, ctx);
+
     std::vector<float> dist;
     std::vector<bool> refused;
+    std::vector<bool> ring;
     dist.reserve(live.size());
     refused.reserve(live.size());
+    ring.reserve(live.size());
     for (Unit* u : live)
     {
-        dist.push_back(bot->GetExactDist2d(u));
+        dist.push_back(DungeonClearMath::RoomTrashPickDistance(
+            bot->GetExactDist2d(u), u->GetPositionZ() - bot->GetPositionZ(),
+            DC_Z_LEVEL_TOLERANCE, order.offLevelLast,
+            order.boss ? order.boss->GetExactDist2d(u) : -1.0f, order.bossSideLast));
         refused.push_back(InLaneRefused(pull, u->GetGUID()));
+        ring.push_back(order.InRing(u));
     }
-    int const idx = DungeonClearMath::PickRoomTrashIndex(dist, refused);
+    int const idx = DungeonClearMath::PickRoomTrashIndex(dist, refused, ring);
     return idx >= 0 ? live[static_cast<std::size_t>(idx)] : nullptr;
 }
 
@@ -1422,8 +1465,22 @@ bool DcTargeting::HasUnrefusedRoomTrash(Player* bot, AiObjectContext* ctx, Unit*
 
     std::vector<Unit*> const live = LiveRoomTrash(bot, ctx);
     DcPullContext const& pull = PrunedLaneRefusals(ctx, live.size());
+    // The boss-side ring is no clean alternative while anything outside it lives:
+    // PickRoomTrashIndex takes it only after the rest, refused or not. Counting it
+    // here would refuse an outside pack, hand it straight back as the pick, and
+    // refuse it again — never letting it go as the last resort.
+    RoomPickOrder const order = RoomPickOrderFor(bot, ctx);
+    bool outsideRingLeft = false;
+    if (order.boss)
+        for (Unit* u : live)
+            if (!order.InRing(u))
+            {
+                outsideRingLeft = true;
+                break;
+            }
     for (Unit* u : live)
-        if (u != except && !InLaneRefused(pull, u->GetGUID()))
+        if (u != except && !InLaneRefused(pull, u->GetGUID()) &&
+            !(outsideRingLeft && order.InRing(u)))
             return true;
     return false;
 }

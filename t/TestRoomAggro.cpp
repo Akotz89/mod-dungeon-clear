@@ -134,6 +134,29 @@ TEST(RoomAggroRegistryTest, DeadminesGilnidPreClearsTheFoundry)
     EXPECT_EQ(RoomAggroRegistry::Find(36, 622), nullptr);   // Goblin Engineer
 }
 
+// Emperor Dagran Thaurissan (BRD, 230): CallForHelp(VISIBLE_RANGE) wakes the whole
+// throne room, its two side balconies included, so a balcony pack counts however
+// long its ramp walk is. Every other row keeps the near-direct reach filter.
+TEST(RoomAggroRegistryTest, BrdEmperorCountsTheBalconies)
+{
+    RoomAggroBoss const* emperor = RoomAggroRegistry::Find(230, 9019);
+    ASSERT_NE(emperor, nullptr);
+    EXPECT_FLOAT_EQ(emperor->radius, 166.0f);
+    EXPECT_TRUE(emperor->memberEntries.empty());
+    EXPECT_TRUE(emperor->detourReachable);
+    // The throne-side floor (<= 29.9yd) goes last; the balconies (>= 39.6yd) do not.
+    EXPECT_GT(emperor->bossSideLastRadius, 29.9f);
+    EXPECT_LT(emperor->bossSideLastRadius, 39.6f);
+    EXPECT_FLOAT_EQ(emperor->pullOutRadius, 0.0f);
+    EXPECT_FLOAT_EQ(emperor->skirtRadius, 0.0f);
+    EXPECT_FALSE(emperor->hasCampBox);
+
+    RoomAggroBoss const* gilnid = RoomAggroRegistry::Find(36, 1763);
+    ASSERT_NE(gilnid, nullptr);
+    EXPECT_FALSE(gilnid->detourReachable);
+    EXPECT_FLOAT_EQ(gilnid->bossSideLastRadius, 0.0f);
+}
+
 // Nethermancer Sepethrea (Mechanar, 554) IS a room-aggro boss: her chamber holds
 // three elite trash groups pre-cleared and dragged back toward the entrance before
 // the pull. radius 70 covers the farthest (Pack A ~67yd); pullOutRadius 14 shrinks

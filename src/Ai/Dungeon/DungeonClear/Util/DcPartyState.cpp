@@ -293,6 +293,23 @@ DcPartyState::SpreadGate DcPartyState::GetSpreadGate(Player* bot, AiObjectContex
         float const setback = DcSettings::GetFloat(bot, "PullSetback");
         float const maxDrag = DcSettings::GetFloat(bot, "PullMaxDrag");
         gate.maxTankGap = gate.maxSpread + std::max(setback, maxDrag);
+
+        // A CAMP THE TANK HAS LEFT BEHIND IS NO ANCHOR. Past maxTankGap a member
+        // standing AT the camp fails the backstop, and one standing with the tank
+        // fails the camp spread — no position passes both, so the gate is closed
+        // for good. Measure against the tank instead: the party is with it, and the
+        // next pull stamps a fresh camp. Live (tr-20261018-230400-6): the camp stayed
+        // at the throne-room door while the fight carried everyone 105yd south to the
+        // Emperor's standoff; every member's recall latched RAN AWAY, and the tank
+        // held "Waiting on Yidama, Zesh, Moge (out of range)" with all three within
+        // 23yd of it for sixteen minutes. Stranded recovery measures to the tank, so
+        // it never saw them.
+        if (DungeonClearMath::CampAnchorIsStale(bot->GetExactDist2d(&pull.camp),
+                                                gate.maxTankGap))
+        {
+            gate.anchor = nullptr;
+            gate.maxTankGap = 0.0f;
+        }
     }
     return gate;
 }

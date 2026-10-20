@@ -52,8 +52,8 @@ namespace
     // (Arcatraz heroic, tr-20260801-194932-20: followers parked 30yd back for 15
     // minutes, run killed by the no-progress watchdog). A real fight still blocks
     // the teleport and still counts as progress — that is what engagement means.
-    void BuildSnapshot(Player* anchor, std::vector<DcStrandedDecision::Member>& out,
-                       bool& partyEngaged)
+    void BuildSnapshot(Player* anchor, Position const* camp,
+                       std::vector<DcStrandedDecision::Member>& out, bool& partyEngaged)
     {
         partyEngaged = DcCombatFlag::AnyPartyEngagement(anchor);
 
@@ -78,6 +78,7 @@ namespace
             m.onMap = member->GetMapId() == anchor->GetMapId();
             m.isTank = member == anchor;
             m.distToTank = anchor->GetDistance(member);
+            m.distToGate = camp ? member->GetDistance(*camp) : -1.0f;
             out.push_back(m);
         }
     }
@@ -110,12 +111,30 @@ namespace
     // tank-anchored test is load-bearing. Resolved once per tick by Evaluate and
     // again by Recover; both go through this one body so they can never disagree
     // about who is stranded.
-    float RescueSpread(Player* bot)
+    //
+    // A CAMP-anchored gate adds its own origin and radius alongside: the member
+    // the gate is waiting on is the one past its spread of the camp, wherever the
+    // tank stands (DcStrandedDecision::IsStranded).
+    struct RescueBounds
+    {
+        float maxSpread = 0.0f;             // past this from the tank: stranded
+        Position const* camp = nullptr;     // a camp-anchored gate's origin; nullptr = tank-anchored
+        float campSpread = 0.0f;            // ...and its radius
+    };
+
+    RescueBounds ResolveRescueBounds(Player* bot)
     {
         DcPartyState::SpreadGate const gate = DcPartyState::LeaderGate(bot);
-        return DcStrandedDecision::RescueSpread(
+        RescueBounds b;
+        b.maxSpread = DcStrandedDecision::RescueSpread(
             DcSettings::GetFloat(bot, "PartyMaxSpread"), gate.maxSpread,
             /*gateIsTankAnchored*/ gate.anchor == nullptr);
+        if (gate.anchor)
+        {
+            b.camp = gate.anchor;
+            b.campSpread = gate.maxSpread;
+        }
+        return b;
     }
 
     struct Driver
@@ -205,9 +224,10 @@ namespace DcStrandedRecovery
             return false;
         }
 
+        RescueBounds const bounds = ResolveRescueBounds(bot);
         std::vector<DcStrandedDecision::Member> members;
         bool partyEngaged = false;
-        BuildSnapshot(driver.anchor, members, partyEngaged);
+        BuildSnapshot(driver.anchor, bounds.camp, members, partyEngaged);
 
         // A FIGHT re-arms the clock wholesale — a fight is progress, so neither a
         // long boss fight nor a between-pulls skirmish ever burns the budget. A
@@ -225,7 +245,8 @@ namespace DcStrandedRecovery
         in.lastProgressMs = run.progress.stampMs;
         in.noProgressTimeoutMs = DcSettings::GetUInt(bot, "StrandedRecoveryNoProgressSecs") * 1000;
         in.partyEngaged = partyEngaged;
-        in.maxSpread = RescueSpread(bot);
+        in.maxSpread = bounds.maxSpread;
+        in.gateSpread = bounds.campSpread;
 
         return DcStrandedDecision::Decide(in, members).recover;
     }
@@ -247,7 +268,7 @@ namespace DcStrandedRecovery
         if (!group)
             return;
 
-        float const maxSpread = RescueSpread(bot);
+        RescueBounds const bounds = ResolveRescueBounds(bot);
         float const lx = leader->GetPositionX();
         float const ly = leader->GetPositionY();
         float const lz = leader->GetPositionZ();
@@ -275,7 +296,9 @@ namespace DcStrandedRecovery
             if (member->GetVehicle())
                 continue;
             float const strandedDist = leader->GetDistance(member);
-            if (strandedDist <= maxSpread)
+            float const campDist = bounds.camp ? member->GetDistance(*bounds.camp) : -1.0f;
+            if (!DcStrandedDecision::IsStranded(strandedDist, campDist, bounds.maxSpread,
+                                                bounds.campSpread))
                 continue;                       // in range — not stranded
 
             // Fan the strays out a little around the tank so they don't stack on
@@ -293,8 +316,10 @@ namespace DcStrandedRecovery
 
             LOG_INFO("playerbots.dungeonclear",
                      "[DC:{}] stranded-recovery: no progress past the timeout with {} out of "
-                     "range ({:.0f}yd > {:.0f}yd) -> teleported to the {}",
-                     leader->GetName(), member->GetName(), strandedDist, maxSpread,
+                     "range ({:.0f}yd from the tank / {:.0f}; {:.0f}yd from the camp / {:.0f}) "
+                     "-> teleported to the {}",
+                     leader->GetName(), member->GetName(), strandedDist, bounds.maxSpread,
+                     campDist, bounds.campSpread,
                      leader->isDead() ? "tank's corpse (driver " + bot->GetName() + ")"
                                       : "tank");
         }
@@ -331,6 +356,14 @@ namespace DcStrandedRecovery
             std::optional<Position> const trail =
                 DcPullPlanner::ComputeTrailCamp(leaderAI, setback, maxDrag);
             pull.camp = trail ? *trail : leader->GetPosition();
+            // A room-clear lane republishes its own camp every tick it is walked
+            // (DcPullActions, "PublishCamp(pull.laneCamp"), so the re-anchor lasted
+            // one tick and the party was recalled to the stranding camp again:
+            // seven rescues in a row on the Emperor's balcony lane
+            // (tr-20261019-183728-12). The lane is spent; keep laneTarget so the
+            // cache resolves this pack to "close on it the old way" instead of
+            // measuring the same lane again.
+            pull.laneOk = false;
             LOG_INFO("playerbots.dungeonclear",
                      "[DC:{}] stranded-recovery: camp re-anchored to ({:.1f},{:.1f},{:.1f}) so "
                      "the rescued members aren't sent back to the old one",

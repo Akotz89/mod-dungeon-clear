@@ -219,6 +219,17 @@ bool DungeonClearMath::ShouldYieldToEngageWalk(bool walkStamped, bool targetAliv
     return now - stampMs <= holdMs;
 }
 
+bool DungeonClearMath::ShouldTagBossFromStandoff(bool walkRefused, bool botMoving, bool inLos,
+                                                 float dist, float maxRange,
+                                                 std::uint32_t refusedSinceMs, std::uint32_t now,
+                                                 std::uint32_t graceMs)
+{
+    if (!walkRefused || botMoving || !inLos || dist > maxRange || refusedSinceMs == 0)
+        return false;
+    // Unsigned difference: a getMSTime() wrap still measures the true elapsed time.
+    return now - refusedSinceMs >= graceMs;
+}
+
 bool DungeonClearMath::ShouldDropTrashSticky(bool haveFresh, bool freshIsSticky,
                                              bool stickyInCombat, float stickyDist,
                                              float freshDist, float margin)

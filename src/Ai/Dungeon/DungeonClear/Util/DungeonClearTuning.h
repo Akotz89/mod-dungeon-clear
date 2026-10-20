@@ -64,6 +64,14 @@ constexpr uint32 DC_LONGROUTE_DEFER_LIMIT = 20;
 // that a genuine stand-down returns the tick to Advance almost at once.
 constexpr uint32 DC_ENGAGE_WALK_YIELD_MS = 1000;
 
+// The boss engage's walk-in refused outright (DungeonClearMath::ShouldTagBossFromStandoff):
+// how long the refusal must persist before the tank tags the boss from where it
+// stands, and how far away a boss in line of sight may be for that. The grace
+// rides out a one-tick refusal while a fresh path is still being built; the range
+// is a pull-spell's reach, so the tag never opens on a boss across the room.
+constexpr uint32 DC_BOSS_STANDOFF_TAG_GRACE_MS = 3000;
+constexpr float DC_BOSS_STANDOFF_TAG_RANGE = 40.0f;
+
 // How much closer the fresh blocking-trash pick must be than a quiet engage-trash
 // sticky before the sticky is dropped for it (DungeonClearMath::ShouldDropTrashSticky).
 // Wide enough that two roughly equidistant corridor mobs keep the sticky and never

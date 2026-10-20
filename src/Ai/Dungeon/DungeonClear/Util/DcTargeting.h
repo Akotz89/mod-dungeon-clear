@@ -315,7 +315,8 @@ public:
     // pull context. RefuseRoomLane records `trash` and every live room-trash unit
     // within `packRadius` of it (its formation — same lanes, same answer).
     // HasUnrefusedRoomTrash: is any live room-trash unit other than `except` still
-    // unrefused, i.e. is there something cleaner to pull first? IsRoomLaneRefused
+    // unrefused, i.e. is there something cleaner to pull first? (The boss-side ring
+    // counts only once nothing outside it is left.) IsRoomLaneRefused
     // is the membership test (false once a kill has dropped the list).
     static void RefuseRoomLane(Player* bot, AiObjectContext* ctx, Unit* trash,
                                float packRadius);
