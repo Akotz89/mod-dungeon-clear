@@ -55,7 +55,7 @@ namespace
             {
                 Frame f;
                 f.t = t;
-                for (Unit const& u : tr.units)
+                for (DcLab::Unit const& u : tr.units)
                 {
                     UnitSample s;
                     s.guid = u.guid;
