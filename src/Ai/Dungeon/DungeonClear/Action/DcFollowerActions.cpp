@@ -2247,8 +2247,14 @@ bool DungeonClearRezPartyAction::Execute(Event /*event*/)
         return false;
 
     char const* rezAction = RezActionNameFor(bot->getClass());
+    // Any other class was elected through the spell it knows (IsRezClass ->
+    // KnownResurrectSpell); cast that one by name, the same lookup the four
+    // stock names go through. Null while that spell is on cooldown, i.e. right
+    // after it landed: the offer branch below needs no spell, so the check for
+    // a missing name waits until after it.
     if (!rezAction)
-        return false;  // election guarantees a rez class; belt-and-braces
+        if (SpellInfo const* known = DcRezRecovery::KnownResurrectSpell(bot))
+            rezAction = known->SpellName[0];
 
     Player* target = ObjectAccessor::FindPlayer(targetGuid);
     if (!target || !target->isDead() || target->GetMapId() != bot->GetMapId())
@@ -2279,6 +2285,9 @@ bool DungeonClearRezPartyAction::Execute(Event /*event*/)
         target->ResurectUsingRequestData();
         return true;
     }
+
+    if (!rezAction)
+        return false;  // a custom class's resurrect on cooldown; else belt-and-braces
 
     // Beyond cast range (or no line of sight): close on the body.
     //

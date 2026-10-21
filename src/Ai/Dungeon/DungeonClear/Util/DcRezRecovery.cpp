@@ -22,7 +22,9 @@
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearTuning.h"
 
 #include <algorithm>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "CellImpl.h"
@@ -36,11 +38,34 @@
 #include "Player.h"
 #include "PlayerbotAI.h"
 #include "Playerbots.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
 #include "Timer.h"
 
 namespace
 {
     using DcRezDecision::Member;
+
+    // Does a dead same-map group member hold a resurrect offer from `p`? A
+    // completed resurrect raises no one: it leaves an offer, which the rez rung
+    // accepts on the corpse's behalf on its next tick (DungeonClearRezPartyAction).
+    // By then a cooldown-gated resurrect is on cooldown, so KnownResurrectSpell no
+    // longer returns it. Without this the caster would drop out of the election
+    // before it accepts, and the body would wait on an offer nobody takes up.
+    bool HoldsResurrectOffer(Player const* p)
+    {
+        Group const* group = p->GetGroup();
+        if (!group)
+            return false;
+        for (GroupReference const* ref = group->GetFirstMember(); ref; ref = ref->next())
+        {
+            Player const* member = ref->GetSource();
+            if (member && member != p && member->GetMapId() == p->GetMapId() &&
+                member->isDead() && member->isResurrectRequestedBy(p->GetGUID()))
+                return true;
+        }
+        return false;
+    }
 
     bool IsRezClass(Player const* p)
     {
@@ -51,9 +76,36 @@ namespace
             case CLASS_SHAMAN:
             case CLASS_DRUID:
                 return true;
-            default:
+            // The other six stock classes cannot know a spell with effect 18 or
+            // 113 (checked against Spell.dbc). Listing them keeps stock literally
+            // unchanged and keeps them off the scan and its lock.
+            case CLASS_WARRIOR:
+            case CLASS_ROGUE:
+            case CLASS_HUNTER:
+            case CLASS_MAGE:
+            case CLASS_WARLOCK:
+            case CLASS_DEATH_KNIGHT:
                 return false;
+            default:
+                // Any other class counts when it knows a resurrect of its own —
+                // custom classes on forks (Conquest of Azeroth's classes 12-32:
+                // Revivify, Phoenix Rebirth, Reclaim Soul, ...). Without this a
+                // party made of them never has a rezzer, and every non-wipe
+                // death ends the run as NoRezzer. `default:` rather than a
+                // `>= MAX_CLASSES` test, since a fork that adds classes has
+                // usually raised MAX_CLASSES.
+                return DcRezRecovery::KnownResurrectSpell(p) != nullptr ||
+                       HoldsResurrectOffer(p);
         }
+    }
+
+    bool IsResurrectSpell(SpellInfo const* info)
+    {
+        for (SpellEffectInfo const& effect : info->Effects)
+            if (effect.Effect == SPELL_EFFECT_RESURRECT ||
+                effect.Effect == SPELL_EFFECT_RESURRECT_NEW)
+                return true;
+        return false;
     }
 
     // The member whose DcRunState owns this run — DEAD OR ALIVE. This used to be a
@@ -249,6 +301,19 @@ namespace
                             botAI, "CHAT\tParty restored \xe2\x80\x94 resuming.");
                 run.rezPendingSinceMs = 0;
                 run.rezAnnounceMs = 0;
+            }
+            // The NoRezzer floor's clocks belong to the episode that just ended,
+            // too. They are otherwise only cleared by a verdict OUTSIDE the
+            // no-rezzer branch, which a party with no living rez class never
+            // produces — so when a corpse is raised by anything other than the rez
+            // rung (a soulstone, a .revive, a human, another module's resurrect),
+            // noRezzerSinceMs stays stamped from that first death, and the NEXT
+            // death reads holdCapped at once and disables the run mid-fight,
+            // skipping the "finishing this fight first" hold.
+            if (mutate)
+            {
+                run.noRezzerSinceMs = 0;
+                run.noRezzerQuietSinceMs = 0;
             }
             return plan;  // None / NoDeaths
         }
@@ -504,6 +569,73 @@ namespace DcRezRecovery
     bool Enabled(Player* bot)
     {
         return DcSettings::GetBool(bot, "PostCombatRez");
+    }
+
+    SpellInfo const* KnownResurrectSpell(Player const* p)
+    {
+        if (!p)
+            return nullptr;
+
+        // Only the SCAN is cached, never its cooldown answer. The scan walks the
+        // whole spell map and runs for every member on every evaluation, so it is
+        // kept for 60s: guid counter -> {candidate ids, getMSTime() of the scan}.
+        // The cooldown is asked on every call. Cached along with the id, a class
+        // whose only resurrect has a cooldown would stay "a rezzer" for up to 60s
+        // after casting it (re-elected into a refusal), and "not a rezzer" for up
+        // to 60s after the cooldown ended.
+        // Shared across map-update threads, hence the lock; one small entry per
+        // player that was ever evaluated.
+        struct Scan
+        {
+            std::vector<uint32> spellIds;  // preference order, see below
+            uint32 scannedMs = 0;
+        };
+        static std::mutex lock;
+        static std::unordered_map<ObjectGuid::LowType, Scan> cache;
+        constexpr uint32 CACHE_MS = 60000;
+
+        auto const firstOffCooldown = [p](std::vector<uint32> const& spellIds)
+            -> SpellInfo const*
+        {
+            for (uint32 spellId : spellIds)
+                if (!p->HasSpellCooldown(spellId))
+                    return sSpellMgr->GetSpellInfo(spellId);
+            return nullptr;
+        };
+
+        uint32 const now = getMSTime();
+        ObjectGuid::LowType const key = p->GetGUID().GetCounter();
+        {
+            std::lock_guard<std::mutex> guard(lock);
+            auto const it = cache.find(key);
+            if (it != cache.end() && getMSTimeDiff(it->second.scannedMs, now) < CACHE_MS)
+                return firstOffCooldown(it->second.spellIds);
+        }
+
+        // Every known, active, non-passive resurrect. The ones without a recovery
+        // time go first, so a plain out-of-combat resurrect wins over a
+        // cooldown-gated battle rez whenever both are ready.
+        Scan scan;
+        scan.scannedMs = now;
+        std::vector<uint32> gated;
+        for (auto const& [spellId, spell] : p->GetSpellMap())
+        {
+            if (!spell || spell->State == PLAYERSPELL_REMOVED || !spell->Active)
+                continue;
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(spellId);
+            if (!info || info->IsPassive() || !IsResurrectSpell(info))
+                continue;
+            if (info->RecoveryTime || info->CategoryRecoveryTime)
+                gated.push_back(spellId);
+            else
+                scan.spellIds.push_back(spellId);
+        }
+        scan.spellIds.insert(scan.spellIds.end(), gated.begin(), gated.end());
+
+        SpellInfo const* const ready = firstOffCooldown(scan.spellIds);
+        std::lock_guard<std::mutex> guard(lock);
+        cache[key] = std::move(scan);
+        return ready;
     }
 
     Plan Evaluate(Player* bot)
@@ -786,6 +918,11 @@ namespace DcRezRecovery
         if (plan.verdict.reason == DcRezDecision::Reason::BlockedWaiting)
             return "Can't resurrect " + plan.targetName +
                    " while the encounter is in progress.";
+        // No rezzer is elected on this hold, so rezzerName is empty (the panel
+        // read " is coming to resurrect X.").
+        if (plan.verdict.reason == DcRezDecision::Reason::NoRezzerInFight)
+            return "No one left can resurrect " + plan.targetName +
+                   " \xe2\x80\x94 finishing this fight first.";
         return plan.rezzerName + " is coming to resurrect " + plan.targetName + ".";
     }
 }
