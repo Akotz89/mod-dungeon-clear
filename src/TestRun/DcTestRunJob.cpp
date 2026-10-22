@@ -217,6 +217,10 @@ void DcTestRunJob::ReassertMaster()
         // toward the invisible driver parked outside the instance.
         botAI->ChangeStrategy("-follow", BOT_STATE_NON_COMBAT);
         botAI->ChangeStrategy("-follow", BOT_STATE_COMBAT);
+        // That rebuild ran while the master was cleared, so stock playerbots left
+        // out the master-gated "avoid aoe". Put it back with the master.
+        if (DC_PB_CONFIG(AutoAvoidAoe, autoAvoidAoe) && !botAI->HasStrategy("avoid aoe", BOT_STATE_COMBAT))
+            botAI->ChangeStrategy("+avoid aoe", BOT_STATE_COMBAT);
     }
 }
 
@@ -1176,15 +1180,25 @@ void DcTestRunJob::TickGrouping()
         // this strip covers the pre-enable / paused window. A GM master sticks:
         // FindNewMaster() only re-resolves a null or bot master.
         Player* gm = FindGm();
+        uint32 avoidAoe = 0;
         for (Slot const& slot : _slots)
             if (Player* bot = ObjectAccessor::FindPlayer(slot.guid))
                 if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot))
                 {
                     if (gm)
                         botAI->SetMaster(gm);
+                    // Roster members log in masterless, so provisioning built their
+                    // strategies without playerbots' master-gated "avoid aoe".
+                    // Rebuild now that the GM is their master. Pool bots have had
+                    // the GM as master since login and get the same set back.
+                    botAI->ResetStrategies();
                     botAI->ChangeStrategy("-follow", BOT_STATE_NON_COMBAT);
                     botAI->ChangeStrategy("-follow", BOT_STATE_COMBAT);
+                    if (botAI->HasStrategy("avoid aoe", BOT_STATE_COMBAT))
+                        ++avoidAoe;
                 }
+        LOG_INFO("playerbots.dungeonclear", "TESTRUN {} grouped: avoid aoe on {}/{} members", RunId(), avoidAoe,
+                 _slots.size());
 
         EnterStage(Stage::Teleporting);
         return;
