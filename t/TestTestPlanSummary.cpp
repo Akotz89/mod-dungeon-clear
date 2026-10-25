@@ -371,12 +371,12 @@ TEST(DcTestPlanSummaryTest, ToJsonlCarriesHeaderAndStats)
                            Failure("r2", "no_progress", "he said \"no\"")});
     std::string const line = ToJsonl(h, s);
 
-    EXPECT_NE(line.find("\"schema\":5"), std::string::npos);
+    EXPECT_NE(line.find("\"schema\":6"), std::string::npos);
     EXPECT_NE(line.find("\"planId\":\"tp-1\""), std::string::npos);
     // The requested block is the campaign's inputs verbatim — including the
     // gear ceiling, without which two campaigns' numbers are not comparable.
     EXPECT_NE(line.find("\"requested\":{\"total\":20,\"concurrent\":5,\"level\":68"
-                        ",\"heroic\":false,\"seedBase\":7,\"gearIlvl\":141,\"gearQuality\":4}"),
+                        ",\"heroic\":false,\"seedBase\":7,\"size\":0,\"gearIlvl\":141,\"gearQuality\":4}"),
               std::string::npos);
     EXPECT_NE(line.find("\"result\":\"completed\""), std::string::npos);
     EXPECT_NE(line.find("\"runs\":{\"launched\":2,\"succeeded\":1,\"failed\":1}"),

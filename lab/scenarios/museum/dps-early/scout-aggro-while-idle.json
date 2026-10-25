@@ -1,0 +1,80 @@
+{
+  "about": "DPS too soon (scout aggro): a pathing Skeletal Waiter in Moroes' Banquet Hall aggroes the tank while the pull FSM is still Idle. Before the fix the phase read Idle, so the party was not passive and stock 'dps assist' put the casters on the Waiter at its spawn; in tr-20260923-171623-1 the released casters were then pulled 49yd through two packs onto a Moroes guest. ee6a971f stamps DcPullContext::scoutAggroMs at the flag (passive hold) and Karazhan's sweep-map gate turns the aggro into an Advanced drag-back. The scenario forces the Waiter onto the tank 2.5s into the run, with the neighbouring Waiters and the 135217 guest formation kept as chain bait. The start is east of the stairwell opening: the old start (-10975,-1948) has no navmesh at z79 and staged the tank at z25 in both runs of lb-20261003-155828-1. Waiter 135310 is not kept: its loop leg passes ~3yd from the start and would scout-aggro on its own. The aggro is injected at 0.3s, before DC's first commit (0.6s in lb-20261003-164447-1), so it lands while the FSM is genuinely Idle.",
+  "schema": 1,
+  "geometry": {
+    "map": 532,
+    "dungeon": "kara",
+    "heroic": false,
+    "region": {
+      "center": [
+        -10975.0,
+        -1925.0,
+        78.9
+      ],
+      "radius": 60.0
+    },
+    "objective": 15687,
+    "objectiveName": "Moroes"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [
+          135308
+        ],
+        "waiters": [
+          135311
+        ],
+        "guests": [
+          135212,
+          135213,
+          135214,
+          135215,
+          135216,
+          135217,
+          135218,
+          135219,
+          135220
+        ]
+      }
+    }
+  },
+  "party": {
+    "comp": "druid-bear,warrior-prot,paladin-holy,priest-disc,hunter-surv,warlock-affli,shaman-ele,rogue-as,mage-arcane,rogue-subtlety",
+    "level": 70,
+    "start": [
+      -10966.0,
+      -1948.0,
+      78.9,
+      1.53
+    ],
+    "react": "fast",
+    "seedTarget": false
+  },
+  "settings": {
+    "PullSetting": 2
+  },
+  "injections": [
+    {
+      "when": {
+        "atMs": 300
+      },
+      "do": {
+        "aggro": "pack:target",
+        "on": "tank"
+      },
+      "sweep": true
+    }
+  ],
+  "goal": {
+    "kill": "pack:target",
+    "timeoutS": 90
+  },
+  "expect": {
+    "oracles": {
+      "O2": "pass",
+      "O7": "pass"
+    },
+    "knownFailure": "fixed:ee6a971f"
+  }
+}

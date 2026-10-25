@@ -17,6 +17,7 @@ class Context:
         self.bridge = None       # bridge.Bridge — worldserver command transport
         self.timelines = None    # routes.runs.TimelineStore
         self.throttle = None     # auth.LoginThrottle
+        self.soak = None         # soak.SoakSupervisor
 
     @property
     def ready(self):
@@ -26,7 +27,7 @@ class Context:
 ctx = Context()
 
 
-def init(cfg, bridge=None, timelines=None, throttle=None):
+def init(cfg, bridge=None, timelines=None, throttle=None, soak=None):
     ctx.cfg = cfg
     if bridge is not None:
         ctx.bridge = bridge
@@ -34,4 +35,6 @@ def init(cfg, bridge=None, timelines=None, throttle=None):
         ctx.timelines = timelines
     if throttle is not None:
         ctx.throttle = throttle
+    if soak is not None:
+        ctx.soak = soak
     return ctx

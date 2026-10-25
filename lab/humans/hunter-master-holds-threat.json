@@ -1,0 +1,15 @@
+{
+  "about": "Issue #18 master: a real-player hunter (with pet) who opens on the pull target as soon as the tank has tagged it, before the drag lands, then keeps shooting whatever is nearest. The steady Steady Shot stream (34120, learned at 62) takes threat off the tank, which a headless run never does.",
+  "steps": [
+    { "when": { "atMs": 0 }, "do": { "follow": "tank", "dist": 6 } },
+    { "when": { "event": "aggroConfirmed", "delayMs": 0 },
+      "do": { "attack": "pullTarget", "spell": 34120, "everyMs": 2000, "range": 30 } },
+    // Leeroy verdicts never enter Returning: open as soon as anything is engaged.
+    { "when": { "predicate": "packEngaged > 0" },
+      "do": { "attack": "pullTarget", "spell": 34120, "everyMs": 2000, "range": 30 } },
+    { "when": { "predicate": "elapsedS > 25" },
+      "do": { "attack": "nearest", "spell": 34120, "everyMs": 2000, "range": 30 } },
+    { "when": { "predicate": "elapsedS > 45" },
+      "do": { "attack": "nearest", "spell": 34120, "everyMs": 2000, "range": 30 } }
+  ]
+}

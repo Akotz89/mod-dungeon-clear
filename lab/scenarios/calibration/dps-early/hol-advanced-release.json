@@ -1,0 +1,85 @@
+{
+  "about": "DPS too soon (Advanced): a Halls of Lightning pack forced through the LOS pull-to-camp maneuver. The party holds passive at camp until the drag lands (O2/O3), then rolls in (O4). Calibration: hol pull #20 of tr-20260922-185337-10 \u2014 predicted 3, observed 3; target 28837#126927.",
+  "schema": 1,
+  "source": {
+    "snapshot": "tr-20260922-185337-10#20",
+    "joined": [
+      126927,
+      126907,
+      126908
+    ],
+    "outsideJoined": [],
+    "predicted": 3,
+    "observed": 3
+  },
+  "geometry": {
+    "map": 602,
+    "dungeon": "hol",
+    "heroic": false,
+    "region": {
+      "center": [
+        1060.1,
+        -176.0,
+        56.7
+      ],
+      "radius": 60.0
+    },
+    "objective": 28923,
+    "objectiveName": "Loken"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [
+          126907,
+          126908,
+          126927
+        ],
+        "near": [
+          126911,
+          126912,
+          126913,
+          126920,
+          126928,
+          126929,
+          126930,
+          126931,
+          126932,
+          126935,
+          126936,
+          126937,
+          126938,
+          126944
+        ]
+      }
+    }
+  },
+  "party": {
+    "comp": "druid-bear,priest-disc,warrior-arms,mage-arcane,deathknight-unholy",
+    "level": 80,
+    "start": [
+      1071.0,
+      -209.4,
+      61.2,
+      1.886
+    ],
+    "react": "fast",
+    "seedTarget": true
+  },
+  "settings": {
+    "PullSetting": 2,
+    "PullForceAdvanced": 1
+  },
+  "goal": {
+    "kill": "pack:target",
+    "timeoutS": 90
+  },
+  "expect": {
+    "oracles": {
+      "O2": "pass",
+      "O3": "pass",
+      "O4": "pass",
+      "O6": "pass"
+    }
+  }
+}

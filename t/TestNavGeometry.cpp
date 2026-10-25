@@ -645,9 +645,10 @@ TEST(DcPolylineAvoidTest, StockadeSweepReachStopsAtTheDeepCellBank)
 
 #include "Ai/Dungeon/DungeonClear/Data/RouteSweepRegistry.h"
 
-TEST(DcRouteSweepRegistryTest, OnlyTheStockadeSweepsForNow)
+TEST(DcRouteSweepRegistryTest, OnlyTheStockadeAndKarazhanSweep)
 {
     EXPECT_TRUE(RouteSweepRegistry::SweepsRoute(34));    // The Stockade
+    EXPECT_TRUE(RouteSweepRegistry::SweepsRoute(532));   // Karazhan (ballroom / banquet hall)
 
     // Every other dungeon keeps the historical corridor-band pick AND the
     // untouched Dynamic verdict. Forcing Advanced reshapes how every fight in a
@@ -658,4 +659,34 @@ TEST(DcRouteSweepRegistryTest, OnlyTheStockadeSweepsForNow)
     EXPECT_FALSE(RouteSweepRegistry::SweepsRoute(109));  // Sunken Temple
     EXPECT_FALSE(RouteSweepRegistry::SweepsRoute(585));  // Magisters' Terrace
     EXPECT_FALSE(RouteSweepRegistry::SweepsRoute(0));    // not a dungeon at all
+}
+
+// The engage handoff and direct pursuit both stand down while an anchored hop
+// between the route cursor and the boss anchor is still out of reach
+// (tr-20260923-235223-3: pursuit bee-lined past Attumen's west-mouth route).
+TEST(DcAnchoredHopsTest, PendingOnlyForAnchoredHopsAheadOfTheCursor)
+{
+    auto seg = [](float x, bool anchored)
+    {
+        PathSegment s;
+        s.ex = x;
+        s.anchored = anchored;
+        s.arriveRadius = 6.0f;
+        return s;
+    };
+    // 0: anchored at x=0, 1: plain at 50, 2: anchored at 100, 3: the boss anchor at 200.
+    std::vector<PathSegment> const segs = { seg(0.0f, true), seg(50.0f, false),
+                                            seg(100.0f, true), seg(200.0f, true) };
+    auto from = [](float botX) { return [botX](PathSegment const& s) { return std::fabs(s.ex - botX); }; };
+
+    // Standing on the boss with the anchored hop at 100 still ahead: pending.
+    EXPECT_TRUE(DcEngageGeometry::AnchoredHopsPendingWith(segs, 1, from(200.0f)));
+    // At the anchored hop: nothing pending (the boss anchor itself never counts).
+    EXPECT_FALSE(DcEngageGeometry::AnchoredHopsPendingWith(segs, 1, from(100.0f)));
+    // Cursor past every intermediate anchor: nothing pending wherever the bot is.
+    EXPECT_FALSE(DcEngageGeometry::AnchoredHopsPendingWith(segs, 3, from(0.0f)));
+    // Anchors behind the cursor don't gate.
+    EXPECT_FALSE(DcEngageGeometry::AnchoredHopsPendingWith(segs, 1, from(103.0f)));
+    // No route: nothing pending.
+    EXPECT_FALSE(DcEngageGeometry::AnchoredHopsPendingWith({}, 0, from(0.0f)));
 }

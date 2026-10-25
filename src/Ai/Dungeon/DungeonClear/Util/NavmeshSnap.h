@@ -29,10 +29,11 @@ public:
     };
 
     // Snap (x, y, z) to the nearest walkable polygon on `map`. Searches a
-    // horizontal box of `maxRadius` yards and a vertical extent of 10yd.
-    // One retry at 2× radius if the first search misses. Returns ok=false
-    // if both attempts fail.
-    static Result Snap(Map const* map, float x, float y, float z, float maxRadius = 30.0f);
+    // horizontal box of `maxRadius` yards and a vertical extent of `vertExtent`
+    // (10yd unless a caller needs a column search). One retry at 2× radius if
+    // the first search misses. Returns ok=false if both attempts fail.
+    static Result Snap(Map const* map, float x, float y, float z, float maxRadius = 30.0f,
+                       float vertExtent = 10.0f);
 
     // Convenience overload — uses the bot's current map.
     static Result Snap(Player const* bot, float x, float y, float z, float maxRadius = 30.0f);

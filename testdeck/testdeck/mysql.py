@@ -106,7 +106,7 @@ def reset_creds_cache():
 
 
 def bot_account_prefix(cfg=None):
-    """The playerbots random-bot account prefix (AiPlayerbot.RandomBotAccountPrefix).
+    """The playerbots random-bot account prefix (Playerbots.RandomBotAccountPrefix).
 
     Two consumers, and they must agree: the Characters card tags a logged-in
     character as a BOT by it, and the roster picker excludes those accounts
@@ -121,7 +121,7 @@ def bot_account_prefix(cfg=None):
     cfg = cfg or ctx.cfg
     prefix = cfg.bot_account_prefix_default
     try:
-        m = re.findall(r'^\s*AiPlayerbot\.RandomBotAccountPrefix\s*=\s*"?([^"\s]+)"?',
+        m = re.findall(r'^\s*(?:Playerbots|AiPlayerbot)\.RandomBotAccountPrefix\s*=\s*"?([^"\s]+)"?',
                        cfg.playerbots_conf.read_text(), re.M)
         if m and re.fullmatch(r"[A-Za-z0-9_]{1,24}", m[-1]):
             prefix = m[-1]
@@ -283,3 +283,45 @@ async def mysql_query(which, sql, cfg=None):
     rows = [line.split("\t") for line in
             out.decode("utf-8", "replace").splitlines()]
     return rows
+
+
+def playerbots_db_name(cfg=None):
+    """The playerbots database's name from PlayerbotsDatabaseInfo in
+    playerbots.conf — but only when it sits on the same server as the
+    characters database, so one connection can join the two. None otherwise."""
+    cfg = cfg or ctx.cfg
+    chars = parse_db_creds(cfg).get("characters")
+    if not chars or not cfg.playerbots_conf:
+        return None
+    try:
+        text = cfg.playerbots_conf.read_text()
+    except OSError:
+        return None
+    m = re.findall(r'^\s*PlayerbotsDatabaseInfo\s*=\s*"([^"]*)"', text, re.M)
+    if not m:
+        return None
+    parts = m[-1].split(";")
+    if len(parts) < 5 or (parts[0], parts[1]) != (chars["host"], chars["port"]):
+        return None
+    return parts[4]
+
+
+async def addclass_pool_size(cfg=None):
+    """How many characters the playerbots addclass pool holds (accounts of
+    playerbots_account_type 2) — the characters every test run's party is
+    drawn from. None when it cannot be counted."""
+    db = playerbots_db_name(cfg)
+    if not db:
+        return None
+    try:
+        rows = await mysql_query(
+            "characters",
+            "SELECT COUNT(*) FROM characters c JOIN "
+            f"{sql_ident(db)}.playerbots_account_type t ON t.account_id = c.account "
+            "WHERE t.account_type = 2", cfg)
+    except RuntimeError:
+        return None
+    try:
+        return int(rows[0][0]) if rows else None
+    except (ValueError, IndexError, TypeError):
+        return None

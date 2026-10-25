@@ -29,6 +29,15 @@ namespace DcRun
     {
         return Of(botAI->GetAiObjectContext());
     }
+
+    // Is this a raid run? Reads the caller's own run state — meaningful on the
+    // LEADER's context (followers' copies stay at defaults, like `enabled`).
+    // Cross-bot callers resolve the leader first, exactly as they do for the
+    // enabled/paused reads.
+    inline bool IsRaid(AiObjectContext* ctx)
+    {
+        return Of(ctx).raidRun;
+    }
 }
 
 #endif  // _PLAYERBOT_DCRUN_H

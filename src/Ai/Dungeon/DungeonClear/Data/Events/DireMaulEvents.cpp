@@ -396,11 +396,32 @@ void RegisterDireMaulRoster(std::vector<BossRosterPatch>& t)
     // pylons) distinct from any real DBC kill-bit; objective completion
     // keys on the anchor latch (eventId), never on encounterIndex.
     //
+    // NORTH — CHO'RUSH THE OBSERVER (14324, DBC bit 5) is SKIPPED. He carries a
+    // real DungeonEncounter row, so BossSpawnIndex derives him as a boss, but on
+    // this core he is never killable: his SmartAI (entryorguid 14324, id 19)
+    // runs SMART_EVENT_UPDATE once 5s after spawn with NOT_REPEATABLE +
+    // DONT_RESET and sets faction 35 — friendly to everyone, permanently. (The
+    // On-Data-Set rows 16/18, the retail "surrender when King Gordok dies"
+    // tribute mechanic, are redundant behind it.) Nothing the party does can
+    // flip him back to attackable, so his kill-bit can never be set.
+    //
+    // Left in the roster he is the LAST anchor the North clear can reach — the
+    // DBC order puts him on bit 5, before King Gordok on bit 38 — and the party
+    // parks on him forever: run tr-20260816-061103-16 killed all six real North
+    // bosses (King Gordok at 19:44) and then sat "Holding near Cho'Rush the
+    // Observer" until the 60-minute wall-clock abort. Same shape as Maraudon's
+    // Rotgrip (MaraudonEvents.cpp): an anchor the clear can never satisfy
+    // deadlocks the run, so drop it rather than leave the fallback to chew on
+    // it. He still fights as part of King Gordok's room if he ever aggroes;
+    // only the boss ANCHOR goes away. He is also dropped from the North wing
+    // list in RegisterDireMaulWings below.
+    //
     // All synthetic objective entries are added to their wing's list in
     // DungeonWingRegistry so wing-filtering keeps them.
     {
         BossRosterPatch p;
         p.mapId = 429;
+        p.remove = {14324};  // North — Cho'Rush the Observer (permanently friendly)
         p.reorder = {
             // East
             { 11490, 10 },  // Zevrim Thornhoof
@@ -546,7 +567,7 @@ void RegisterDireMaulWings(std::unordered_map<uint32, DungeonWingLayout>& store)
             // entry, not a creature) — keep it in-wing so wing-filtering
             // doesn't drop it. See BossRosterRegistry map-429 patch.
             BossRosterRegistry::ObjectiveEntry(1),
-        }},
+        }, "dm-east"},
         {"Dire Maul (West)", {
             11489,  // Tendris Warpwood
             11488,  // Illyanna Ravenoak
@@ -572,15 +593,18 @@ void RegisterDireMaulWings(std::unordered_map<uint32, DungeonWingLayout>& store)
             BossRosterRegistry::ObjectiveEntry(12),  // mid hall (E)
             BossRosterRegistry::ObjectiveEntry(13),  // approach (W)
             BossRosterRegistry::ObjectiveEntry(14),  // approach (E)
-        }},
+        }, "dm-west"},
         {"Dire Maul (North)", {
             14326,  // Guard Mol'dar
             14322,  // Stomper Kreeg
             14321,  // Guard Fengus
             14323,  // Guard Slip'kik
             14325,  // Captain Kromcrush
-            14324,  // Cho'Rush the Observer
+            // Cho'Rush the Observer (14324) is deliberately absent — the
+            // map-429 roster patch removes him (permanently friendly, see
+            // RegisterDireMaulRoster above), so there is no anchor to keep
+            // in-wing.
             11501,  // King Gordok
-        }},
+        }, "dm-north"},
     }};
 }

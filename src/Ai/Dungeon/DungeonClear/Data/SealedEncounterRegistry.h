@@ -68,6 +68,11 @@ struct SealedEncounterRow
     // which matters, because a radius the followers cannot reach would hold the tank
     // at the door until the muster timeout instead of gathering anybody.
     float musterSpread{0.0f};
+
+    // Optional floor band [minZ, maxZ] for the 3D InSealedRoom. A room stacked
+    // over or under other walkable floors needs one, or a member one floor down
+    // reads as "inside" and releases the muster. Both 0 => no band (2D volume).
+    float minZ{0.0f}, maxZ{0.0f};
 };
 
 // How long the muster may hold the engage before it fires anyway, in ms.
@@ -89,6 +94,9 @@ public:
     // Is (x,y) inside the row's sealed volume — i.e. on the locked-IN side?
     // Pure, so it is unit-testable without a world.
     static bool InSealedRoom(SealedEncounterRow const& row, float x, float y);
+
+    // The same, plus the row's floor band when it has one. The muster uses this.
+    static bool InSealedRoom(SealedEncounterRow const& row, float x, float y, float z);
 
     // Are the two gates live — is a bot at (x,y,z) close enough to the boss at
     // (bx,by,bz) for this row's muster/clump to apply? Pure, same reason.

@@ -6,6 +6,8 @@
 #ifndef _PLAYERBOT_DCCOMBATFLAG_H
 #define _PLAYERBOT_DCCOMBATFLAG_H
 
+#include <limits>
+
 class AiObjectContext;
 class Player;
 
@@ -47,8 +49,17 @@ namespace DcCombatFlag
     // member (melee and casters alike, since CreatureAI::AttackStart sets it),
     // and the victim covers the member attacking something that is not hitting
     // back yet.
+    //
     // Is THIS player actually fighting: it has a victim, or something is
-    // attacking it. The one definition of "engaged" the module shares.
+    // attacking it — either one WITHIN DC_ENGAGEMENT_RADIUS. The one definition
+    // of "engaged" the module shares.
+    //
+    // The radius is not a fight radius, it is the sanity bound that keeps a
+    // combat reference from outliving the geometry it was made in. Nothing
+    // clears the attacker set or the victim pointer when a one-way relocation
+    // puts hundreds of yards of unwalkable map between the two, and an
+    // unqualified `victim || attackers` then reports a fight for the rest of the
+    // run. See DC_ENGAGEMENT_RADIUS for what that cost.
     bool IsEngaged(Player* p);
 
     bool AnyPartyEngagement(Player* bot);
@@ -68,15 +79,34 @@ namespace DcCombatFlag
     struct HolderScan
     {
         bool  opaque = false;
-        bool  found = false;        // >=1 live, same-map, non-evading, reachable
-                                    // holder its own AI allows to attack us
+        bool  found = false;        // >=1 live, same-map, non-evading, WITHIN
+                                    // DC_ENGAGEMENT_RADIUS and reachable holder
+                                    // its own AI allows to attack us
         float nearestDist = 0.0f;   // distance to the closest such holder
+        // The closest such holder the player can SEE (LOS), or +inf when none.
+        // A holder on the floor below is reachable and in range by the numbers,
+        // but stock AttackersValue drops anything out of LOS, so nothing in the
+        // party will ever fight it from here — the engage-range shortcut in
+        // DungeonClearMath::IsHolderProsecutingFight must not count it.
+        float nearestSeenDist = std::numeric_limits<float>::infinity();
     };
 
     // The one walk of a player's PvE combat refs, shared by the phantom-combat
     // hatch (which wants opaque || found) and by IsHeldByLiveEnemy (which does
     // not). Costs a pathfind per reference — call it behind the cheap reads.
     HolderScan ScanCombatHolders(Player* p);
+
+    // Is anything attacking this player that the player can actually SEE?
+    //
+    // getAttackers() alone is the wrong "a real fight is on" test for the phantom
+    // hatch: stock AttackersValue::IsValidTarget requires LOS, so an attacker out
+    // of sight is invisible to every playerbots combat action. Live in
+    // tr-20261018-101829-1: General Angerforge's Reservists spawn at random
+    // +/-14yd offsets with no ground check, two dropped ~11yd off his balcony,
+    // and from the floor below kept the tank targeted (and so in getAttackers())
+    // for the full 900s no-progress window while his engine read `no attackers`
+    // every tick. Counting them as a fight kept the hatch shut forever.
+    bool HasSeenAttacker(Player* p);
 
     // Is a live enemy still on this player, close enough to keep swinging?
     //
@@ -98,6 +128,14 @@ namespace DcCombatFlag
     // once the flag has had no engagement behind it continuously for
     // DC_FLAGGED_NO_ENGAGE_GRACE_MS. False while a real fight owns the bot.
     bool MayDrive(Player* bot, AiObjectContext* context);
+
+    // MayDrive for the CONDITIONAL-EVENT rung, which must not be shut down by a
+    // fight when the event it would drive opted in to being steered under fire.
+    // Pass DungeonEvent::drivesInCombat. See DungeonClearMath::EventDueGateOpen
+    // for the hole this closes — a combat-FLAGGED bot with an empty attacker set
+    // runs the NON-combat engine, so the combat-engine copy of the rung (which
+    // carries the same exemption) never gets a tick to apply it.
+    bool MayDriveEvent(Player* bot, AiObjectContext* context, bool drivesInCombat);
 
     // Flagged in combat with no fight behind it (past the same grace). The rest
     // gates' question: while this holds, eating and drinking are impossible and

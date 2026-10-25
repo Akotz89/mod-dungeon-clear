@@ -8,6 +8,9 @@
 # in-party chat keywords (`dc on`, `dungeon clear on`, …) — no config needed.
 # The settings below tune behaviour, debugging, and pathing.
 #
+# TO TURN THE WHOLE MODULE OFF without rebuilding, set DungeonClear.Enable = 0
+# (MODULE MASTER SWITCH, first section below) and restart the worldserver.
+#
 # PER-PLAYER OVERRIDES: the GENERAL SETTINGS below are the server-wide DEFAULT.
 # Players running the DungeonClear companion addon can override any of them for
 # the duration of their own dungeon run (the override is keyed to their group's
@@ -33,6 +36,46 @@
 # set for their run is never overruled by a heroic default. Every key that ships
 # with a heroic default is listed in the HEROIC DEFAULTS section at the end of
 # the general settings; writing a "<key>.Heroic" line replaces it.
+#
+# RAID MAPS: the same mechanism exists one layer up for raid runs. A setting can
+# be given a raid value by appending ".Raid" to the key; it applies on any raid
+# map (any raid difficulty) and outranks the heroic layer. The built-in raid
+# defaults are listed in the RAID DEFAULTS section after the heroic one. The
+# full order: per-player override -> "<key>.Raid" (raid maps) -> built-in raid
+# default -> "<key>.Heroic" (heroic-tier maps) -> built-in heroic default ->
+# "<key>" -> built-in default.
+
+########################################
+# MODULE MASTER SWITCH
+########################################
+
+#
+#    DungeonClear.Enable
+#        1 (default): mod-dungeon-clear is active.
+#        0: the module stays compiled and linked but is COMPLETELY INERT. It
+#        registers no strategies, actions, triggers or values with
+#        mod-playerbots, so no bot's AI engine can even name one; no bot is ever
+#        given the "dungeon clear" / "dungeon clear combat" strategies; every
+#        `.dc` command and companion-addon button answers "module is disabled"
+#        instead of acting; and every hook the module owns (pull brake,
+#        spectator camera, the per-tick reaper, the `.dc test` harness, the two
+#        core-bug workaround scripts, and the self-bot loot-roll override) does
+#        nothing. Bots behave exactly as they would with the module absent.
+#
+#        Use this when you want the code present — ready to switch on without a
+#        rebuild — but the behaviour off.
+#
+#        READ ONCE AT STARTUP. Registration into mod-playerbots' shared contexts
+#        is a one-way append that already-built bots hold by reference, so it
+#        cannot be undone (or added) live: changing this value and running
+#        `.reload config` logs a warning and changes nothing. Restart the
+#        worldserver for a new value to take effect. Every OTHER setting in this
+#        file is still honoured live on `.reload config`.
+#
+#        Default: 1
+#
+
+DungeonClear.Enable = 1
 
 ########################################
 # GENERAL SETTINGS  (per-player overridable — see note above)
@@ -113,7 +156,7 @@ DungeonClear.LootMinQuality = 0
 #
 #        Third improvement: bots roll immediately. Stock playerbots polls for
 #        pending rolls on a randomized timer (a 1-in-3 chance checked every
-#        AiPlayerbot.RepeatDelay), so bots often stare at an open roll window
+#        Playerbots.RepeatDelay), so bots often stare at an open roll window
 #        for many seconds before voting. With this on, a bot casts its
 #        Need/Greed/Pass vote on the next AI tick after the window opens.
 #            0 = stock playerbots rolling (default)
@@ -131,6 +174,8 @@ DungeonClear.BetterLootRolling = 0
 #        creature corpses. Keeps the run from detouring to — and getting stuck
 #        navigating around — chests the party doesn't need. Disable to restore
 #        the old behaviour of looting reachable chests along the route.
+#        Encounter chests — the ones a boss's loot spawns in, e.g. BRD's
+#        Chest of the Seven — are always looted either way.
 #            0 = loot chests too      1 = ignore chests (corpses only)
 #
 #        Default: 1 (ignore chests)
@@ -159,11 +204,11 @@ DungeonClear.DoorBlockedTimeout = 5
 #
 #    DungeonClear.RestHealthPct
 #        Health % the party tops up to between pulls while clearing, overriding
-#        mod-playerbots' AiPlayerbot.AlmostFullHealth for the run. Bots eat up to
+#        mod-playerbots' Playerbots.AlmostFullHealth for the run. Bots eat up to
 #        this value and the tank holds the advance until everyone reaches it, so
 #        a group can rest harder (or pull faster) than the server-wide default
 #        without touching the playerbots config they can't see.
-#            0 = inherit AiPlayerbot.AlmostFullHealth (no override)
+#            0 = inherit Playerbots.AlmostFullHealth (no override)
 #            1-100 = eat/wait up to this health %
 #
 #        Default: 0 (inherit)
@@ -174,9 +219,9 @@ DungeonClear.RestHealthPct = 0
 #
 #    DungeonClear.RestManaPct
 #        Mana % the party tops up to between pulls while clearing, overriding
-#        mod-playerbots' AiPlayerbot.HighMana for the run. Bots drink up to this
+#        mod-playerbots' Playerbots.HighMana for the run. Bots drink up to this
 #        value and the tank holds the advance until every mana user reaches it.
-#            0 = inherit AiPlayerbot.HighMana (no override)
+#            0 = inherit Playerbots.HighMana (no override)
 #            1-100 = drink/wait up to this mana %
 #
 #        Default: 0 (inherit)
@@ -306,6 +351,35 @@ DungeonClear.StrandedRecovery = 1
 #
 
 DungeonClear.StrandedRecoveryNoProgressSecs = 60
+
+#
+#    DungeonClear.UnreachableCombatPurgeSecs
+#        The other half of "the run has frozen". Not a party member stranded out
+#        of range, but a MOB stranded out of REACH that has the party in combat
+#        and can never be killed, never be reached, and never evade — Gundrak's
+#        Drakkari Raiders are the case this exists for: SmartAI ejects three of
+#        them off a sixteen-yard drop into water, mid-charge, and has them set
+#        their home position where they land. Instanced creatures never leash and
+#        a re-homed one has nowhere to evade back to, so nothing in the core ever
+#        ends that fight: the party stays flagged, the pull FSM never retires its
+#        phase, nobody can eat or drink, and the clear stops where it stands.
+#
+#        Seconds the run must show NO progress before such a holder's combat and
+#        threat are dropped and its entry is barred from target selection for the
+#        same window. This clock is COMBAT-BLIND, unlike the stranded-recovery one
+#        above — the unendable fight is the thing being detected, so a clock that
+#        combat re-armed could never fire.
+#
+#        Only creatures hand-listed in DcCombatPurgeRegistry can ever be dropped
+#        (currently one row: Gundrak's Drakkari Raider), so this window does not
+#        decide WHAT gets purged — only how long a deadlock runs before the
+#        failsafe answers it.
+#            0 = off (an unreachable holder freezes the run until you intervene)
+#
+#        Default: 60 (1 minute)
+#
+
+DungeonClear.UnreachableCombatPurgeSecs = 60
 
 #
 #    DungeonClear.WaitAtBoss
@@ -495,7 +569,8 @@ DungeonClear.ClearRoomBeforeBoss = 1
 #        ClearRoomBeforeBoss) without the remaining count dropping, before it
 #        gives up and pulls the boss anyway (noting it in chat). Stops a livelock
 #        on an unreachable straggler or a respawn that keeps the count flat. Any
-#        real progress re-arms the clock.
+#        real progress re-arms the clock. Time the party spends fighting,
+#        resting, looting or regrouping between pulls does not count.
 #            0 = never give up (not recommended — can livelock)
 #
 #        Default: 30
@@ -612,8 +687,16 @@ Appender.DungeonClear=2,4,0,DungeonClear.log
 #        4 (Info, default): milestones only. Raise to 5 (Debug) or 6 (Trace)
 #        to diagnose pathfinding/stall issues.
 #
+#        The appender list is DungeonClear only — the file, not the worldserver
+#        console. A clear logs a handful of Info lines per pack per bot (first
+#        contact, camp marked, party released), which is exactly what you want
+#        in a log you grep after the fact and exactly what you do not want
+#        scrolling the console of a live server. Add `Console` to the list below
+#        if you are actively watching a run. Real errors are unaffected: the
+#        module's error paths log to `playerbots`, which keeps its own routing.
+#
 
-Logger.playerbots.dungeonclear=4,Console DungeonClear
+Logger.playerbots.dungeonclear=4,DungeonClear
 
 #
 #    Advanced-pull sub-channel (playerbots.dungeonclear.pull).
@@ -631,7 +714,7 @@ Logger.playerbots.dungeonclear=4,Console DungeonClear
 #        6 = Trace (per-tick run-in / return / hold-at-camp movement).
 #
 #    Appender.DungeonClearPull=2,5,0,DungeonClearPull.log
-#    Logger.playerbots.dungeonclear.pull=5,Console DungeonClearPull
+#    Logger.playerbots.dungeonclear.pull=5,DungeonClearPull
 
 ########################################
 # ADVANCED PATHING SETTINGS
@@ -1452,6 +1535,59 @@ DungeonClear.AllowAutonomousBotRuns = 0
 # DungeonClear.SmartRestHealerManaPct.Heroic = 60
 
 ###############################################################################
+# RAID DEFAULTS
+#
+#   Every key below ships with a different built-in default while the run is on
+#   a RAID map (any raid difficulty). Same contract as the heroic section: the
+#   lines are commented out and show the value the module already uses.
+#
+#   Why these and not others: the raid profile is only the numbers that must
+#   scale with 10-40 members. Behaviour (routing, pulls, doors, events) is
+#   shared with dungeons; the boss fights themselves are owned by the
+#   playerbots raid strategies while dungeon-clear stands down.
+###############################################################################
+
+#    A 25-40 member column is legitimately longer than a 5-man file; the 25yd
+#    dungeon spread would hold the advance behind every straggler. (The clamp
+#    ceiling for overrides is 120.)
+# DungeonClear.PartyMaxSpread.Raid = 40
+
+#    Raid-only settings (no ".Raid" suffix — these keys are consulted only on
+#    raid maps in the first place).
+#
+#    Quorum for raid trash-flow readiness: the run advances when every tank and
+#    healer meets the readiness bars and at least this percentage of living
+#    members does. Boss pulls still gate at 100/100 with everyone staged —
+#    that stricter bar lives in the pre-boss muster below, under its budgets.
+# DungeonClear.RaidReadyQuorumPct = 90
+#
+#    Fraction of the raid that must be dead (nobody still fighting) for the
+#    fight to count as a WIPE (-> revive at the entrance and continue).
+# DungeonClear.RaidWipeFractionPct = 90
+#
+#    Pre-boss muster budgets: how long the raid may spend topping off at the
+#    staging point, and how long a ForceRebuff round may run, before the muster
+#    advances with what it has (it announces the shortfall; it never deadlocks).
+# DungeonClear.RaidMusterRestTimeoutSecs = 35
+# DungeonClear.RaidMusterRebuffTimeoutSecs = 25
+#
+#    Hard ceiling on the WHOLE muster, measured from the tick it arms for a
+#    boss. When it expires the muster releases the pull from whatever phase it
+#    is in and cancels the open rebuff windows, so buffing never bleeds into
+#    the walk-in or the fight. The two budgets above are authored to sum to it.
+#    This is the real answer to a lone priest single-target buffing thirty-nine
+#    people: the raid never waits out the buff round, it waits out the budget.
+#    At a raid boss the muster IS the pull-readiness gate (it replaces the
+#    between-pulls rest/spread check there), so this ceiling is the longest the
+#    raid can stand in front of a boss doing nothing. Lower it if that is still
+#    longer than you want to watch.
+# DungeonClear.RaidMusterTotalTimeoutSecs = 60
+
+#    Many more corpses to walk between and drink for after a bad fight — the
+#    5-man budget ends winnable raid recoveries early.
+# DungeonClear.PostCombatRezTimeoutSecs.Raid = 180
+
+###############################################################################
 # `.dc test` — AUTOMATED DUNGEON TEST RUNS
 #
 #   Server-only watchdog limits for the test-run harness (a GM command that
@@ -1498,19 +1634,20 @@ DungeonClear.TestRun.NoProgressS = 600
 #        Hard wall-clock cap on a single test run (setup excluded); exceeding
 #        it fails the run as overall_timeout.
 #
-#        Default: 3600
+#        Default: 7200 (2 hours)
 #
 
-DungeonClear.TestRun.OverallTimeoutS = 3600
+DungeonClear.TestRun.OverallTimeoutS = 7200
 
 #
 #    DungeonClear.TestRun.MaxConcurrent
 #        How many `.dc test` runs may be active at once. Each run fields its own
-#        5-bot party (its own instance, watchdog and dashboard card), so N runs
-#        add up to N*5 bots against AiPlayerbot.MaxAddedBots — a start that would
-#        cross that cap is refused up front with an explicit message. Starting
-#        past this cap is refused with "max concurrent test runs reached".
-#        0 = unlimited (bounded only by MaxAddedBots and the addclass pool),
+#        5-bot party (its own instance, watchdog and dashboard card), drawn from
+#        the playerbots addclass pool. Harness bots do NOT count against
+#        Playerbots.MaxAddedBots — that stays a limit on players' own
+#        `.playerbot add`. Starting past this cap is refused with "max
+#        concurrent test runs reached".
+#        0 = unlimited (bounded only by the addclass pool and the machine),
 #        which is the default: the machine's real limits already refuse an
 #        over-budget start by name, so a second harness-local ceiling only ever
 #        refused runs the box could have served. Set a positive number to put
@@ -1527,12 +1664,25 @@ DungeonClear.TestRun.MaxConcurrent = 0
 #        keeps up to its own `concurrent=` test runs in flight until `total=`
 #        runs have completed, then writes one summary line to
 #        dc_testplans.jsonl. 0 = unlimited (the default); the runs a plan
-#        launches are still gated by MaxConcurrent and the bot budget.
+#        launches are still gated by MaxConcurrent and the addclass pool.
 #
 #        Default: 0 (unlimited)
 #
 
 DungeonClear.TestRun.MaxPlans = 0
+
+#
+#    DungeonClear.Lab.MaxParties
+#        Pull Lab: how many warm lab parties run scenarios in parallel
+#        (`.dc lab run|batch`). Each is a normal 5-bot test-run party in its own
+#        instance that re-stages between scenarios instead of re-provisioning,
+#        so it also counts against TestRun.MaxConcurrent and draws from the
+#        addclass pool. Range 1-20.
+#
+#        Default: 15
+#
+
+DungeonClear.Lab.MaxParties = 15
 
 #
 #    DungeonClear.TestRun.Plan.MaxTotal
@@ -1548,8 +1698,8 @@ DungeonClear.TestRun.Plan.MaxTotal = 0
 #
 #    DungeonClear.TestRun.Plan.BackoffMs
 #        How long a plan waits before retrying after a transient launch
-#        rejection (global run cap hit, MaxAddedBots budget, addclass pool
-#        exhausted, issuing GM briefly offline).
+#        rejection (global run cap hit, addclass pool exhausted, issuing GM
+#        briefly offline).
 #
 #        Default: 5000
 #
@@ -1568,6 +1718,34 @@ DungeonClear.TestRun.Plan.BackoffMs = 5000
 #
 
 DungeonClear.TestRun.Plan.DriverWaitMs = 120000
+
+#
+#    DungeonClear.TestRun.Plan.CheckpointMin
+#        An endless plan (`.dc test plan start pool=... total=0`, the Test
+#        Deck's Continuous mode) only writes its summary when stopped, so it
+#        also appends a checkpoint line ("checkpoint": true) to
+#        dc_testplans.jsonl every this many minutes. A worldserver crash then
+#        loses at most one interval of the plan's aggregate stats.
+#        0 = no checkpoints.
+#
+#        Default: 15
+#
+
+DungeonClear.TestRun.Plan.CheckpointMin = 15
+
+#
+#    DungeonClear.TestRun.Plan.ResetGuardMin
+#        The daily global instance reset (Instance.ResetTimeHour, UTC) repops
+#        every heroic and raid party mid-run. Within this many minutes before
+#        it, a pool plan stops launching its heroic and raid entries (normal
+#        dungeons keep running); with nothing else in the pool the plan holds
+#        until two minutes after the reset. Single-dungeon plans are not
+#        guarded. 0 = no guard.
+#
+#        Default: 45
+#
+
+DungeonClear.TestRun.Plan.ResetGuardMin = 45
 
 #
 #    DungeonClear.TestRun.DriverCharacter
@@ -1599,7 +1777,7 @@ DungeonClear.TestRun.DriverCharacter = "Dcdriver"
 #        Nothing needs a GM level here: the driver elevates its own session
 #        when it comes online, so the account stays a plain player account.
 #
-#        It must NOT be one of AiPlayerbot.RandomBotAccounts and must not be
+#        It must NOT be one of Playerbots.RandomBotAccounts and must not be
 #        an addclass pool account — the bot rotation manages those characters
 #        and would log the driver out from under a live run. A random-bot
 #        account is refused rather than used.
@@ -1611,3 +1789,282 @@ DungeonClear.TestRun.DriverCharacter = "Dcdriver"
 #
 
 DungeonClear.TestRun.DriverAccount = "dcdriver"
+
+###############################################################################
+#
+#   RDF INSTANT QUEUE FILL (DungeonClear.DungeonQueueFill.*)
+#
+#   When a real player uses the Dungeon Finder, provision bots with the roles
+#   the party is missing and queue them for the same dungeon through the same
+#   queue. Stock LFG matchmaking then pairs them: the player gets the ordinary
+#   "Dungeon Found" popup and accepts it themselves, and stock MakeNewGroup
+#   builds the LFG group, applies the Dungeon Finder buff and teleports
+#   everyone in. Nothing about the client flow changes — no addon, no command.
+#
+#   This changes realm-wide behaviour, so it is OFF by default.
+#
+#   The battleground counterpart is DungeonClear.BgQueueFill.* below — a
+#   separate feature with its own switch.
+#
+
+#
+#    DungeonClear.DungeonQueueFill.Enable
+#        Master switch. 0 = the dungeon finder behaves exactly as it does
+#        without this module.
+#
+#        Turning it off while fills are in flight releases them (the bots
+#        leave the queue and log out); it never strands a queued bot.
+#
+#        Default: 0 (off)
+#
+
+DungeonClear.DungeonQueueFill.Enable = 0
+
+#
+#    DungeonClear.DungeonQueueFill.MaxConcurrent
+#        How many fills may be SETTING UP at once. Each one provisions up to
+#        four bots through PlayerbotFactory at one roll per world tick
+#        REALM-WIDE (shared with the `.dc test` harness), so this is the knob
+#        that bounds the cost of the feature.
+#
+#        It counts only the stages up to the group forming. A fill whose party
+#        has formed goes on shadowing that group for the length of the dungeon
+#        so it can log the bots out at the end, but it costs nothing while it
+#        does and does NOT count here — otherwise one party clearing a dungeon
+#        would hold a slot for the best part of an hour and the next player to
+#        click Find Group would be refused a fill for no reason they could see.
+#
+#        So this does not bound how many parties are out at once, and it is not
+#        a bound on addclass-pool draw either. Seed the pool for the number of
+#        simultaneous dungeons you expect, not for MaxConcurrent x 4; a fill
+#        that finds its pool empty releases itself and tells the player.
+#
+#        0 = unlimited (not recommended).
+#
+#        Raising it does not buy throughput: every setting-up fill competes
+#        for the same one roll per tick, so N in flight makes each one take
+#        roughly N times as long to provision. Push it far enough and fills
+#        start hitting SetupTimeoutSec instead of forming.
+#
+#        Default: 3
+#
+
+DungeonClear.DungeonQueueFill.MaxConcurrent = 3
+
+#
+#    DungeonClear.DungeonQueueFill.SetupTimeoutSec
+#        Bound on everything up to the bots being in the queue: waiting for
+#        the player's own queue to settle, claiming pool characters, logging
+#        them in, provisioning and sanitising them.
+#
+#        On timeout the fill is released and the player keeps their place in
+#        the real queue — a fill that cannot happen degrades to ordinary
+#        matchmaking, it never breaks the queue.
+#
+#        Default: 60
+#
+
+DungeonClear.DungeonQueueFill.SetupTimeoutSec = 60
+
+#
+#    DungeonClear.DungeonQueueFill.MatchTimeoutSec
+#        Bound on the wait for the matchmaker once the bots are queued. The
+#        stock compatibility pass drains one new queue entry per map update,
+#        so a match normally lands within a few seconds; this only catches
+#        the case where it never does.
+#
+#        Default: 120
+#
+
+DungeonClear.DungeonQueueFill.MatchTimeoutSec = 120
+
+#
+#    DungeonClear.DungeonQueueFill.MinPlayerLevel
+#        Do not fill for players below this level.
+#
+#        Default: 15 (the level the dungeon finder itself opens at)
+#
+
+DungeonClear.DungeonQueueFill.MinPlayerLevel = 15
+
+#
+#    DungeonClear.DungeonQueueFill.GearIlvl
+#    DungeonClear.DungeonQueueFill.GearQuality
+#        Gear ceiling for the filled bots, resolved through the same ladder a
+#        `.dc test` run uses. GearIlvl caps item level; GearQuality is an
+#        item quality (2 = uncommon, 3 = rare, 4 = epic).
+#
+#        0 on either inherits the server-wide Playerbots.AutoGearScoreLimit /
+#        Playerbots.AutoGearQualityLimit, which is what you usually want:
+#        filled bots should look like the realm's other bots.
+#
+#        Default: 0 / 0 (inherit)
+#
+
+DungeonClear.DungeonQueueFill.GearIlvl = 0
+DungeonClear.DungeonQueueFill.GearQuality = 0
+
+#
+#    DungeonClear.DungeonQueueFill.AutoClear
+#        0 = the filled bots behave like any other party bots: they follow the
+#        player and assist. The player queued to PLAY the dungeon, so this is
+#        the default.
+#
+#        1 = the dungeon-clear driver takes over once the party is inside and
+#        runs the instance itself, with the player along for the ride.
+#
+#        Default: 0
+#
+
+DungeonClear.DungeonQueueFill.AutoClear = 0
+
+#
+#    DungeonClear.DungeonQueueFill.LogoutOnRelease
+#        1 = log the filled bots out when the fill is released or the dungeon
+#        ends. 0 = leave them in world (useful when debugging a fill, so the
+#        characters can be inspected afterwards).
+#
+#        Default: 1
+#
+
+DungeonClear.DungeonQueueFill.LogoutOnRelease = 1
+
+###############################################################################
+#
+#   BATTLEGROUND INSTANT QUEUE FILL (DungeonClear.BgQueueFill.*)
+#
+#   When a real player queues for a battleground, log in, level, gear and
+#   queue enough Alliance AND Horde pool bots in the player's bracket that the
+#   stock matchmaker pops the match within seconds. The player gets the
+#   ordinary "enter battle" popup; bots play both sides. Bots are released and
+#   logged out when the match ends or the player leaves it.
+#
+#   Every side is filled to the battleground's MAXIMUM (Warsong 10v10,
+#   Arathi/Eye/Strand 15v15, Alterac/Isle of Conquest 40v40). The bots needed
+#   to reach each side's MINIMUM are provisioned first, so the match pops as
+#   early as possible; the rest stream in during the preparation phase.
+#   Random Battleground pops at 10v10 and is then topped up to whichever map
+#   the core rolled.
+#
+#   A human group big enough to be a "premade" (5+ for Warsong, 8+ for
+#   Arathi, 20+ for Alterac) would otherwise wait for an opposing premade and
+#   never match against solo-queued bots, so when a fill is opened for it the
+#   group is moved to the normal queue. Real premade-versus-premade is left
+#   alone: the move is skipped when an opposing premade is already queued.
+#
+#   Arenas and rated play are never filled.
+#
+#   Bots come from the addclass pool (`.playerbots addclass`, account type 2),
+#   both factions. A 40v40 Alterac Valley needs 79 bots; seed each faction
+#   accordingly.
+#
+#   IMPORTANT: keep Playerbots.RandomBotJoinBG and
+#   Playerbots.RandomBotAutoJoinBG at 0 while this is on. Those queue random
+#   bots into battlegrounds independently and would double-fill the match.
+#   The worldserver logs a warning at startup when both are on.
+#
+#   This changes realm-wide behaviour, so it is OFF by default.
+#
+
+#
+#    DungeonClear.BgQueueFill.Enable
+#        Master switch. 0 = battlegrounds queue exactly as they do without
+#        this module. Turning it off while fills are in flight releases them.
+#
+#        Default: 0 (off)
+#
+
+DungeonClear.BgQueueFill.Enable = 0
+
+#
+#    DungeonClear.BgQueueFill.MaxConcurrent
+#        How many fills may be SETTING UP at once (logging in, provisioning
+#        and queueing bots). A fill whose player is already in the match does
+#        not count, even while the rest of its bots stream in.
+#
+#        The addclass pool, not this cap, is the real limit on how many
+#        matches can run: a full Alterac Valley holds 79 characters for its
+#        whole length. A player refused because the cap is reached is retried
+#        every few seconds while they stay queued.
+#
+#        0 = unlimited (not recommended).
+#
+#        Default: 2
+#
+
+DungeonClear.BgQueueFill.MaxConcurrent = 2
+
+#
+#    DungeonClear.BgQueueFill.HealersPerSide
+#        Healer bots per side. 0 = one per five seats of the battleground's
+#        maximum (2 in Warsong, 3 in Arathi, 8 in Alterac).
+#
+#        Default: 0 (auto)
+#
+
+DungeonClear.BgQueueFill.HealersPerSide = 0
+
+#
+#    DungeonClear.BgQueueFill.LevelSpread
+#        Bots are levelled within this many levels of the queuing player,
+#        clamped to the player's bracket, so a 24 in the 20-29 bracket plays
+#        against 22-26s. The level-80 bracket is always 80.
+#
+#        Default: 2
+#
+
+DungeonClear.BgQueueFill.LevelSpread = 2
+
+#
+#    DungeonClear.BgQueueFill.MinPlayerLevel
+#        Do not fill for players below this level.
+#
+#        Default: 10 (the lowest battleground bracket)
+#
+
+DungeonClear.BgQueueFill.MinPlayerLevel = 10
+
+#
+#    DungeonClear.BgQueueFill.SetupTimeoutSec
+#        Bound on each setup step (logins, capital placement, provisioning,
+#        sanitising, queueing). On timeout the fill is released and the player
+#        keeps their place in the real queue.
+#
+#        Default: 90
+#
+
+DungeonClear.BgQueueFill.SetupTimeoutSec = 90
+
+#
+#    DungeonClear.BgQueueFill.MatchTimeoutSec
+#        Bound on the wait between the bots being queued and the player being
+#        inside the battleground. Covers a match that never pops and a popup
+#        the player never answers.
+#
+#        Default: 180
+#
+
+DungeonClear.BgQueueFill.MatchTimeoutSec = 180
+
+#
+#    DungeonClear.BgQueueFill.GearIlvl
+#    DungeonClear.BgQueueFill.GearQuality
+#        Gear ceiling for the filled bots; same meaning as the
+#        DungeonQueueFill keys of the same name. 0 inherits the server-wide
+#        Playerbots.AutoGearScoreLimit / AutoGearQualityLimit.
+#
+#        Default: 0 / 0 (inherit)
+#
+
+DungeonClear.BgQueueFill.GearIlvl = 0
+DungeonClear.BgQueueFill.GearQuality = 0
+
+#
+#    DungeonClear.BgQueueFill.LogoutOnRelease
+#        1 = log the filled bots out when the fill is released or the match
+#        ends. 0 = leave them in world (debugging only).
+#
+#        Default: 1
+#
+
+DungeonClear.BgQueueFill.LogoutOnRelease = 1

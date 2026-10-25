@@ -1,0 +1,38 @@
+{
+  "about": "Party stands (tick thief): 'dungeon clear regroup combat' (rel 29, above reach spell 20 and the whole rotation) armed on an empty stock attackers list and returned true on every path, so a combat-flagged ranged DPS with no threat landed never cast (issue #18). A split Shattered Halls formation with a Darkcaster and a Sharpshooter 38yd apart (snapshot tr-20260922-185222-7#4) is forced through the Advanced LOS drag, so casters park and followers sit at camp flagged before their own threat lands. Fixed on master by 5bace3da (a live, valid, in-LOS target counts as contribution; the action yields when it issues no move). Start is moved 25yd up the corridor from the real tank spot.",
+  "schema": 1,
+  "source": { "snapshot": "tr-20260922-185222-7#4" },
+  "geometry": {
+    "map": 540,
+    "dungeon": "shattered-halls",
+    "heroic": false,
+    "region": { "center": [64.3, 126.7, -13.2], "radius": 60.0 },
+    "objective": 16807,
+    "objectiveName": "Grand Warlock Nethekurse"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [151019, 151020, 151021, 151022, 151023],
+        "near": [151024, 151026, 151027]
+      }
+    }
+  },
+  "party": {
+    "comp": "warrior-prot,priest-disc,mage-frost,warlock-affli,hunter-mm",
+    "level": 70,
+    "start": [69.5, 92.0, -13.1, 1.528],
+    "react": "fast",
+    "seedTarget": true
+  },
+  "settings": {
+    "PullSetting": 2,
+    "PullForceAdvanced": 1,
+    "CombatRegroup": 1
+  },
+  "goal": { "kill": "pack:target", "timeoutS": 120 },
+  "expect": {
+    "oracles": { "O4": "pass", "O5": "pass" },
+    "knownFailure": "fixed:5bace3da"
+  }
+}

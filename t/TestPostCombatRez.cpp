@@ -452,3 +452,206 @@ TEST(DcRezDecisionTest, SoloDeadTankIsAWipe)
     EXPECT_EQ(r.outcome, Outcome::Disable);
     EXPECT_EQ(r.reason, Reason::Wipe);
 }
+
+// ---- the instance refuses the spell ----------------------------------------------
+//
+// Spell::CheckCast refuses every resurrect cast inside a dungeon reporting an
+// encounter in progress. The Violet Hold holds that state for the entire run, so
+// the elected rezzer stood over a corpse re-casting into the refusal until the 90s
+// budget expired: 18 of the first 72 runs of tp-20260827-065217-2 ended as
+// "Couldn't get X resurrected in time" with the party alive and the hold draining.
+
+TEST(DcRezDecisionTest, BlockedHoldsWhileTheBlockMightStillLift)
+{
+    auto party = BaseParty();
+    party[2].isDead = true;
+    Inputs in = BaseInputs();
+    in.rezBlocked = true;
+    in.blockedSinceMs = in.nowMs - 5000;
+    in.blockedHoldMaxMs = 20000;
+    Result const r = Decide(in, party);
+    EXPECT_EQ(r.outcome, Outcome::Hold);
+    EXPECT_EQ(r.reason, Reason::BlockedWaiting);
+    // A corpse is named so the status panel has someone to name; nobody is elected,
+    // because electing a rezzer is what arms the cast rung that cannot succeed.
+    EXPECT_EQ(r.targetIdx, 2);
+    EXPECT_EQ(r.rezzerIdx, -1);
+}
+
+TEST(DcRezDecisionTest, BlockedStandsDownOnceTheWaitRunsOut)
+{
+    auto party = BaseParty();
+    party[2].isDead = true;
+    Inputs in = BaseInputs();
+    in.rezBlocked = true;
+    in.blockedSinceMs = in.nowMs - 20000;
+    in.blockedHoldMaxMs = 20000;
+    Result const r = Decide(in, party);
+    // Neither hold nor disable: the party is alive and the dungeon is winnable.
+    EXPECT_EQ(r.outcome, Outcome::None);
+    EXPECT_EQ(r.reason, Reason::BlockedStandDown);
+}
+
+TEST(DcRezDecisionTest, BlockedWithNoWaitConfiguredStandsDownImmediately)
+{
+    auto party = BaseParty();
+    party[2].isDead = true;
+    Inputs in = BaseInputs();
+    in.rezBlocked = true;  // blockedHoldMaxMs left at 0
+    Result const r = Decide(in, party);
+    EXPECT_EQ(r.outcome, Outcome::None);
+    EXPECT_EQ(r.reason, Reason::BlockedStandDown);
+}
+
+TEST(DcRezDecisionTest, AnUnstampedBlockClockStillHolds)
+{
+    // The glue stamps the clock a tick behind the first blocked read; until it does,
+    // the block is treated as brand new rather than as already expired.
+    auto party = BaseParty();
+    party[2].isDead = true;
+    Inputs in = BaseInputs();
+    in.rezBlocked = true;
+    in.blockedSinceMs = 0;
+    in.blockedHoldMaxMs = 20000;
+    Result const r = Decide(in, party);
+    EXPECT_EQ(r.outcome, Outcome::Hold);
+    EXPECT_EQ(r.reason, Reason::BlockedWaiting);
+}
+
+TEST(DcRezDecisionTest, BlockedOutranksTheNoRezzerDisable)
+{
+    // Both rez classes are down. Normally that ends the run — but while the instance
+    // forbids the spell, which classes are still standing is not a fact about
+    // anything, and the survivors can still finish the dungeon (99 of 100 heroic runs
+    // of tp-20260826-233949-1 did, having never needed a rez at all).
+    auto party = BaseParty();
+    party[0].isDead = true;
+    party[1].isDead = true;
+    Inputs in = BaseInputs();
+    in.rezBlocked = true;
+    in.blockedSinceMs = in.nowMs - 30000;
+    in.blockedHoldMaxMs = 20000;
+    Result const r = Decide(in, party);
+    EXPECT_EQ(r.outcome, Outcome::None);
+    EXPECT_EQ(r.reason, Reason::BlockedStandDown);
+}
+
+TEST(DcRezDecisionTest, ABlockedFullWipeIsStillAWipe)
+{
+    auto party = BaseParty();
+    for (Member& m : party)
+        m.isDead = true;
+    Inputs in = BaseInputs();
+    in.rezBlocked = true;
+    in.blockedSinceMs = in.nowMs - 30000;
+    in.blockedHoldMaxMs = 20000;
+    Result const r = Decide(in, party);
+    EXPECT_EQ(r.outcome, Outcome::Disable);
+    EXPECT_EQ(r.reason, Reason::Wipe);
+}
+
+TEST(DcRezDecisionTest, TheBlockedBranchIsInertWhenNothingIsBlocked)
+{
+    // Nothing latches: the ordinary election is unchanged the moment the block lifts.
+    auto party = BaseParty();
+    party[2].isDead = true;
+    Inputs in = BaseInputs();
+    in.rezBlocked = false;
+    in.blockedSinceMs = in.nowMs - 30000;  // stale stamp the glue has yet to clear
+    in.blockedHoldMaxMs = 20000;
+    Result const r = Decide(in, party);
+    EXPECT_EQ(r.outcome, Outcome::Hold);
+    EXPECT_EQ(r.reason, Reason::Recovering);
+    EXPECT_EQ(r.rezzerIdx, 1);
+}
+
+// ---- a corpse among idle hostiles is not walked to --------------------------------
+//
+// tr-20260927-184653-9 (Karazhan): a healer died among the Servants' Quarters
+// Shadowbats under the Maiden corridor; the second healer walked down to raise her
+// and died, then the tank and the enhancement shaman walked down after them both.
+
+TEST(DcRezDecisionTest, EveryCorpseUnsafeStandsDownShortHanded)
+{
+    auto party = BaseParty();
+    party[1].isDead = true;          // the healer, among the bats
+    party[1].corpseUnsafe = true;
+    Result const r = Decide(BaseInputs(), party);
+    // Neither hold (nobody walks) nor disable (the party is alive).
+    EXPECT_EQ(r.outcome, Outcome::None);
+    EXPECT_EQ(r.reason, Reason::UnsafeStandDown);
+    EXPECT_EQ(r.rezzerIdx, -1);
+    EXPECT_TRUE(r.pairs.empty());
+    // Named, for the announcement.
+    EXPECT_EQ(r.targetIdx, 1);
+}
+
+TEST(DcRezDecisionTest, AnUnsafeCorpseIsSkippedForASafeOne)
+{
+    // Healer corpse unsafe, mage corpse safe: the tank raises the mage, and the
+    // healer — normally first in line — waits for a body that is safe to reach.
+    auto party = BaseParty();
+    party[1].isDead = true;
+    party[1].corpseUnsafe = true;
+    party[2].isDead = true;
+    Result const r = Decide(BaseInputs(), party);
+    EXPECT_EQ(r.outcome, Outcome::Hold);
+    EXPECT_EQ(r.reason, Reason::Recovering);
+    EXPECT_EQ(r.rezzerIdx, 0);
+    EXPECT_EQ(r.targetIdx, 2);
+    ASSERT_EQ(r.pairs.size(), 1u);
+    EXPECT_EQ(r.pairs[0], std::make_pair(0, 2));
+}
+
+TEST(DcRezDecisionTest, TheCorpseComesBackIntoPlayOnceItIsSafe)
+{
+    // Nothing latches: the same corpse, its pack cleared, is an ordinary recovery.
+    auto party = BaseParty();
+    party[2].isDead = true;
+    party[2].corpseUnsafe = true;
+    EXPECT_EQ(Decide(BaseInputs(), party).reason, Reason::UnsafeStandDown);
+    party[2].corpseUnsafe = false;
+    Result const r = Decide(BaseInputs(), party);
+    EXPECT_EQ(r.outcome, Outcome::Hold);
+    EXPECT_EQ(r.reason, Reason::Recovering);
+    EXPECT_EQ(r.targetIdx, 2);
+}
+
+TEST(DcRezDecisionTest, AnUnsafeCorpseDoesNotSaveARunWithNoRezzer)
+{
+    // Both rez classes dead: the classic NoRezzer disable, unsafe or not.
+    auto party = BaseParty();
+    party[0].isDead = true;
+    party[1].isDead = true;
+    party[1].corpseUnsafe = true;
+    Result const r = Decide(BaseInputs(), party);
+    EXPECT_EQ(r.outcome, Outcome::Disable);
+    EXPECT_EQ(r.reason, Reason::NoRezzer);
+}
+
+TEST(DcRezDecisionTest, AnUnsafeCorpseIsLeftToAHumanRezzer)
+{
+    // Only a human can rez: it is their walk to judge, so the hold is unchanged.
+    auto party = BaseParty();
+    party[0].isDead = true;
+    party[1].isDead = true;
+    party[1].corpseUnsafe = true;
+    party[4].canRezClass = true;
+    Result const r = Decide(BaseInputs(), party);
+    EXPECT_EQ(r.outcome, Outcome::Hold);
+    EXPECT_EQ(r.reason, Reason::WaitingOnHuman);
+    EXPECT_EQ(r.rezzerIdx, 4);
+}
+
+TEST(DcRezDecisionTest, AnUnsafeFullWipeIsStillAWipe)
+{
+    auto party = BaseParty();
+    for (Member& m : party)
+    {
+        m.isDead = true;
+        m.corpseUnsafe = true;
+    }
+    Result const r = Decide(BaseInputs(), party);
+    EXPECT_EQ(r.outcome, Outcome::Disable);
+    EXPECT_EQ(r.reason, Reason::Wipe);
+}

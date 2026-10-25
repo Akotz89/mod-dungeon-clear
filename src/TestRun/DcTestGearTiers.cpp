@@ -41,7 +41,7 @@ namespace DcTestGearTiers
             return text + " (" + std::to_string(ilvl) + ")";
         }
 
-        // The named ceilings from the AiPlayerbot.AutoGearScoreLimit comment
+        // The named ceilings from the Playerbots.AutoGearScoreLimit comment
         // block, verbatim — a person picking one has read that table (or the
         // wiki page it came from) and expects these exact numbers. Tier and
         // phase names are merged where they land on the same item level.
@@ -88,9 +88,12 @@ namespace DcTestGearTiers
     {
         // Same map ids DcTestDungeonRegistry lists, grouped by expansion. The
         // Black Morass (269) and Old Hillsbrad (560) are Caverns of Time maps
-        // but TBC content, and are geared as such.
+        // but TBC content, and are geared as such. Gruul's Lair (565) is a
+        // TBC raid row, as is Karazhan (532) — unlisted either would fall to
+        // the Classic ladder and cap a level-70 raid's gear at ilvl 92
+        // without a word.
         static std::set<std::uint32_t> const tbc =
-            {269, 540, 542, 543, 545, 546, 547, 552, 553, 554, 555, 556, 557, 558, 560, 585};
+            {269, 532, 540, 542, 543, 545, 546, 547, 552, 553, 554, 555, 556, 557, 558, 560, 565, 585};
         static std::set<std::uint32_t> const wotlk =
             {574, 575, 576, 578, 595, 599, 600, 601, 602, 604, 608, 619, 632, 650, 658, 668};
 

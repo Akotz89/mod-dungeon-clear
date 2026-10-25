@@ -1,0 +1,7 @@
+{
+  "about": "An AFK human: stands where the party was staged (the UK entrance, areatrigger 4745 target) and idles for the whole run, so the tank walks away from it. Until lb-20261003-155828-1 the puppet started at the camp and walked 27yd back, but the DK tank had already engaged the 34yd Ironhelm pair at 1.05s, before the human was out of spread.",
+  "steps": [
+    { "when": { "atMs": 0 }, "do": { "standAt": "start" } },
+    { "when": { "atMs": 1500 }, "do": { "idle": true } }
+  ]
+}

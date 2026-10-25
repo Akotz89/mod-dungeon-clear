@@ -15,7 +15,7 @@
 #include "ObjectMgr.h"
 #include "Ai/Dungeon/DungeonClear/Util/NavmeshSnap.h"
 
-bool DungeonSpawnGraph::_built = false;
+std::once_flag DungeonSpawnGraph::_once;
 
 std::unordered_map<uint32, std::vector<SpawnNode>>& DungeonSpawnGraph::Store()
 {
@@ -25,17 +25,21 @@ std::unordered_map<uint32, std::vector<SpawnNode>>& DungeonSpawnGraph::Store()
 
 void DungeonSpawnGraph::Build()
 {
-    if (_built)
-        return;
-    _built = true;
+    // The flag used to flip BEFORE the store was filled, so a second map
+    // thread returned early and read the store mid-construction (issue #34).
+    std::call_once(_once, &DungeonSpawnGraph::BuildStore);
+}
 
+void DungeonSpawnGraph::BuildStore()
+{
     auto& store = Store();
     store.clear();
 
     // Spawn data is indexed by spawn id, not by map. Walk once, partition by
-    // dungeon mapId. Non-dungeon maps (overworld, BGs, arenas) are skipped —
-    // dungeon clear is dungeon-only and the spawn graph is not consulted
-    // anywhere else.
+    // instance mapId. Non-instanced maps (overworld, BGs, arenas) are skipped;
+    // RAIDS are included — corridor centering serves a raid clear exactly as it
+    // does a dungeon one, and excluding them silently degraded the pathfinder
+    // to an empty graph on raid maps.
     CreatureDataContainer const& spawns = sObjectMgr->GetAllCreatureData();
     for (auto const& kv : spawns)
     {
@@ -45,7 +49,7 @@ void DungeonSpawnGraph::Build()
             continue;
 
         MapEntry const* mapEntry = sMapStore.LookupEntry(data.mapid);
-        if (!mapEntry || !mapEntry->IsNonRaidDungeon())
+        if (!mapEntry || !mapEntry->IsDungeon())
             continue;
 
         SpawnNode node;
@@ -111,7 +115,7 @@ std::vector<SpawnNode> DungeonSpawnGraph::FindCorridor(Map const* map, uint32 ma
     (void)fz;  // z used only for snap below; horizontal projection is the filter
     (void)tz;
 
-    Build();  // Lazy-init on first lookup, same pattern as BossSpawnIndex.
+    Build();  // Lazy, thread-safe init on first lookup (see BossSpawnIndex).
 
     auto& store = Store();
     auto it = store.find(mapId);

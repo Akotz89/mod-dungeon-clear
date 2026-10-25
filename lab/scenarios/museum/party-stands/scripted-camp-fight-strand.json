@@ -1,0 +1,35 @@
+{
+  "about": "Party stands (scripted camp fight): during a ScriptedPullRegistry stage's camp fight both assist triggers stood down and the multiplier zeroed stock proactive picks, so a follower the pack never reached stood at camp. Measured on tp-20260808-191156-1 (MgT heroic): scripted rows median 3.0s to first contact, 6% over 15s; in tr-20260808-191202-9 the east rotunda row ran 62s with the rogue entering combat 29s and the hunter 59s after release. This stages that east row (ranged tag, forward camp 137.1,-179.2) with its north-east neighbour formation, which comes with it; the south/centre rows and the hall patrol are hidden, so the east row is the first live stage. Fixed on master by f9a7a879 (ScriptedCampFightIsAtCamp opens the non-combat seed for mobs within the 12yd follower leash of camp).",
+  "schema": 1,
+  "geometry": {
+    "map": 585,
+    "dungeon": "mgt",
+    "heroic": true,
+    "region": { "center": [140.0, -145.0, -21.0], "radius": 60.0 },
+    "objective": 24560,
+    "objectiveName": "Priestess Delrissa"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [96824, 96796, 96812, 96774],
+        "northeast": [96780, 96791, 96808, 96846, 96849]
+      }
+    }
+  },
+  "party": {
+    "comp": "paladin-prot,druid-resto,mage-frost,hunter-bm,rogue-subtlety",
+    "level": 70,
+    "start": [137.5, -174.0, -21.4, 1.26],
+    "react": "fast",
+    "seedTarget": false
+  },
+  "settings": {
+    "PullSetting": 2
+  },
+  "goal": { "kill": "pack:target", "timeoutS": 120 },
+  "expect": {
+    "oracles": { "O4": "pass", "O1": "pass" },
+    "knownFailure": "fixed:f9a7a879"
+  }
+}

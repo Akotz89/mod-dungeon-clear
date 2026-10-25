@@ -214,3 +214,63 @@ TEST(DcCombatRegroupTest, HealerZeroSlackUsesFullRange)
     in.tankDist2d = 31.0f;  // beyond it
     EXPECT_EQ(DecideCombatRegroup(in), RegroupVerdict::Reconnect);
 }
+
+// ---- DPS clause: an in-LOS target is contribution too --------------------------
+//
+// The mute behind the "ranged DPS stands there doing nothing" field reports. Stock
+// AttackersValue is THREAT-derived (it walks GetThreatenedByMeList), so it reads
+// empty in every window where the party is combat-flagged but nobody has landed
+// threat yet — including the one DC manufactures for itself when the camp assist
+// seeds a target and SetInCombatWith()s the bot. A Reconnect verdict there latched
+// the rung, whose action (rel 29) outranks reach spell (20) and the whole rotation
+// (5-20), so the bot never cast, never gained threat, and the empty attacker list
+// that armed it sustained itself. A live in-LOS target means the rotation has work.
+
+TEST(DcCombatRegroupTest, DpsNoAttackerButLosTargetIsNone)
+{
+    RegroupInputs in = BaseDps();
+    in.hasVisibleAttacker = false;  // no threat on anyone yet
+    in.hasLosTarget = true;         // but the seeded mob is right there in sight
+    EXPECT_EQ(DecideCombatRegroup(in), RegroupVerdict::None);
+}
+
+TEST(DcCombatRegroupTest, RangedDpsNoAttackerButLosTargetIsNone)
+{
+    RegroupInputs in = BaseDps();
+    in.isMelee = false;
+    in.hasVisibleAttacker = false;
+    in.hasLosTarget = true;
+    EXPECT_EQ(DecideCombatRegroup(in), RegroupVerdict::None);
+}
+
+TEST(DcCombatRegroupTest, DpsNoAttackerNoLosTargetStillReconnects)
+{
+    // The case the rung actually exists for — the pack is around a corner, so there
+    // is nothing in sight to shoot and walking is the only useful move.
+    RegroupInputs in = BaseDps();
+    in.hasVisibleAttacker = false;
+    in.hasLosTarget = false;
+    EXPECT_EQ(DecideCombatRegroup(in), RegroupVerdict::Reconnect);
+}
+
+TEST(DcCombatRegroupTest, LosTargetDoesNotBeatHardTether)
+{
+    // The drifted-into-nowhere safety net still wins: a DPS 41yd off the tank comes
+    // back even if it is happily shooting something in sight.
+    RegroupInputs in = BaseDps();
+    in.hasVisibleAttacker = false;
+    in.hasLosTarget = true;
+    in.tankDist2d = 41.0f;
+    EXPECT_EQ(DecideCombatRegroup(in), RegroupVerdict::HardTether);
+}
+
+TEST(DcCombatRegroupTest, HealerIgnoresLosTarget)
+{
+    // hasLosTarget is a DPS-only field: a healer that cannot heal the tank yet still
+    // pre-positions, whatever it happens to have targeted.
+    RegroupInputs in = BaseHealer();
+    in.hasLosTarget = true;
+    in.tankLos = false;
+    in.tankDist2d = 10.0f;
+    EXPECT_EQ(DecideCombatRegroup(in), RegroupVerdict::Reconnect);
+}

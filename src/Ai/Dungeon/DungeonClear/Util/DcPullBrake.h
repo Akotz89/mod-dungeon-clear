@@ -45,6 +45,11 @@ namespace DcPullBrake
     // Scoped to bots whose OWN pull FSM is mid-walk-in (DcPullPhase::Advancing),
     // which is leader-owned state, so a follower, a bot on another job, and a human
     // driving their own character all fall out without a special case.
+    //
+    // Second job, same instant: when the LEADER is flagged with its FSM still in
+    // Idle (an unplanned aggro while scouting), stamp DcPullContext::scoutAggroMs
+    // so the party reads as held passive from this statement on, rather than from
+    // the maneuver's first combat tick. Nothing is moved for that case here.
     void OnEnterCombat(Player* bot);
 }
 

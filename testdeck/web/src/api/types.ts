@@ -24,6 +24,9 @@ export interface Status {
   bridge: string;
   health: { problems: { level: string; key: string; message: string }[] };
   version: string;
+  /* The running continuous session, if any — just enough for the nav badge
+     and the tab-title failure count. */
+  soak?: { soakId: string; status: string; runs: number; fail: number } | null;
 }
 
 /* ---- catalogue (dc_test_dungeons.json) ---- */
@@ -37,15 +40,43 @@ export interface Dungeon {
   token: string;
   name: string;
   mapId: number;
+  /* Map.dbc's expansion id (0 classic, 1 TBC, 2 WotLK), straight from the
+   * module. Optional only because an older worldserver's sidecar predates the
+   * field — see expansionOfRow(). */
+  expansion?: number;
   level: number;
   heroicLevel: number;   // 0 = no heroic mode
   wing: string;
+  /* Raid rows only (raid-support Plan D): the launch form offers the party
+   * size within [sizeMin, sizeMax], defaulting to defaultSize. Absent on
+   * 5-man rows. */
+  raid?: boolean;
+  sizeMin?: number;
+  sizeMax?: number;
+  sizePresets?: number[];
+  defaultSize?: number;
   gear?: GearChoice[];
   gearHeroic?: GearChoice[];
+  /* SCENARIO rows (module T1): a slice of a parent dungeon — dropped at an
+   * in-map point, scoped to `focus`, passing on its own `success` predicate.
+   * Launched by its own token; the form locks the size to the parent's
+   * default and never offers heroic. Absent on every ordinary row. */
+  scenario?: boolean;
+  scenarioOf?: string;
+  focus?: number[];
+  success?: string;          // "instanceData(9)==3", "" = all-cleared only
+  successGraceS?: number;
+  overallTimeoutS?: number;  // 0 = the server's global budget
+  noProgressS?: number;
 }
 
 export interface Catalogue {
-  limits: { maxConcurrent?: number; maxPlans?: number; planMaxTotal?: number };
+  limits: {
+    maxConcurrent?: number;
+    maxPlans?: number;
+    planMaxTotal?: number;
+    planPool?: boolean;      // server takes `.dc test plan start pool=…`
+  };
   gearDefaults?: { ilvl: number; quality: number };
   qualities?: { v: number; label: string }[];
   dungeons: Dungeon[];
@@ -97,6 +128,47 @@ export interface LiveRun {
   timeline?: TimelineEntry[];   // server-accumulated full history
 }
 
+/* ---- dungeon map pack (generated per host, see `testdeck mappack`) ---- */
+
+export interface MapFloor {
+  floor: number;
+  url: string;                 // /api/mappack/img/<mapId>/<floor>
+  /* World rect this image covers. minX/maxX are the world X (north) axis and
+   * drive the VERTICAL image axis; minY/maxY are world Y (west) and drive the
+   * horizontal one. The DBC's own field order is misleading; the pack has
+   * already normalised it. */
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  /* px = ax*x + bx*y + cx ; py = ay*x + by*y + cy, in a w x h image. */
+  ax: number; bx: number; cx: number;
+  ay: number; by: number; cy: number;
+  w: number;
+  h: number;
+  source?: string;             // "wdm" | "client"
+}
+
+export interface MapPackMap {
+  mapId: number;
+  name?: string;
+  kind?: "dungeon" | "terrain";
+  floors: MapFloor[];
+  /* Blizzard's own DungeonMapChunk MinZ ladder, ascending. Only ever used to
+   * break a tie between floors whose rects both contain the position. */
+  floorRule?: {
+    default?: number;
+    zsteps: { minZ: number; floor: number }[];
+  };
+}
+
+export interface MapPackIndex {
+  available: boolean;
+  reason?: string;
+  generated?: string;
+  maps: number[];
+}
+
 export interface LivePlan {
   planId: string;
   dungeon?: string;
@@ -110,6 +182,12 @@ export interface LivePlan {
   heroic?: boolean;
   state?: string;
   elapsedS?: number;
+  /* Pool (continuous) plans. */
+  endless?: boolean;
+  paused?: boolean;
+  nextPick?: string;
+  resetHoldUntil?: number;     // unix s; 0 = no reset guard active
+  pool?: { token: string; heroic?: boolean; size?: number; launched?: number; ok?: number; fail?: number }[];
 }
 
 export interface Live {
@@ -250,6 +328,7 @@ export interface RunRecord {
   instanceId?: number;
   level?: number;
   heroic?: boolean;
+  size?: number;         // party size fielded (schema 11+; 0/absent = 5-man)
   compSeed?: number;
   gearIlvl?: number;
   gearQuality?: number;
@@ -277,6 +356,16 @@ export interface RunRecord {
   wipeOpponent?: string;
   wipeOpponentEntry?: number;
   diag?: RunDiag;
+  /* schema 13: the scenario block. `extras` is the flat key/value map the
+   * running event published (chess: attempts, losses, gameTimeS, …) — present
+   * (possibly empty) on every schema-13 record. */
+  scenario?: string;
+  scenarioOf?: string;
+  focus?: number[];
+  successPredicate?: string;
+  successBy?: string;        // "allCleared" | "predicate" | "grace"
+  tailPending?: boolean;
+  extras?: Record<string, string | number>;
   [k: string]: unknown;
 }
 
@@ -379,4 +468,127 @@ export interface LogFile {
   name: string;
   size: number;
   mtime: number;
+}
+
+/* ---- continuous mode (soak) ---- */
+
+export interface SoakPoolEntry {
+  token: string;
+  heroic: boolean;
+}
+
+export interface SoakConfig {
+  pool: SoakPoolEntry[];
+  concurrent: number;
+  pick: "bag" | "random";
+  level: number;
+  seed: number;
+  ilvl: number;
+  quality: number;
+  autoResume: boolean;
+  breaker: number;
+}
+
+export interface SoakLiveRun {
+  runId: string;
+  dungeon?: string;
+  dungeonName?: string;
+  heroic?: boolean;
+  stage?: string;
+  state?: string;
+  bossName?: string;
+  bossesKilled?: number;
+  bossesTotal?: number;
+  elapsedS?: number;
+  stall?: string;
+  inCombat?: boolean;
+  wiped?: boolean;
+}
+
+export interface SoakPerDungeon {
+  key: string;
+  dungeon: string;
+  dungeonName: string;
+  heroic: boolean;
+  runs: number;
+  ok: number;
+  fail: number;
+  medianS: number;
+  last: string[];
+}
+
+export interface SoakCluster {
+  label: string;
+  count: number;
+  result: string;
+  sample: string;
+  where: { key: string; count: number }[];
+}
+
+export interface SoakStats {
+  perDungeon: SoakPerDungeon[];
+  clusters: SoakCluster[];
+  runs: number;
+  ok: number;
+  fail: number;
+  lost: number;
+  runsPerHour: number;
+  elapsedS: number;
+  diskBytes: number;
+}
+
+export interface SoakView {
+  soakId: string;
+  owner: string;
+  status: string;
+  statusDetail: string;
+  createdAtMs: number;
+  stoppedAtMs?: number | null;
+  config: SoakConfig;
+  planIds: string[];
+  currentPlanId: string;
+  restarts: number;
+  runs: number;
+  ok: number;
+  fail: number;
+  lost: number;
+  plan: LivePlan | null;
+  liveRuns: SoakLiveRun[];
+  stopMode: string;
+  stats?: SoakStats;
+}
+
+export interface SoakIndex {
+  active: SoakView | null;
+  recent: SoakView[];
+  supported: boolean;
+  evidenceTool: boolean;
+  me: string;
+  admin: boolean;
+  addclassPool: number | null;  // characters in the playerbots addclass pool; null = unknown
+}
+
+export interface SoakRunRow extends RunRecord {
+  lost?: boolean;
+  evidence?: "done" | "failed" | "pending" | "queued";
+}
+
+export interface SoakRunsPage {
+  runs: SoakRunRow[];
+  total: number;
+  nextCursor: number | null;
+}
+
+export interface SoakEvidence {
+  state: "done" | "failed" | "pending" | "queued";
+  report: string;
+  error: string;
+  files: { name: string; size: number }[];
+}
+
+export interface SoakPreset {
+  name: string;
+  pool: SoakPoolEntry[];
+  owner: string;
+  writable: boolean;
 }

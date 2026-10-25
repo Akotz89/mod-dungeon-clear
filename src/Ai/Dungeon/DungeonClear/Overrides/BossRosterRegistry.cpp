@@ -40,6 +40,8 @@ namespace
             RegisterRazorfenDownsRoster(t);
             RegisterZulFarrakRoster(t);
             RegisterBlackrockDepthsRoster(t);
+            RegisterBlackrockSpireRoster(t);
+            RegisterBlackwingLairRoster(t);
             RegisterDeadminesRoster(t);
             RegisterWailingCavernsRoster(t);
             RegisterStratholmeRoster(t);
@@ -55,6 +57,23 @@ namespace
             RegisterArcatrazRoster(t);
             RegisterSethekkHallsRoster(t);
             RegisterBlackMorassRoster(t);
+            RegisterMaraudonRoster(t);
+            RegisterUtgardeKeepRoster(t);
+            RegisterNexusRoster(t);
+            RegisterAzjolNerubRoster(t);
+            RegisterAhnkahetRoster(t);
+            RegisterDrakTharonKeepRoster(t);
+            RegisterGundrakRoster(t);
+            RegisterVioletHoldRoster(t);
+            RegisterMoltenCoreRoster(t);
+            RegisterHallsOfStoneRoster(t);
+            RegisterUtgardePinnacleRoster(t);
+            RegisterPitOfSaronRoster(t);
+            RegisterHallsOfReflectionRoster(t);
+            RegisterCullingOfStratholmeRoster(t);
+            RegisterTrialOfTheChampionRoster(t);
+            RegisterOculusRoster(t);
+            RegisterKarazhanRoster(t);
             return t;
         }();
         return kPatches;
@@ -114,6 +133,15 @@ namespace
                     break;
                 }
 
+        // 1c. Stamp the by-design skips onto kept entries (see the field doc).
+        for (uint32 const entry : patch.skipByDesign)
+            for (DungeonBossInfo& b : result)
+                if (b.entry == entry)
+                {
+                    b.skipByDesign = true;
+                    break;
+                }
+
         // 2. Append the added anchors and re-sort into clear order so
         //    objectives and replacement bosses slot in. Ordering keys on
         //    BossOrderKey (the explicit orderOverride when set, else
@@ -145,6 +173,12 @@ namespace
     }
 }
 
+std::vector<DungeonBossInfo> BossRosterRegistry::ApplyPatch(BossRosterPatch const& patch,
+                                                            std::vector<DungeonBossInfo> base)
+{
+    return ApplyOne(patch, std::move(base));
+}
+
 std::vector<BossRosterPatch> const& BossRosterRegistry::AllPatches()
 {
     return PatchTable();
@@ -155,12 +189,12 @@ bool BossRosterRegistry::HasPatch(uint32 mapId)
     return FindPatch(mapId) != nullptr;
 }
 
-std::vector<DungeonBossInfo> BossRosterRegistry::Apply(uint32 mapId, Difficulty difficulty,
+std::vector<DungeonBossInfo> BossRosterRegistry::Apply(uint32 mapId, DcDiffKey key,
                                                        std::vector<DungeonBossInfo> base)
 {
     for (BossRosterPatch const& patch : PatchTable())
     {
-        if (patch.mapId != mapId || !DcGateMatches(patch.gate, difficulty))
+        if (patch.mapId != mapId || !DcGateMatches(patch.gate, key))
             continue;
         base = ApplyOne(patch, std::move(base));
     }

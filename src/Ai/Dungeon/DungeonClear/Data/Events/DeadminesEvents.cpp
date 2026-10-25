@@ -75,10 +75,27 @@ void RegisterDeadminesRoster(std::vector<BossRosterPatch>& t)
     // advance hand the objective over first, then the boss. No gateEntry
     // (the event owns completion via the door-open gate; see
     // DeadminesEvents).
+    //
+    // --- Sneed (bit 1) — anchored on Sneed's Shredder ---------------------
+    // instance_encounters 162 credits KILL_CREATURE 643 (Sneed), but 643 has
+    // no `creature` row: he only appears when Sneed's Shredder (642, guid
+    // 79223) dies and its SmartAI casts Eject Sneed (5141). BossSpawnIndex
+    // walks spawns, so the derived roster is Rhahk'zor, Gilnid, Smite,
+    // Cookie, Greenskin, VanCleef — Sneed is silently missing, and nothing
+    // routes the party into the Mast Room (Sneed's death opens Mast Room
+    // Door 16400). Same shape as Gundrak's Drakkari Colossus: anchor on the
+    // entry that HAS a spawn (the Shredder) and give it the missing
+    // encounter's real bit with MakeBossWithBit. Completion rides the mask
+    // as usual once Sneed himself dies. The remove keeps a roster that
+    // already derives 642 (a fork crediting the Shredder for this bit) from
+    // listing it twice.
     {
         BossRosterPatch p;
         p.mapId = 36;
+        p.remove = { 642 };
         p.add = {
+            MakeBossWithBit(642, 36, "Sneed's Shredder", -289.453f, -513.009f, 49.6785f,
+                            /*encounterIndex*/ 1),
             MakeObjective(OBJ(1), /*encounterIndex*/ 3, 36, "Iron Clad Door",
                           -107.56f, -659.67f, 7.21f, /*arriveRadius*/ 10.0f,
                           /*gateEntry*/ 0, /*hook*/ 0, /*eventId*/ 1),

@@ -38,17 +38,54 @@
 //      Mo'arg passage doors, which the core only opens once BOTH Gatewatchers die
 //      (DOOR_TYPE_PASSAGE) — and it is ordered after Capacitus besides.
 //
-//   3. CROSS THE BRIDGE GAUNTLET (floor 2, before Pathaleon). Advancing the bridge
-//      after Nethermancer Sepethrea spawns waves of adds; Pathaleon the Calculator
-//      (19220) stays greater-invisible and CanAIAttack()==false until
-//      GetPersistentData(DATA_BRIDGE_MOB_DEATH_COUNT) >= 4, then ethereal-teleports
-//      in and DoZoneInCombat()s the party. If DC engaged his boss anchor early it
-//      would bee-line an untargetable boss and livelock, so a PERSISTENT anchored
-//      event stands down the pull pipeline and drives the clear: clear the near
-//      wave cluster, advance to trigger the far cluster, clear it (well over the 4
-//      deaths that make him attackable), then engage + kill Pathaleon. The event
-//      owning the kill keeps the still-invisible boss off DC's independent engage
-//      until the waves are down.
+//   3. HOLD THE BRIDGE GAUNTLET (floor 2, before Pathaleon). This is a DEFENSIVE
+//      set-piece, not a traversal: the gauntlet is three scripted waves that run
+//      DOWN the bridge at the party. Walking up the bridge to meet them is the one
+//      thing that must not happen — it feeds the party into the next wave's spawn
+//      point and ends at the boss's feet. So the event parks a CAMP at the bridge
+//      mouth, fights every wave where it stands, and only then walks to Pathaleon.
+//
+//      The chain (all of it SmartAI on the SPAWN GUIDS, not the entries — see the
+//      smart_scripts rows for -138819/-138864/-138820 et al, plus actionlists
+//      1922000/1922001/1922002). Each wave's trigger is the PREVIOUS wave's last
+//      death, so the waves are strictly one at a time and nothing can be skipped:
+//        wave 1, bridge mouth y37..41 — Sunseeker Astromage (guid 138819),
+//          Sunseeker Engineer (138878), Bloodwarder Physician (138892). All three
+//          spawn under Greater Invisibility (34426). The Astromage drops its own
+//          invis and DoZoneInCombat()s on an OOC-LOS row (0-35yd, i.e. from the
+//          bridge foot); the Engineer and Physician run the same actionlist on
+//          their OWN aggro, so the party has to come within their aggro radius to
+//          activate them — which is why the camp sits past them and not short.
+//        wave 2, y53.2 — Tempest-Forge Destroyer (138864). Every wave-1 death
+//          SET_COUNTERs it; on 3/3 it runs actionlist 1922001 (clear
+//          IMMUNE_TO_PC|IMMUNE_TO_NPC, drop invis, DoZoneInCombat).
+//        wave 3, y100..112 — Astromage (138820), Sunseeker Netherbinder (138869),
+//          Physician (138893), Engineer (138879). The Destroyer's death
+//          SET_DATA(1,1)s all four, each of which runs the same 1922001.
+//
+//      ONLY the four wave-3 deaths DoAction(ACTION_BRIDGE_MOB_DEATH) on Pathaleon
+//      the Calculator (19220), and that action is the ONLY writer of
+//      DATA_BRIDGE_MOB_DEATH_COUNT. So the boss's CanAIAttack()/visibility gate of
+//      >= 4 means exactly "the last wave is dead" — not "any four adds died", which
+//      is what an earlier revision of this file assumed. He then ethereal-teleports
+//      in and DoZoneInCombat()s the party ~25s later on his own.
+//
+//      Once a wave is up, nothing has to be walked into: CreatureAI::DoZoneInCombat
+//      engages every player within 250yd (the whole bridge) and instanced creatures
+//      never leash, so each wave crosses the bridge to the party under its own
+//      power. The camp is therefore a single garrison MoveTo gated on the persistent
+//      death counter reaching 4 — the same "monotonic counter, safe to observe late"
+//      contract the ZulFarrak ramp uses, which matters here because the gauntlet is
+//      CONTINUOUS combat and the event engine is dormant in combat.
+//
+//      TWO THINGS MUST NOT BE TOUCHED WITHOUT RE-READING THE COMMENTS BELOW, because
+//      each of them cost a 10-run plan (tp-20260816-105517-2, 6/10 with 4 wipes to
+//      bridge trash, against 8/10 the run before):
+//        * the camp must sit PAST the wave-1 cluster, or the party is in combat
+//          before it can arrive and the event never starts at all; and
+//        * the Pathaleon engage step must be EngageOnlyWhenActive with a tight seek
+//          radius, or the combat-side stealth-breaker treats his scripted
+//          invisibility as a stuck sapper and sprints the tank at him mid-fight.
 //
 // The five bosses are ordinary DBC encounters (auto-derived); the roster patch
 // below only REORDERS them onto the travel path and interleaves the three
@@ -93,31 +130,59 @@ namespace
     constexpr float MECH_TOP_Z = 26.2f;
 
     // --- (3) Bridge gauntlet ---------------------------------------------
-    // Two wave clusters on the north bridge (x~138): near y40-53, far y100-112,
-    // Pathaleon at the end (139.5, 149.3, 25.7). Zones are sized to cover their
-    // cluster WITHOUT reaching Pathaleon (so ClearRadius never tries to target the
-    // still-invisible boss). Even a premature near-zone completion is safe: the
-    // first sub-wave alone (4 blood elves) already meets the 4-death gate that
-    // makes Pathaleon attackable.
-    // NAVMESH-VALIDATED against the real map-554 mmaps (S921 DcNavHarness probe,
-    // TestMechanarGauntletProbe): all four anchors + both wave-cluster spawn points
-    // snap on-mesh, and the full traversal routes reachable+complete —
-    // Sepethrea->entry (len ~230yd), entry->advance, advance->far, and
-    // entry->Pathaleon (len ~104yd, maxStepZ 0.67, no under-map pops). Zone radii
-    // are still first-cut — tune (esp. the advance point that spawns the far set)
-    // if the wave-timing needs it on a live instance.
-    constexpr float MECH_BRIDGE_ENTRY_X = 138.0f;
-    constexpr float MECH_BRIDGE_ENTRY_Y = 45.0f;
-    constexpr float MECH_BRIDGE_ENTRY_Z = 25.4f;
-    constexpr float MECH_NEAR_X = 138.0f, MECH_NEAR_Y = 48.0f, MECH_NEAR_Z = 25.4f;
-    constexpr float MECH_ADVANCE_X = 138.0f, MECH_ADVANCE_Y = 90.0f, MECH_ADVANCE_Z = 26.4f;
-    constexpr float MECH_FAR_X = 138.0f, MECH_FAR_Y = 106.0f, MECH_FAR_Z = 26.4f;
-    constexpr float MECH_WAVE_RADIUS = 22.0f;   // near zone (y26..70)
-    constexpr float MECH_FAR_RADIUS = 24.0f;    // far zone  (y82..130)
-    constexpr float MECH_WAVE_ZBAND = 12.0f;
-    // Wave survival + the boss kill can run several minutes; keep the long holds
-    // from escalating to a stall.
-    constexpr uint32 MECH_GAUNTLET_TIMEOUT = 300000;  // 5 min per hold/kill
+    // THE CAMP, at the bridge mouth (138, 45). The bridge deck runs x130..146
+    // (16yd wide) from y~12 up to y~122, where it opens onto Pathaleon's platform;
+    // he stands at (139.5, 149.3, 25.7).
+    //
+    // y45 is chosen for ARRIVABILITY, which is the property that matters and the
+    // one that is easy to get wrong. An anchored event only ever runs on the
+    // NON-COMBAT engine, so its steps can drive only in an out-of-combat tick — and
+    // the gauntlet has essentially none between wave 1 and wave 3 (each wave's
+    // trigger fires on the previous wave's last death). If the anchor sits SOUTH of
+    // the wave-1 spawns the party is dragged into combat before it ever gets within
+    // arriveRadius, the event never starts at all, and every gate below it is inert:
+    // live in tr-20260816-105518-10 with the anchor at y26 — "objective 'Hold the
+    // bridge camp': dist=30.0 > arriveRadius=10.0 (NOT arrived; event not started)",
+    // followed by a wipe. y45 sits just PAST the wave-1 cluster, so the walk-in is
+    // itself the last out-of-combat leg, and arriving there is what aggros the
+    // Engineer (4.6yd) and Physician (4.9yd) whose deaths the counter chain needs.
+    //
+    // Waves 1 and 2 are therefore fought by the ordinary pull/combat pipeline on the
+    // way in, exactly as they were before this event grew a camp. What the camp adds
+    // is the HOLD afterwards: the tank stays on the spot while wave 3 runs the ~55yd
+    // down the deck, instead of advancing up the bridge to meet it.
+    //
+    // NAVMESH-VALIDATED against the real map-554 mmaps (DcNavHarness probe,
+    // TestMechanarGauntletProbe): the camp snaps on-mesh, and Sepethrea->camp,
+    // camp->Pathaleon and (in reverse, the leg the far wave has to walk)
+    // wave-3 spawn->camp all route reachable+complete.
+    constexpr float MECH_CAMP_X = 138.0f;
+    constexpr float MECH_CAMP_Y = 45.0f;
+    constexpr float MECH_CAMP_Z = 25.4f;
+    // Arrive tightly (walk properly onto the spot), then hold with a little slack
+    // so ordinary combat shuffling doesn't yo-yo the tank back every tick.
+    constexpr float MECH_CAMP_ARRIVE = 4.0f;
+    constexpr float MECH_CAMP_HOLD = 6.0f;
+    // The anchor radius only has to be loose enough for the objective to trigger;
+    // step 0 does the precise walk-in.
+    constexpr float MECH_CAMP_ANCHOR_RADIUS = 10.0f;
+
+    // instance_mechanar's DataIndex (mechanar.h): the ONLY persistent-data slot the
+    // map declares. Pathaleon's DoAction(ACTION_BRIDGE_MOB_DEATH) increments it once
+    // per wave-3 death, and he is untargetable until it reaches 4.
+    constexpr uint32 MECH_DATA_BRIDGE_MOB_DEATHS = 0;
+    constexpr uint32 MECH_BRIDGE_DEATHS_TO_CLEAR = 4;
+
+    // Seek radius for the Pathaleon engage. He is 105yd from the camp, so this is
+    // "just enough" ON PURPOSE — see the .EngageOnlyWhenActive() note below. A wide
+    // radius here is not free.
+    constexpr float MECH_PATHALEON_SEEK = 130.0f;
+
+    // Three waves back-to-back is minutes of continuous combat for a bot party, and
+    // the camp holds through all of it on one step; don't let a slow but healthy
+    // gauntlet escalate to a stall for the human.
+    constexpr uint32 MECH_CAMP_TIMEOUT = 600000;      // 10 min for the whole gauntlet
+    constexpr uint32 MECH_GAUNTLET_TIMEOUT = 300000;  // 5 min for the boss kill
 }
 
 void RegisterMechanarEvents(std::vector<DungeonEvent>& out)
@@ -150,27 +215,55 @@ void RegisterMechanarEvents(std::vector<DungeonEvent>& out)
                            /*radius*/ 12.0f)
             .Build());
 
-    // (3) CROSS THE BRIDGE GAUNTLET, THEN SLAY PATHALEON.
+    // (3) HOLD THE BRIDGE CAMP, THEN SLAY PATHALEON.
     // PERSISTENT so it stands down the pull pipeline (no premature engage of the
-    // invisible boss) and its progress survives the many wave combat gaps. Step 0
-    // (MoveTo onto the bridge) bumps stepIndex so the persistence sticky-trigger
-    // engages and the tank may advance the whole bridge from the anchor. The two
-    // ClearRadius zones fight through the wave sets (position-based, so the
-    // scripted wave composition doesn't need enumerating); the final
-    // KillCreatureEngage takes Pathaleon once the >=4 deaths have made him
-    // attackable (he also DoZoneInCombat()s the party himself ~25s after the 4th
-    // death, so the party is usually already pulled in).
+    // invisible boss) and its progress survives the wave combat gaps.
+    //
+    // Step 0 walks the tank onto the camp spot; it also bumps stepIndex to 1, which
+    // is what makes the persistence sticky-trigger latch (see
+    // DungeonEventExecutor::IsPersistentAnchoredEventActive) so the event keeps
+    // driving even when a fight has dragged the tank off the anchor.
+    //
+    // Step 1 IS the camp: a garrison hold that re-walks the tank back onto the spot
+    // whenever combat has displaced it, gated on the wave-3 death counter hitting 4.
+    // There is deliberately NO advance step and NO ClearRadius — the waves come to
+    // the camp, and the previous shape's "advance to y90 to trip the far cluster,
+    // then clear it" walked the tank into the oncoming wave and on toward the boss.
+    // Killing is left to the ordinary combat engine, which owns the tick anyway for
+    // as long as the party is in combat; the event's job here is only to decide
+    // WHERE the party stands and WHEN the gauntlet is over.
+    //
+    // The gate is the persistent counter rather than "no hostile left in a volume"
+    // because the whole gauntlet is one unbroken fight: wave 2 engages on wave 1's
+    // last death and wave 3 on wave 2's, so there is no out-of-combat moment in
+    // which a position-based gate could be read, and the first such moment after
+    // the last wave dies must not be mistaken for "cluster clear, advance".
+    //
+    // Step 2 takes Pathaleon once the counter has made him attackable. He also
+    // DoZoneInCombat()s the party himself ~25s after the 4th death, so the party is
+    // often already pulled in before the walk finishes.
+    //
+    // EngageOnlyWhenActive is NOT optional here. The combat-side stealth-breaker
+    // (DungeonClearObjectiveEngageCombatTrigger, relevance 34 — above the stock
+    // combat movers) arms off the event's first engage step even while an earlier
+    // step is active, and fires when a live creature of that entry is reachable but
+    // UNDETECTABLE. Pathaleon is greater-invisible until the 4th bridge death, so he
+    // matches that signature for the entire gauntlet: the tank abandons whatever
+    // wave it is tanking and sprints the length of the bridge at him. That is the
+    // tp-20260816-105517-2 regression (4 wipes to bridge trash, 6/10 vs the previous
+    // 8/10). The seek radius above being tight is the second belt on the same
+    // trousers — widening it to 250 armed the rung from Sepethrea's room, 198yd out.
     out.push_back(
-        EventBuilder(554, 3, "Cross the bridge gauntlet and slay Pathaleon")
+        EventBuilder(554, 3, "Hold the bridge camp and slay Pathaleon")
             .Anchored(/*orderIndex (doc)*/ 12)
             .Persistent()
-            .MoveTo(MECH_BRIDGE_ENTRY_X, MECH_BRIDGE_ENTRY_Y, MECH_BRIDGE_ENTRY_Z, /*radius*/ 8.0f)
-            .ClearRadius(MECH_NEAR_X, MECH_NEAR_Y, MECH_NEAR_Z, MECH_WAVE_RADIUS, MECH_WAVE_ZBAND)
-                .Timeout(MECH_GAUNTLET_TIMEOUT)
-            .MoveTo(MECH_ADVANCE_X, MECH_ADVANCE_Y, MECH_ADVANCE_Z, /*radius*/ 8.0f)
-            .ClearRadius(MECH_FAR_X, MECH_FAR_Y, MECH_FAR_Z, MECH_FAR_RADIUS, MECH_WAVE_ZBAND)
-                .Timeout(MECH_GAUNTLET_TIMEOUT)
-            .KillCreatureEngage(MECH_PATHALEON, /*count*/ 1, /*searchRadius*/ 120.0f)
+            .MoveTo(MECH_CAMP_X, MECH_CAMP_Y, MECH_CAMP_Z, MECH_CAMP_ARRIVE)
+            .MoveToHoldUntilPersistentData(MECH_CAMP_X, MECH_CAMP_Y, MECH_CAMP_Z,
+                                           MECH_CAMP_HOLD, MECH_DATA_BRIDGE_MOB_DEATHS,
+                                           MECH_BRIDGE_DEATHS_TO_CLEAR)
+                .Timeout(MECH_CAMP_TIMEOUT)
+            .KillCreatureEngage(MECH_PATHALEON, /*count*/ 1, MECH_PATHALEON_SEEK)
+                .EngageOnlyWhenActive()
                 .Timeout(MECH_GAUNTLET_TIMEOUT)
             .Build());
 }
@@ -190,7 +283,7 @@ void RegisterMechanarRoster(std::vector<BossRosterPatch>& t)
     //   4. Loot the Cache of the Legion   (objective, eventId 1)  — past the Mo'arg doors
     //   5. Ride the Factory Elevator      (objective, eventId 2)  — up to floor 2
     //   6. Nethermancer Sepethrea
-    //   7. Cross the bridge gauntlet      (objective, eventId 3)  — clears waves + kills Pathaleon
+    //   7. Hold the bridge camp           (objective, eventId 3)  — holds the 3 waves + kills Pathaleon
     //   8. Pathaleon the Calculator       (already dead once the gauntlet event completes)
     //
     // Capacitus sits at order 2, BETWEEN the Gatewatchers, on purpose: the tank
@@ -237,9 +330,9 @@ void RegisterMechanarRoster(std::vector<BossRosterPatch>& t)
         MakeObjective(OBJ(2), /*encounterIndex*/ 11, 554, "Ride the Factory Elevator",
                       MECH_BOARD_X, MECH_BOARD_Y, MECH_BOARD_Z, /*arriveRadius*/ 8.0f,
                       /*gateEntry*/ 0, /*hook*/ 0, /*eventId*/ 2, /*orderOverride*/ 5),
-        MakeObjective(OBJ(3), /*encounterIndex*/ 12, 554, "Cross the bridge gauntlet",
-                      MECH_BRIDGE_ENTRY_X, MECH_BRIDGE_ENTRY_Y, MECH_BRIDGE_ENTRY_Z,
-                      /*arriveRadius*/ 10.0f, /*gateEntry*/ 0, /*hook*/ 0,
+        MakeObjective(OBJ(3), /*encounterIndex*/ 12, 554, "Hold the bridge camp",
+                      MECH_CAMP_X, MECH_CAMP_Y, MECH_CAMP_Z,
+                      MECH_CAMP_ANCHOR_RADIUS, /*gateEntry*/ 0, /*hook*/ 0,
                       /*eventId*/ 3, /*orderOverride*/ 7),
     };
     t.push_back(std::move(p));

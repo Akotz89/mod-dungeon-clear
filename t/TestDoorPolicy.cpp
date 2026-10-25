@@ -193,6 +193,47 @@ TEST(DcDoorPolicyTest, ScholomanceStratholmeAndDireMaulNorthKeyedDoorsAreExempt)
     EXPECT_FALSE(DcEventDoorRegistry::IsKeyExempt(124372));  // Uldaman Ironaya seal
 }
 
+// Every lock-680 (Shadowforge Key 11000 / lockpicking 250) door in Blackrock
+// Depths, not just the two on the lever's doorstep. Waiving them one at a time
+// only walks the auto-pause down the corridor: test plan tp-20260817-171356-1
+// shipped with 170570 + 161460 exempt and still lost 6 of 10 runs at 10/20
+// bosses to "can't open ... 170560" — the Shadowforge Gate one room earlier.
+// The Lyceum is the same gate again for the back half of the dungeon: Flamelash,
+// The Seven, Magmus and the Emperor are all behind it.
+TEST(DcDoorPolicyTest, BlackrockLock680TraversalGatesAreKeyExempt)
+{
+    EXPECT_TRUE(DcEventDoorRegistry::IsKeyExempt(170559));   // Shadowforge Gate (west)
+    EXPECT_TRUE(DcEventDoorRegistry::IsKeyExempt(170560));   // Shadowforge Gate (east)
+    EXPECT_TRUE(DcEventDoorRegistry::IsKeyExempt(170570));   // East Garrison Door
+    EXPECT_TRUE(DcEventDoorRegistry::IsKeyExempt(170558));   // The Lyceum
+    EXPECT_TRUE(DcEventDoorRegistry::IsKeyExempt(161460));   // The Shadowforge Lock
+
+    // Still not a lock-level amnesty, and still not a map-level one: the doors
+    // instance_blackrock_depths caches AND drives stay script territory whatever
+    // lock they ride, and the Vault's loot cells are not a corridor at all.
+    EXPECT_FALSE(DcEventDoorRegistry::IsKeyExempt(170571));  // Bar Door (GO_BAR_DOOR)
+    EXPECT_FALSE(DcEventDoorRegistry::IsKeyExempt(170573));  // Golem Room North
+    EXPECT_FALSE(DcEventDoorRegistry::IsKeyExempt(170575));  // Throne Room Doors (Magmus)
+    EXPECT_FALSE(DcEventDoorRegistry::IsKeyExempt(170576));  // Tomb of the Seven, in
+    EXPECT_FALSE(DcEventDoorRegistry::IsKeyExempt(174554));  // Relic Coffer Door
+}
+
+// The Detention Block's eight cell doors, lock 699 (Prison Cell Key 11140 /
+// lockpicking 250). Same screen as the lock-680 gates: type DOOR, addon flags
+// 34, no ScriptName, no AIName, no smart_scripts or conditions row, and absent
+// from instance_blackrock_depths entirely — its door enum stops at the Lyceum.
+// The boss route runs through the cells, so a shut one is a hard stop: 170567
+// auto-paused a tp-20260817-171356-1 run at 2/20 bosses, parked 0.0yd inside the
+// doorway on a route the diag still called ok/1seg dev=0.5.
+TEST(DcDoorPolicyTest, BlackrockDetentionBlockCellDoorsAreKeyExempt)
+{
+    for (uint32 cellDoor = 170562; cellDoor <= 170569; ++cellDoor)
+        EXPECT_TRUE(DcEventDoorRegistry::IsKeyExempt(cellDoor)) << "cell door " << cellDoor;
+
+    // The entries bracketing the cell-door run are unrelated and stay put.
+    EXPECT_FALSE(DcEventDoorRegistry::IsKeyExempt(170561));  // Supply Room Door (lock-free)
+}
+
 // --- Script-only denylist ---------------------------------------------------
 //
 // All three Shadowfang Keep gates ride the same empty lock 85 that CanOpenSlots
@@ -241,4 +282,226 @@ TEST(DcDoorPolicyTest, SteamvaultAccessPanelsAreNavigationIgnored)
     // Still not a blanket amnesty.
     EXPECT_FALSE(DcEventDoorRegistry::IsNavigationIgnored(18895));   // SFK courtyard
     EXPECT_FALSE(DcEventDoorRegistry::IsNavigationIgnored(0));
+}
+
+// Blackrock Depths' Giant Doors are ONE machine spread over four
+// GAMEOBJECT_TYPE_DOOR entries, and only the lever is meant to be clicked. The
+// three moving parts are driven entirely by the lever's SmartAI, and their
+// states are inverted with respect to each other, so whichever way the machine
+// stands one of them sits in GO_STATE_READY on the corridor and reads as a shut
+// gate. Run tr-20260817-044457-30 died on exactly that: the Fake Collision hull
+// (161462), flagged "as corridor-blocking" 78.1yd out on the passage to
+// Bael'Gar, auto-paused the run at 9/19 bosses. Closing the doors — the whole
+// point of map-230 event 2 — would have moved the same stall onto 157923.
+TEST(DcDoorPolicyTest, BlackrockGiantDoorApparatusIsNavigationIgnored)
+{
+    EXPECT_TRUE(DcEventDoorRegistry::IsNavigationIgnored(157923));  // Giant Doors
+    EXPECT_TRUE(DcEventDoorRegistry::IsNavigationIgnored(161461));  // Giant Door Mechanism
+    EXPECT_TRUE(DcEventDoorRegistry::IsNavigationIgnored(161462));  // Fake Collision
+    EXPECT_TRUE(DcEventDoorRegistry::IsNavigationIgnored(161516));  // BigDoorDummyCollision02
+
+    // The lever itself is NOT navigation-ignored — it is the one part of the
+    // machine the run must actually reach and click.
+    EXPECT_FALSE(DcEventDoorRegistry::IsNavigationIgnored(161460));  // The Shadowforge Lock
+    // Nor is the door into the room that holds it.
+    EXPECT_FALSE(DcEventDoorRegistry::IsNavigationIgnored(170570));  // East Garrison Door
+}
+
+// Utgarde Keep's forge hall is a ring cut into three sectors by three walls of
+// fire, and each wall is a GAMEOBJECT_TYPE_DOOR whose state only
+// instance_utgarde_keep drives — SetData(DATA_FORGE_n) on the matching forge
+// master's death. The master that opens a wall stands on the party's side of
+// it, so there is never anything to solve AT the wall, yet the model is a ~60yd
+// slab lying across the ring and the closed-door predicate reads it as a shut
+// gate on the corridor. Runs tr-20260818-070705-4 and -7 died on exactly that:
+// 186692 flagged "as corridor-blocking" 98yd out, walk-in, "can't open ->
+// auto-pausing", 0/3 bosses with the tank still 57yd short of forge 1.
+TEST(DcDoorPolicyTest, UtgardeKeepForgeFlameWallsAreNavigationIgnored)
+{
+    EXPECT_TRUE(DcEventDoorRegistry::IsNavigationIgnored(186691));  // ForgeFire_Third
+    EXPECT_TRUE(DcEventDoorRegistry::IsNavigationIgnored(186692));  // ForgeFire_First
+    EXPECT_TRUE(DcEventDoorRegistry::IsNavigationIgnored(186693));  // ForgeFire_Second
+
+    // The Giant Portcullises that Ingvar's death opens are NOT ignored: they
+    // are ordinary progress gates on the way out, and a run still standing at
+    // one after the encounter has a real stall worth pausing on.
+    EXPECT_FALSE(DcEventDoorRegistry::IsNavigationIgnored(186694));
+    EXPECT_FALSE(DcEventDoorRegistry::IsNavigationIgnored(186756));
+
+    // No other list claims them: they carry no lock and no key, and they never
+    // reopen on a timer — only a kill opens one.
+    for (uint32 entry : { 186691u, 186692u, 186693u })
+    {
+        EXPECT_FALSE(DcEventDoorRegistry::IsScriptOnly(entry));
+        EXPECT_FALSE(DcEventDoorRegistry::IsSelfClearing(entry));
+        EXPECT_FALSE(DcEventDoorRegistry::IsKeyExempt(entry));
+        EXPECT_FALSE(DcEventDoorRegistry::IsLockFreeClickable(entry));
+    }
+}
+
+// Molten Core has no doors at all — every GAMEOBJECT_TYPE_DOOR on map 409 is a
+// fire doodad, permanently in GO_STATE_READY and opened by nothing. Two of them
+// sit on the raid's critical path:
+//   177000 Hot Coal, 23yd short of Majordomo's summon position. This ended
+//     tr-20260827-145857-1 (the Plan E1 pilot's first run) at 8/11 bosses —
+//     flagged "as corridor-blocking" 66.2yd out, walk-in, "can't open ->
+//     auto-pausing".
+//   178107/178108 Lava Steam and Lava Splash, both within 1.5yd of Ragnaros'
+//     fight anchor. These are the Ahn'kahet prison-FX shape: a flag here parks
+//     the raid on the objective it has already arrived at.
+TEST(DcDoorPolicyTest, MoltenCoreFireDoodadsAreNavigationIgnored)
+{
+    EXPECT_TRUE(DcEventDoorRegistry::IsNavigationIgnored(177000));  // Hot Coal
+    EXPECT_TRUE(DcEventDoorRegistry::IsNavigationIgnored(178107));  // Lava Steam
+    EXPECT_TRUE(DcEventDoorRegistry::IsNavigationIgnored(178108));  // Lava Splash
+
+    // No other list claims them: they are lock-free, keyless, never clicked and
+    // never reopened on a timer, so navigation-invisible is the whole ruling.
+    // In particular NOT IsScriptOnly — that only refuses the click, and the
+    // doodad would still be flagged, parked at and auto-paused on.
+    for (uint32 entry : { 177000u, 178107u, 178108u })
+    {
+        EXPECT_FALSE(DcEventDoorRegistry::IsScriptOnly(entry));
+        EXPECT_FALSE(DcEventDoorRegistry::IsSelfClearing(entry));
+        EXPECT_FALSE(DcEventDoorRegistry::IsKeyExempt(entry));
+        EXPECT_FALSE(DcEventDoorRegistry::IsLockFreeClickable(entry));
+    }
+}
+
+// Blackwing Lair's Chromaggus cage. The portcullis (179116) is opened ONLY by
+// the Lever (179148) 65yd away on the raid's side of it: go_chromaggus_lever's
+// GossipHello clears his IMMUNE_TO_PC, walks him out and calls HandleGameObject
+// on the gate. It is not in instance_blackwing_lair's doorData, so no encounter
+// state opens it either — and it is lock-free, so BotCanOpenDoorLikePlayer
+// refuses to force it.
+//
+// Left flagged it DEADLOCKS the run rather than merely mis-parking it: the flag
+// stands the at-boss trigger down, so the raid muster never stages, so
+// ChromaggusCageDue (which waits on muster Ready) is never true, so neither the
+// door-blocked trigger's due-event yield nor the lever click can ever happen.
+// Nine BWL runs ended parked ~21yd from it — tr-20260828-183508-1/-2/-3,
+// -195344-2/-4/-5, -215521-15, -235310-4 and tr-20260829-195231-1, the last at
+// 8/9 bosses with no "raid muster: staging at Chromaggus" line ever reached.
+TEST(DcDoorPolicyTest, ChromaggusCagePortcullisIsNavigationIgnored)
+{
+    EXPECT_TRUE(DcEventDoorRegistry::IsNavigationIgnored(179116));
+
+    // The lever is NOT ignored — it is the thing the cage event must reach and
+    // click, exactly as with Blackrock's Shadowforge Lock above.
+    EXPECT_FALSE(DcEventDoorRegistry::IsNavigationIgnored(179148));
+
+    // Nor is the EXIT portcullis: it is doorData DOOR_TYPE_PASSAGE on
+    // DATA_CHROMAGGUS, so his death opens it, and a raid still standing at it
+    // afterwards has a real stall worth pausing on.
+    EXPECT_FALSE(DcEventDoorRegistry::IsNavigationIgnored(179117));
+
+    // No other list claims the cage: NOT IsScriptOnly in particular, which only
+    // refuses the click and would leave the auto-pause — the half that kills the
+    // run — fully armed.
+    EXPECT_FALSE(DcEventDoorRegistry::IsScriptOnly(179116));
+    EXPECT_FALSE(DcEventDoorRegistry::IsSelfClearing(179116));
+    EXPECT_FALSE(DcEventDoorRegistry::IsKeyExempt(179116));
+    EXPECT_FALSE(DcEventDoorRegistry::IsLockFreeClickable(179116));
+}
+
+// --- Self-clearing script barriers ------------------------------------------
+//
+// Stratholme's two gate traps. instance_stratholme watches (3612.3,-3335.4)
+// Scarlet side and (3919.9,-3547.3) undead side; a non-GM player within 5.5yd
+// slams the matching PAIR of portcullises shut, spawns plagued critters 2s
+// later, and reopens both gates 20s after that. Nothing to click, nothing for a
+// player to solve, and a hard 20s ceiling — so the door-blocked action must hold
+// rather than auto-pause. Run tr-20260816-151006-14 walked its tank over the
+// Crusaders' Square trigger and auto-paused 13.1yd from the portcullis, burning
+// 36s of a 60s pause budget waiting for a gate that was always going to reopen.
+TEST(DcDoorPolicyTest, StratholmeGateTrapPortcullisesAreSelfClearing)
+{
+    EXPECT_TRUE(DcEventDoorRegistry::IsSelfClearing(175350));  // trap 1, Scarlet
+    EXPECT_TRUE(DcEventDoorRegistry::IsSelfClearing(175351));  // trap 1, Scarlet
+    EXPECT_TRUE(DcEventDoorRegistry::IsSelfClearing(175354));  // trap 2, undead
+    EXPECT_TRUE(DcEventDoorRegistry::IsSelfClearing(175355));  // trap 2, undead
+
+    // Stratholme's EARNED gates are not self-clearing: nothing reopens them but
+    // the party's own progress, so a hold there would never end.
+    EXPECT_FALSE(DcEventDoorRegistry::IsSelfClearing(175352));  // King's Square Gate
+    EXPECT_FALSE(DcEventDoorRegistry::IsSelfClearing(175353));  // King's Square Gate
+    EXPECT_FALSE(DcEventDoorRegistry::IsSelfClearing(175356));  // Gauntlet Gate
+    EXPECT_FALSE(DcEventDoorRegistry::IsSelfClearing(175357));  // Gauntlet Gate
+    EXPECT_FALSE(DcEventDoorRegistry::IsSelfClearing(175368));  // Service Entrance
+    EXPECT_FALSE(DcEventDoorRegistry::IsSelfClearing(0));
+
+    // The trap gates ride the other lists' exclusions too: they are lock-free
+    // and script-driven, so nothing else in the registry claims them either.
+    EXPECT_FALSE(DcEventDoorRegistry::IsKeyExempt(175351));
+    EXPECT_FALSE(DcEventDoorRegistry::IsLockFreeClickable(175351));
+    EXPECT_FALSE(DcEventDoorRegistry::IsNavigationIgnored(175351));
+}
+
+// Karazhan's Gatehouse Door (183450) is the front portcullis every run meets
+// 11yd from the zone-in. It is lock-free and scriptless — only a click opens
+// it — so it must be on the lock-free clickable list, and on no list that
+// would hold the bot off it. tr-20260923-165858-1 auto-paused there at 0/10.
+TEST(DcDoorPolicyTest, KarazhanGatehouseDoorIsLockFreeClickable)
+{
+    EXPECT_TRUE(DcEventDoorRegistry::IsLockFreeClickable(183450));
+    EXPECT_FALSE(DcEventDoorRegistry::IsScriptOnly(183450));
+    EXPECT_FALSE(DcEventDoorRegistry::IsSelfClearing(183450));
+    EXPECT_FALSE(DcEventDoorRegistry::IsNavigationIgnored(183450));
+}
+
+// Karazhan's other doors. The Strange Bookcase is the only way into Terestian's
+// room and a plain click opens it. The Gamesman's Hall Exit Door opens only on
+// Chess DONE. Aran's library door is opened and shut by his script and must be
+// waited on, never clicked.
+TEST(DcDoorPolicyTest, KarazhanBookcaseIsClickable)
+{
+    EXPECT_TRUE(DcEventDoorRegistry::IsLockFreeClickable(184453));
+    EXPECT_FALSE(DcEventDoorRegistry::IsScriptOnly(184453));
+    EXPECT_FALSE(DcEventDoorRegistry::IsSelfClearing(184453));
+    EXPECT_FALSE(DcEventDoorRegistry::IsNavigationIgnored(184453));
+}
+
+// The chess hall's way in: a plain click opens it (the chess plan's C0.1).
+TEST(DcDoorPolicyTest, KarazhanGamesmanHallDoorIsClickable)
+{
+    EXPECT_TRUE(DcEventDoorRegistry::IsLockFreeClickable(184276));
+    EXPECT_FALSE(DcEventDoorRegistry::IsScriptOnly(184276));
+    EXPECT_FALSE(DcEventDoorRegistry::IsSelfClearing(184276));
+    EXPECT_FALSE(DcEventDoorRegistry::IsNavigationIgnored(184276));
+}
+
+TEST(DcDoorPolicyTest, KarazhanGamesmanExitIsScriptOnly)
+{
+    EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(184277));
+    EXPECT_FALSE(DcEventDoorRegistry::IsLockFreeClickable(184277));
+    EXPECT_FALSE(DcEventDoorRegistry::IsSelfClearing(184277));
+}
+
+TEST(DcDoorPolicyTest, KarazhanLibraryDoorIsHeldNeverClicked)
+{
+    EXPECT_TRUE(DcEventDoorRegistry::IsSelfClearing(184517));
+    EXPECT_FALSE(DcEventDoorRegistry::IsLockFreeClickable(184517));
+    EXPECT_FALSE(DcEventDoorRegistry::IsKeyExempt(184517));
+    // Not navigation-ignored: the party walks through it once it is open.
+    EXPECT_FALSE(DcEventDoorRegistry::IsNavigationIgnored(184517));
+}
+
+// Blackrock Depths' Bar Door (170571) opens only at the end of Rocknot's ale run
+// (map-230 event 5), and Phalanx turns hostile only after it, at the end of his
+// run to the doorway. Clicking it early would let the party walk out past a
+// Phalanx who is still unattackable.
+TEST(DcDoorPolicyTest, BlackrockBarDoorIsScriptOnly)
+{
+    EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(170571));
+    EXPECT_FALSE(DcEventDoorRegistry::IsKeyExempt(170571)) << "the Grim Guzzler Key is never waived";
+    // The Summoner's Tomb doors are the Seven's (map-230 event 6) alone.
+    EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(170576));   // entrance
+    EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(170577));   // exit
+    // The Golem Room doors open on both braziers lit (map-230 events 7/8).
+    EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(170573));   // Golem Room North
+    EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(170574));   // Golem Room South
+    EXPECT_TRUE(DcEventDoorRegistry::IsScriptOnly(170575));   // Throne Room (Magmus's death)
+    // The Lyceum door stays a keyed traversal gate the walker opens.
+    EXPECT_FALSE(DcEventDoorRegistry::IsScriptOnly(170558));
+    EXPECT_TRUE(DcEventDoorRegistry::IsKeyExempt(170558));
 }

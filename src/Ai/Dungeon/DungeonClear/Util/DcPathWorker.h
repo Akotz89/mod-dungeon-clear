@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <unordered_map>
 
@@ -51,10 +52,13 @@ public:
 
     // Queue a build. `mesh` MUST be the owning map's navmesh shared_ptr
     // (Map::GetMapCollisionData().GetMMapNavMeshSharedPtr()) so it stays alive
-    // across the worker round-trip. Returns a non-zero jobId to poll with.
+    // across the worker round-trip. `runWing` is the run wing resolved on the
+    // map thread (DcRunWing::FenceWing), copied into the job. Returns a non-zero
+    // jobId to poll with.
     uint64 Submit(uint32 mapId, uint32 forEntry, ObjectGuid botGuid,
                   std::shared_ptr<dtNavMesh> mesh,
-                  float sx, float sy, float sz, float tx, float ty, float tz);
+                  float sx, float sy, float sz, float tx, float ty, float tz,
+                  std::string runWing = {});
 
     // If job `jobId` has finished, move its result out (plus the boss entry and
     // map id it was built for, for staleness checks), erase the mailbox entry,
@@ -84,6 +88,7 @@ private:
         std::shared_ptr<dtNavMesh> mesh;   // pins the navmesh for the build
         float sx{0.0f}, sy{0.0f}, sz{0.0f};
         float tx{0.0f}, ty{0.0f}, tz{0.0f};
+        std::string runWing;   // wing-scoped fence rows (see DcNavPenaltyRegistry)
     };
 
     struct Completed

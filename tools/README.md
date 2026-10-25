@@ -15,11 +15,15 @@ and issue `SELECT`s only — they write nothing, to the DB or to disk.
 | `room_aggro_audit.py` | diffs `RoomAggroRegistry` against SmartAI actions 38/39 + C++ idioms | `acore_world`, `src/` |
 | `dungeon_model.py` | ASCII top-down spatial model of a dungeon; DC ring / dead-band report | `acore_world` |
 | `probe_navmesh.py` | dumps Detour navmesh verts/polys near a point | `mmaps/` |
+| `gen_navmap.py` | renders a map's navmesh to a world-aligned top-down PNG (crop, height band, markers) | `mmaps/` |
 | `slice_mapdata.py` | slices navmesh test fixtures for the headless sim | `mmaps/` |
 | `dc_test_run.py` | **everything known about one test run, by its id** — record, plan, live state, and the log lines sliced down to that run | run logs, `*.log` |
+| `lab_from_snapshot.py` | turns a recorded real pull (`dungeonclear_pull_snapshots.jsonl`) into a Pull Lab scenario | snapshots, run records, `acore_world` |
+| `lab_check.py` | checks Pull Lab scenarios against the world DB (tokens, spawnIds on the map, spawned objective, puppet scripts) | `lab/`, `acore_world` |
+| `lab_trace.py` | views a Pull Lab trace (`lab_traces/<runId>.jsonl`): oracles, pull timeline, action stream, any frame | `lab_traces/` |
 | `dc_analytics.py` | ingests test-run JSONL logs into a queryable SQLite db | run logs |
 | `check_config_reads.py` | build guard: every tunable must be read via `DcSettings` | `src/` |
-| `check_determinism.sh` | determinism guard for the decision cores | build output |
+| `check_determinism.sh` | determinism guard for the decision cores (comments exempt) | `src/` |
 | `dc-feature.sh` | starts a feature in an isolated git worktree | git |
 
 `check_config_reads.py` and `check_determinism.sh` are CI/build-time guards, not
@@ -36,3 +40,10 @@ drill-down flags (`--logs`, `--grep`, `--dump`, `--json`).
 The spawn-table tools handle both `creature.id1` and the newer `creature.id`
 spelling by probing `information_schema`, so they work across the upstream
 rename.
+
+`gen_navmap.py` draws the walkable navmesh straight from the Detour tiles, so
+the image is exact in world coordinates by construction and prints its
+world->pixel affine. On caverns and other multi-level maps the levels flatten
+together top-down; narrow them with `--z=LO,HI` and `--style height`. Point it
+at the server's `mmaps/` with `--mmaps` or `AC_MMAPS_DIR`; it writes only the
+PNG you name. See `--help` for an example.

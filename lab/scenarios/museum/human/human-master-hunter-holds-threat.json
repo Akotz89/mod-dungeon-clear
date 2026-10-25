@@ -1,0 +1,46 @@
+{
+  "about": "Human players (issue #18 'DPS Not Attacking', Slave Pens video): the real-player master was a hunter actively damaging mobs, and the broken bots were a mage and an elemental shaman who parked at 29-34yd and never started a cast. The headless corpus never has a human combatant pulling threat around. Here the puppet hunter opens on the tank's tag and keeps shooting while frost mage and ele shaman bots must still contribute (O4), and the human must not fight alone (O9). Geometry: the Wastewalker Worker formation 52384 (+52385/52398) with its Coilfang Slavehandler 79359, whose 10-point path circles them. The start is 8yd behind the real tank position (-17.8,-13.9) of the 2026-10-01 17:01 Slave Pens pull, on the same line. Closed by e63b9d0d (strip DC strategies from the wrong engine) and 5bace3da (combat regroup no longer mutes follower DPS). Memory: dc-issue18-trace-verdict, dc-regroup-combat-tick-thief.",
+  "schema": 1,
+  "geometry": {
+    "map": 547,
+    "dungeon": "slave-pens",
+    "heroic": false,
+    "region": { "center": [-35.0, 0.0, -1.2], "radius": 60.0 },
+    "objective": 17941,
+    "objectiveName": "Mennu the Betrayer"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [52384, 52385, 52398, 79359]
+      }
+    }
+  },
+  "party": {
+    "comp": "paladin-prot,priest-holy,hunter-bm,mage-frost,shaman-ele",
+    "level": 64,
+    "start": [-13.8, -20.6, -1.7, 2.112],
+    "react": "fast",
+    "seedTarget": true,
+    "human": { "slot": 2, "script": "humans/hunter-master-holds-threat" }
+  },
+  "settings": {
+    "PullSetting": 2
+  },
+  "goal": { "kill": "pack:target", "timeoutS": 90 },
+  "expect": {
+    "oracles": {
+      "O4": "pass",
+      // The three Wastewalker Workers are faction 190 (not hostile) until the
+      // Slavehandler's On Aggro SAI sets data 2 2 on them (Attack Start), so the
+      // governor's hostile scan predicts 1 and 4 engage (lb-20261003-155828-1 run 1).
+      // That governor gap is reported separately; this entry tests O4/O9.
+      "O7": { "joinersMax": 3, "expect": "pass" },
+      // The party is held passive at camp while the drag runs; the hunter opening
+      // on the tag is fighting 'alone' for the length of the drag by design.
+      "O9": { "humanFightS": 12, "expect": "pass" },
+      "O10": "pass"
+    },
+    "knownFailure": "fixed:5bace3da"
+  }
+}

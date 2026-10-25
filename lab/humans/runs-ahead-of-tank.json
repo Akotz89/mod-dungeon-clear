@@ -1,0 +1,9 @@
+{
+  "about": "An impatient human: follows the tank until it commits to the pull, then sprints past it into the pack the tank was about to drag, and fights whatever is nearest.",
+  "steps": [
+    { "when": { "atMs": 0 }, "do": { "follow": "tank", "dist": 3 } },
+    { "when": { "event": "commit", "delayMs": 500 }, "do": { "runAhead": 40 } },
+    { "when": { "predicate": "packEngaged > 0" }, "do": { "attack": "nearest" } },
+    { "when": { "predicate": "elapsedS > 30" }, "do": { "attack": "nearest" } }
+  ]
+}

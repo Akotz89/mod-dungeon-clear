@@ -17,6 +17,7 @@ enum class AnchorFlag : uint16
     JUMP_GAP    = 1 << 1,  // Off-mesh gap — same MoveJump path, distinguishes ledge-jump from drop-down for telemetry.
     DOOR_AHEAD  = 1 << 2,  // Anchor sits in front of a door (entry in `doorGoEntry`); Advance stalls if door is closed.
     PIVOT_TIGHT = 1 << 3,  // Tight pivot — followers cluster closer here. Hint only; doesn't affect Advance directly.
+    NO_STOP     = 1 << 4,  // Cross this leg without setting up a pull — see DcNoStopZone.
 };
 
 inline constexpr uint16 ToFlag(AnchorFlag f) { return static_cast<uint16>(f); }

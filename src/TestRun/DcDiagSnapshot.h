@@ -29,6 +29,84 @@ class Player;
 // NOT used here; route deviation comes from the pure RouteDeviation helper.
 namespace DcDiag
 {
+    // What is under one unit: the walkable navmesh in its column, the ground the
+    // core resolves a fall to, and the bare terrain grid.
+    //
+    // Written for the Culling of Stratholme King's Square freeze
+    // (tp-20260910-121847-3, 2/100): two tanks ended 10-12yd UNDER the street,
+    // flagged in combat with a zombie and a ghoul at full health for ten
+    // minutes, and the record held their z and nothing to compare it with. Map
+    // 595 is one of the flat-grid maps, so a missed VMAP ray drops a unit onto a
+    // sheet at z 0.14 — whether that is what happened, or they stood on geometry
+    // the mesh does not cover, is exactly what these three numbers separate.
+    struct FloorProbe
+    {
+        bool probed = false;     // false => not measured (off-map, or no map)
+        bool meshOk = false;     // a navmesh poly exists in the unit's column
+        float meshZ = 0.f;       // height of the nearest poly in that column
+        float groundZ = 0.f;     // WorldObject::GetMapHeight from just above the unit
+        float gridZ = 0.f;       // Map::GetGridHeight — terrain alone, no VMAP
+    };
+
+    // A unit this far or more below the navmesh in its own column is under the
+    // floor, not standing on a lower one: a real lower floor has its own poly,
+    // and the column search returns the nearest in z. The slack covers a unit
+    // on a slope or a step edge that the mesh rounds a yard or two off.
+    constexpr float kUnderMeshYd = 3.0f;
+    bool IsUnderMesh(FloorProbe const& floor, float z);
+
+    // One copy of the escortee found on the map, alive or not, near or not.
+    struct EscorteeCopy
+    {
+        std::uint64_t guid = 0;
+        std::uint32_t spawnId = 0;    // 0 => a summon, not a DB spawn
+        bool alive = false;
+        std::uint32_t deathState = 0; // Unit::getDeathState, raw
+        bool inWorld = false;
+        float x = 0.f, y = 0.f, z = 0.f;
+        float homeX = 0.f, homeY = 0.f, homeZ = 0.f;  // an instance Reposition moves this
+        float distToTank = -1.f;
+        bool moving = false;
+        bool inCombat = false;
+        bool evading = false;
+        bool gossipFlag = false;
+        std::uint32_t faction = 0;
+        // Creature::IsUpdateNeeded — false is the 170yd freeze: a DB-spawned NPC
+        // nobody is near drops off the update list and runs no AI at all.
+        bool updateNeeded = false;
+        bool gridLoaded = false;      // Map::IsGridLoaded at his own position
+        bool seenByGridScan = false;  // also found by a grid search around the tank
+    };
+
+    // The active EscortCreature step, and where its escortee actually is.
+    //
+    // Written for the Culling of Stratholme Town Hall stall (tp-20260910-121847-3,
+    // 6/100): "can't keep up with the escort" is the driver's escortee-ABSENT
+    // branch, and all six tanks held on Arthas's WP14 corner, 75-95yd from where
+    // he waits out the waves and well inside the 200yd search. Why the driver's
+    // FindNearestCreature found nobody — dead, somewhere else, or there and
+    // unseen — the record could not say. `driverSees` repeats the driver's exact
+    // call; the copies list is every creature of the entry on the map, so the
+    // two disagreeing is itself the answer.
+    struct EscortSnapshot
+    {
+        bool active = false;          // the tank's active event step is an EscortCreature
+        std::uint32_t eventId = 0;
+        std::string eventName;
+        std::uint32_t stepIndex = 0;
+        std::uint32_t entry = 0;
+        float searchRadius = 0.f;     // the driver's resolve radius, default applied
+        bool driverSees = false;      // FindNearestCreature(entry, searchRadius, alive)
+        std::uint64_t driverSeesGuid = 0;
+        bool deadAirSeen = false;     // escortProgressMs has been stamped
+        std::uint32_t deadAirMs = 0;  // since the escort last counted as progress
+        std::int32_t instanceDataId = -1;
+        std::uint32_t instanceData = 0;
+        std::uint32_t instanceDataMin = 0;
+        std::uint32_t copyCount = 0;  // total before the cap below
+        std::vector<EscorteeCopy> copies;
+    };
+
     // One unit holding a party member in combat, with every input the
     // phantom-combat hatch weighs when it decides whether that hold is a REAL
     // fight — see DungeonClearTriggers.cpp's HasLegitimateCombatHolder, which
@@ -69,6 +147,11 @@ namespace DcDiag
         bool reachable = false;
         bool reachChecked = false;
         bool canAttackMe = true;      // CreatureAI::CanAIAttack(member)
+        // CREATURE_FLAG_EXTRA_TRIGGER: an invisible script helper no bot can
+        // target, so the party can never resolve the reference however reachable
+        // and willing the holder is. Always sinks `legitimate` — see
+        // DungeonClearMath::IsUnresolvableCombatHolder.
+        bool trigger = false;
         // A boss can be ALIVE, reachable and allowed to attack while being
         // scripted out of the fight entirely. MgT's Kael'thas clamps damage to
         // health-1, goes SetImmuneToAll + REACT_PASSIVE, despawns his summons and
@@ -85,6 +168,7 @@ namespace DcDiag
         std::string victim;           // what the holder itself is fighting, if anything
         bool legitimate = false;      // the verdict HasLegitimateCombatHolder derives
         float x = 0.f, y = 0.f, z = 0.f;
+        FloorProbe floor;             // probed only when on the member's map
     };
 
     // One party member as seen at capture time. Positions are world coords in
@@ -101,6 +185,15 @@ namespace DcDiag
         std::uint32_t mapId = 0;
         float x = 0.f, y = 0.f, z = 0.f;
         float distToTank = 0.f;   // -1 when on a different map (distance is meaningless)
+        FloorProbe floor;         // probed for every online member
+        // ON A VEHICLE: the base carries the member, and its position is the seat's.
+        // A rider is AIRBORNE by design on The Oculus, so the under-the-floor
+        // verdict below is suppressed for it — a drake 50yd over a ring reads as
+        // "under the mesh" of the ring above, five times a tick, otherwise.
+        bool onVehicle = false;
+        std::uint32_t baseEntry = 0;
+        float baseX = 0.f, baseY = 0.f, baseZ = 0.f;
+        bool seatCanControl = false;
         bool alive = false;
         std::uint32_t healthPct = 0;
         std::uint32_t manaPct = 0;   // 0 for non-mana classes
@@ -108,6 +201,18 @@ namespace DcDiag
         std::string victim;       // name of GetVictim(), "" when not fighting
         bool dcStrategy = false;      // has the "dungeon clear" strategy
         bool dcCombatStrategy = false;
+
+        // HEARTBEAT: how long ago this member's own DC trigger ladder last ran
+        // (DcTickHeartbeat, stamped on both engines before any gate).
+        // `dcTickSeen == false` means it has never run for this bot.
+        //
+        // This is the field that separates "DC stood every rung down" from "this
+        // bot's AI is not being updated", which every other column reports
+        // identically. Read it per MEMBER, not just off the tank: the freeze it
+        // was written for is precisely a tank whose age climbs into the hundreds
+        // of seconds while its four followers stay in the tens of milliseconds.
+        std::uint32_t dcTickAgeMs = 0;
+        bool dcTickSeen = false;
 
         // --- combat blame (populated only while inCombat) ------------------
         // WHICH ENGINE the bot is actually running, which is a different
@@ -220,8 +325,15 @@ namespace DcDiag
         std::uint32_t clearedAnchors = 0;
         std::uint32_t skippedCount = 0;
 
+        // The tank's own heartbeat, mirrored out of its member row so the
+        // one-line Summarize can carry it. See MemberSnapshot::dcTickAgeMs.
+        std::uint32_t dcTickAgeMs = 0;
+        bool dcTickSeen = false;
+
         std::vector<MemberSnapshot> members;
         std::vector<BossSnapshot> roster;
+
+        EscortSnapshot escort;    // serialized only while an escort step is active
     };
 
     // Read every field above off the leader tank. Safe on a null/despawned

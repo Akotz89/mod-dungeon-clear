@@ -9,6 +9,7 @@
 
 #include "DungeonClearMath.h"
 #include "DungeonClearTuning.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcLabTap.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
 #include <algorithm>
 #include <cmath>
@@ -63,7 +64,7 @@ namespace
 {
     // GUIDs of players that currently carry a DC follow-tank MoveFollow
     // generator. Mutated from the follow-tank action (bot AI update) and read by
-    // the reaper (world update / OnPlayerbotUpdate); both run on the world
+    // the reaper (world update); both run on the world
     // thread today, but the set is tiny and the lock is uncontended, so guard it
     // anyway to stay correct if bot updates ever move off-thread.
     std::set<ObjectGuid> g_dcFollowingPlayers;
@@ -300,6 +301,7 @@ void DcFollowerLifecycle::ApplyFollowerPassive(Player* follower)
         }
         DC_PULL_DEBUG("[DC:{}] advanced-pull: healer pinned at camp (stay, heals only)",
                       follower->GetName());
+        DcLabTap::Passive(follower->GetGUID().GetRawValue(), true);
         return;
     }
 
@@ -319,6 +321,7 @@ void DcFollowerLifecycle::ApplyFollowerPassive(Player* follower)
         // pet release so the pet we just set passive isn't flipped back.
         g_dcPetReleaseAt.erase(follower->GetGUID());
     }
+    DcLabTap::Passive(follower->GetGUID().GetRawValue(), true);
 
     DC_PULL_DEBUG("[DC:{}] advanced-pull: held passive at camp", follower->GetName());
 }
@@ -356,6 +359,7 @@ void DcFollowerLifecycle::RemoveFollowerPassive(Player* follower)
             g_dcHealerFollowStates.erase(fit);
         }
     }
+    DcLabTap::Passive(follower->GetGUID().GetRawValue(), false);
 
     if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(follower))
     {
@@ -457,7 +461,18 @@ void DcFollowerLifecycle::ReapStrandedPassives()
         // even though the leader is still in a holding phase: the whole point of
         // the release is that the held followers fight back NOW.
         bool const released = DcLeaderSignal::IsLeaderPullHoldReleased(player);
-        if (!inPull || !DcLeaderSignal::IsPullPhaseHolding(phase) || released)
+        // A fresh scout aggro holds the party passive while the leader is still
+        // at Idle (DcPullContext::scoutAggroMs — the gap before the maneuver's
+        // first combat tick flips Idle -> Returning). GetLeaderCampHold is the
+        // one authority on that; without asking it, this reaper stripped the
+        // hold the follower actions had just applied, every tick (Pull Lab,
+        // scout-aggro-while-idle: ~216 on/off flips in 2.5s, a DPS opening on
+        // the Waiter mid-flap) — undoing ee6a971f.
+        Position holdCamp;
+        bool holdPassive = false;
+        bool const scoutHold = !released && phase == static_cast<uint32>(DcPullPhase::Idle) &&
+                               DcLeaderSignal::GetLeaderCampHold(player, holdCamp, holdPassive) && holdPassive;
+        if (!scoutHold && (!inPull || !DcLeaderSignal::IsPullPhaseHolding(phase) || released))
         {
             // The graceful pull commit (leader reached camp and flipped to
             // Engage, so inPull is still true) can hold the party passive a

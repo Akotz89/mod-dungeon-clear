@@ -1,0 +1,38 @@
+{
+  "about": "Human players: the puppet (warlock, slot 3) stays AFK at the Utgarde Keep entrance (areatrigger 4745 target), where the party is staged, 62yd from the Ironhelm pair. The tank advances, and once it is PartyMaxSpread from the human every tick yields. DcPartyState::IsPartyReady walks every group member against PartyMaxSpread (25) on a 5-man map, the human included (DcPartyState.cpp memberMeetsBars), so the tank never starts the pull and stands waiting on a human who will not come. O9 (tank parked >15s with the human >20yd away) and O10 (pack alive at timeout) reproduce it. Whether a tank should ever proceed without an AFK human is a design question, but nothing tells the player why the run stopped. Same pack and comp as human-runs-ahead-of-tank (Ironhelm pair 126047/126048). Expected from code; never run with a human. lb-20261003-155828-1 run 1 was a false unexpected-pass: staged at Marrah's spot 34yd from the pair, the DK tank engaged at 1.05s while the human was still 6yd away, so the spread gate was never tested; the start moved to the entrance so blocking-trash (35yd scan) is out of reach when the gate first trips.",
+  "schema": 1,
+  "geometry": {
+    "map": 574,
+    "dungeon": "uk",
+    "heroic": false,
+    "region": { "center": [190.0, -75.0, 18.0], "radius": 60.0 },
+    "objective": 24201,
+    "objectiveName": "Skarvold & Dalronn"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [126047, 126048]
+      }
+    }
+  },
+  "party": {
+    "comp": "deathknight-blood,shaman-resto,rogue-combat,warlock-demo,mage-fire",
+    "level": 70,
+    "start": [153.79, -86.55, 12.55, 0.304],
+    "react": "fast",
+    "seedTarget": true,
+    "human": { "slot": 3, "script": "humans/afk-behind-party" }
+  },
+  "settings": {
+    "PullSetting": 2
+  },
+  "goal": { "kill": "pack:target", "timeoutS": 60 },
+  "expect": {
+    "oracles": {
+      "O9": "fail",
+      "O10": "fail"
+    },
+    "knownFailure": "open:DcPartyState.cpp IsPartyReady counts the human in the spread gate (pull-lab plan s3 human-afk-at-camp-blocks-readiness)"
+  }
+}

@@ -134,3 +134,33 @@ TEST(DcSealedEncounterTest, TheClumpIsAchievableAndTheMusterIsBounded)
     EXPECT_GT(DC_SEALED_MUSTER_TIMEOUT_MS, 0u);
     EXPECT_LE(DC_SEALED_MUSTER_TIMEOUT_MS, 60000u);
 }
+
+// Azjol-Nerub's Anub'arak (map 601). instance_azjol_nerub registers three
+// DOOR_TYPE_ROOM doors on DATA_ANUBARAK, and boss_anub_arak schedules
+// EVENT_CLOSE_DOORS 5s after the pull — whose whole body is the
+// BossAI::_JustEngagedWith() that shuts them. Anyone still in the north corridor
+// is locked out for the fight.
+
+TEST(SealedEncounterTest, AnubarakArenaIsSealed)
+{
+    SealedEncounterRow const* row = SealedEncounterRegistry::Find(601, 29120);
+    ASSERT_NE(row, nullptr) << "Anub'arak's arena must be registered as sealed";
+
+    // The arena floor (one flat surface at z 224.07-224.29 on the live navmesh).
+    EXPECT_TRUE(SealedEncounterRegistry::InSealedRoom(*row, 551.0f, 248.3f));  // the boss
+    EXPECT_TRUE(SealedEncounterRegistry::InSealedRoom(*row, 550.4f, 254.7f));  // the doors
+    EXPECT_TRUE(SealedEncounterRegistry::InSealedRoom(*row, 530.0f, 240.0f));  // SW rim
+    EXPECT_TRUE(SealedEncounterRegistry::InSealedRoom(*row, 570.0f, 274.0f));  // NE rim
+
+    // The north corridor the party comes down, and the Prime Guard pull, are OUT.
+    EXPECT_FALSE(SealedEncounterRegistry::InSealedRoom(*row, 551.0f, 300.0f));
+    EXPECT_FALSE(SealedEncounterRegistry::InSealedRoom(*row, 542.0f, 341.4f));
+
+    // approachRadius must reach up into the corridor mouth but stop short of the
+    // Prime Guards, so their pull runs under the ordinary gates.
+    EXPECT_TRUE(SealedEncounterRegistry::InApproachRange(*row, 551.0f, 290.0f, 226.0f,
+                                                         551.0f, 248.3f, 224.0f));
+    EXPECT_FALSE(SealedEncounterRegistry::InApproachRange(*row, 542.0f, 341.4f, 240.9f,
+                                                          551.0f, 248.3f, 224.0f));
+}
+

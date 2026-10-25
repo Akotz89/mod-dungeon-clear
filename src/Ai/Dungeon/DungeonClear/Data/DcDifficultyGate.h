@@ -6,30 +6,35 @@
 #ifndef _PLAYERBOT_DCDIFFICULTYGATE_H
 #define _PLAYERBOT_DCDIFFICULTYGATE_H
 
-#include "DBCEnums.h"
 #include "Define.h"
 
+#include "Ai/Dungeon/DungeonClear/Util/DcDifficulty.h"
+
 // Difficulty gate shared by the dungeon-events framework (DungeonEvent::gate)
-// and the boss-roster patch table (BossRosterPatch::gate). 5-man dungeons run
-// at DUNGEON_DIFFICULTY_NORMAL or DUNGEON_DIFFICULTY_HEROIC; a heroic-only
+// and the boss-roster patch table (BossRosterPatch::gate). A heroic-only
 // boss (Sethekk's Anzu, Shattered Halls' Porung) or a heroic-only event gets
-// HeroicOnly so it never surfaces on a normal run, and vice versa. Raid
-// difficulties are out of scope — the clear engine drives 5-mans.
+// HeroicOnly so it never surfaces on a normal run, and vice versa. Matching
+// takes the DcDiffKey (not a raw Difficulty) because the raw values collide
+// across map types — on a raid map difficulty 1 is 25-man NORMAL, which a raw
+// `== DUNGEON_DIFFICULTY_HEROIC` compare would read as heroic. Normal/Heroic
+// here mean the heroic TIER of whatever the map is: dungeon heroic, or raid
+// heroic (10H/25H) when WotLK raids arrive. Classic raids are all difficulty
+// 0 and read as normal-tier.
 enum class DcDifficultyGate : uint8
 {
-    Any,         // both difficulties (the default — most content is shared)
-    NormalOnly,
-    HeroicOnly,
+    Any,         // every difficulty (the default — most content is shared)
+    NormalOnly,  // non-heroic tier only
+    HeroicOnly,  // heroic tier only
 };
 
-inline bool DcGateMatches(DcDifficultyGate gate, Difficulty difficulty)
+inline bool DcGateMatches(DcDifficultyGate gate, DcDiffKey key)
 {
     switch (gate)
     {
         case DcDifficultyGate::NormalOnly:
-            return difficulty == DUNGEON_DIFFICULTY_NORMAL;
+            return !key.IsHeroic();
         case DcDifficultyGate::HeroicOnly:
-            return difficulty == DUNGEON_DIFFICULTY_HEROIC;
+            return key.IsHeroic();
         default:
             return true;
     }

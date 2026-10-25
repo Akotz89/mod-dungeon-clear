@@ -1,0 +1,35 @@
+{
+  "about": "Pull camp behind the zone line. At a dungeon's first pull, the only cleared ground behind the tank is the entrance, so ComputeSafeCamp, ComputeTrailCamp and the scout trail point planted the camp on or past the instance-exit areatrigger. The navmesh cannot see areatriggers, so IsNavReachable passed it, and a self-bot was teleported out mid-run (memory dc-camp-behind-zone-line). Fixed in 1426f78c (S1655, merged in 7d1ca40d): DcZoneLine point and segment gates sit beside CampBlockedByDoor at every camp site. The scenario starts the party on SFK's zone-in point (areatrigger_teleport 145) and forces an advanced pull on the first pack, 17-22yd ahead. The exit trigger (areatrigger 194, r5 at -231.0,2105.1) is 4yd behind the party. Headless bots never send CMSG_AREATRIGGER, so the transfer cannot fire here. O6/O10 catch a camp walk that wedges against the exit; the trace's camp point shows the gate directly.",
+  "schema": 1,
+  "geometry": {
+    "map": 33,
+    "dungeon": "sfk",
+    "heroic": false,
+    "region": { "center": [-215.0, 2105.0, 77.0], "radius": 50.0 },
+    "objective": 3914,
+    "objectiveName": "Rethilgore"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [2114, 18308]
+      }
+    }
+  },
+  "party": {
+    "comp": "warrior-prot,priest-holy,mage-frost,rogue-combat,hunter-mm",
+    "level": 24,
+    "start": [-229.1, 2109.2, 76.9, -0.337],
+    "react": "fast",
+    "seedTarget": true
+  },
+  "settings": {
+    "PullSetting": 1,
+    "PullForceAdvanced": 1
+  },
+  "goal": { "kill": "pack:target", "timeoutS": 90 },
+  "expect": {
+    "oracles": { "O1": "pass", "O6": "pass", "O10": "pass" },
+    "knownFailure": "fixed:1426f78c"
+  }
+}

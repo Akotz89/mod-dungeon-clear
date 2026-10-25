@@ -1,0 +1,99 @@
+{
+  "about": "Tank engage: a ranged Razorfen Downs pack pulled with LOS-break, routed toward Glutton (the real run was heading for Tuten'kash, who is gong-summoned and cannot anchor a route). The tank must own every mob that aggroes (O1) and no pull phase may wedge (O6), including the parked-caster close-in. Calibration: rfd pull #9 of tr-20260922-185158-4 \u2014 predicted 6, observed 6 (outside, los); target 7337#32009.",
+  "schema": 1,
+  "source": {
+    "snapshot": "tr-20260922-185158-4#9",
+    "joined": [
+      0,
+      32009,
+      39533,
+      42672,
+      33694,
+      42671,
+      0,
+      42677
+    ],
+    "outsideJoined": [
+      33694,
+      42671,
+      42672,
+      42677
+    ],
+    "predicted": 6,
+    "observed": 6
+  },
+  "geometry": {
+    "map": 129,
+    "dungeon": "rfd",
+    "heroic": false,
+    "region": {
+      "center": [
+        2514.5,
+        917.0,
+        46.1
+      ],
+      "radius": 60.0
+    },
+    "objective": 8567,
+    "objectiveName": "Glutton"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [
+          32009,
+          39533
+        ],
+        "near": [
+          31978,
+          31979,
+          33694,
+          42671,
+          42672,
+          42673,
+          42674,
+          42675,
+          42677,
+          42689,
+          42690,
+          42691,
+          42695,
+          42696,
+          42698,
+          42699,
+          42700,
+          42711,
+          42713,
+          42715,
+          42716
+        ]
+      }
+    }
+  },
+  "party": {
+    "comp": "paladin-prot,druid-resto,warrior-fury,priest-shadow,mage-fire",
+    "level": 40,
+    "start": [
+      2538.2,
+      964.0,
+      50.2,
+      -2.038
+    ],
+    "react": "fast",
+    "seedTarget": true
+  },
+  "settings": {
+    "PullSetting": 2
+  },
+  "goal": {
+    "kill": "pack:target",
+    "timeoutS": 90
+  },
+  "expect": {
+    "oracles": {
+      "O1": "pass",
+      "O6": "pass",
+      "O10": "pass"
+    }
+  }
+}

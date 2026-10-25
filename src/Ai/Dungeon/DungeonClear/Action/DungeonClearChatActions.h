@@ -72,6 +72,13 @@ public:
     bool Execute(Event event) override;
 };
 
+class DcWingAction : public Action
+{
+public:
+    DcWingAction(PlayerbotAI* botAI) : Action(botAI, "dc wing") {}
+    bool Execute(Event event) override;
+};
+
 class DcBossesAction : public Action
 {
 public:

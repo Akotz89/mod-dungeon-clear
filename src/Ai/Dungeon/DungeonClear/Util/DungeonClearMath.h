@@ -6,8 +6,11 @@
 #ifndef _PLAYERBOT_DUNGEONCLEARMATH_H
 #define _PLAYERBOT_DUNGEONCLEARMATH_H
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include "G3D/Vector3.h"
@@ -71,6 +74,107 @@ namespace DungeonClearMath
                                                         std::uint32_t ringPoints)
     {
         return StandoffCandidates(target, bot, standoffRadius, ringPoints);
+    }
+
+    // The point `stopShort` yards before the END of a route polyline, measured
+    // ALONG the route — the close-on-a-unit fallback for the heal reposition and
+    // the combat regroup ("walk at them and let the corner give you sight").
+    //
+    // It used to be a point on the straight bot->target line, and a straight line
+    // is not a walk. Across a wall that point is inside the wall or on its far
+    // side: Karazhan's Maiden hairpin, where the two legs of the corridor sit a few
+    // yards apart through a wall with no navmesh in it, had healers and DPS
+    // walking into that wall toward a groupmate on the other leg and dropping to
+    // the Servants' Quarters below (tr-20260927-184653-9, -190943-12). A point on
+    // the route is on the mesh by construction, and walking to it rounds the
+    // hairpin the way a player would.
+    //
+    // A route no longer than `stopShort` returns its first point (already close
+    // enough — nothing to walk); an empty route returns the origin.
+    inline G3D::Vector3 PointShortOfPathEnd(std::vector<G3D::Vector3> const& path,
+                                            float stopShort)
+    {
+        if (path.empty())
+            return G3D::Vector3(0.0f, 0.0f, 0.0f);
+        float remaining = std::max(0.0f, stopShort);
+        for (std::size_t i = path.size() - 1; i > 0; --i)
+        {
+            G3D::Vector3 const& a = path[i - 1];
+            G3D::Vector3 const& b = path[i];
+            float const seg = (b - a).length();
+            if (seg >= remaining)
+            {
+                if (seg <= 0.0f)
+                    return b;
+                return b + (a - b) * (remaining / seg);
+            }
+            remaining -= seg;
+        }
+        return path.front();
+    }
+
+    // A point `distFromAnchor` yards out from `anchor` along the 2D bearing to
+    // `toward`, with z carried along the SAME fraction of the way.
+    //
+    // Interpolating z is the whole reason this is a shared helper and not two
+    // lines at the call site: leaving it at the anchor's height describes a point
+    // that exists nowhere — the anchor's floor over the hold point's x/y. That is
+    // flat-leg-only reasoning, and the legs this is used on are not all flat (the
+    // Suppression Rooms ramp climbs 5yd over one 20yd leg).
+    //
+    // Clamped to `toward` when it is nearer than `distFromAnchor`, and returns
+    // `anchor` unchanged when the two are stacked within `bearingFloor` (no
+    // meaningful bearing to walk out along).
+    inline Position PointTowardFrom(Position const& anchor, Position const& toward,
+                                    float distFromAnchor, float bearingFloor)
+    {
+        float const dx = toward.GetPositionX() - anchor.GetPositionX();
+        float const dy = toward.GetPositionY() - anchor.GetPositionY();
+        float const bearing = std::sqrt(dx * dx + dy * dy);
+        if (!(bearing >= bearingFloor))
+            return anchor;
+
+        float const out = std::min(std::max(distFromAnchor, 0.0f), bearing);
+        float const frac = out / bearing;
+        return Position(anchor.GetPositionX() + dx * frac,
+                        anchor.GetPositionY() + dy * frac,
+                        anchor.GetPositionZ() +
+                            (toward.GetPositionZ() - anchor.GetPositionZ()) * frac,
+                        anchor.GetOrientation());
+    }
+
+    // Should follow-tank's centered breadcrumb trail own this follower's tick?
+    //
+    // Two independent conditions, and the second is the one that was missing.
+    //
+    // `toTank > trailEngage` is the ORIGINAL leash: only trail once a real
+    // corridor traversal is involved, not a fan-out shuffle inside the follow
+    // bubble.
+    //
+    // `toTank > lag` is the guard the rung had no equivalent of. The crumb this
+    // branch aims at is `lag` yards behind the tank, and the stagger makes `lag`
+    // grow per slot while `trailEngage` does not — so a follower INSIDE its own
+    // slot but outside the leash was glided BACKWARD, down the trail, away from
+    // the party. That immediately re-armed the stock Follow() fan (radius `dist`)
+    // which walked it forward again, and ownership then flipped on every crossing
+    // between two aim points up to `lag + dist` apart. On a ramp the backward leg
+    // is a walk down the incline and the forward leg climbs it again, so the slope
+    // sets the amplitude: the reported "bots ping-pong on ramps". Live at the
+    // shipped Playerbots.FollowDistance of 1.5 the leash is 3.5 and the crumbs
+    // sit at 1.5 / 4.5 / 7.5 / 10.5 — three of the four slots retreat.
+    //
+    // The invariant, stated generally: a rung must not move the bot AWAY from the
+    // condition that armed it. cf. the scout-lag branch, which has always held
+    // whenever `toTank <= lag` and only trails past it, and the follower cursor's
+    // own HopIsBehind ("a hop behind the bot is never worth walking to at ANY
+    // distance — the route is one-way").
+    //
+    // `toTank` must be a 3D distance: the crumb spacing is walked 3D distance and
+    // the arrival hold is GetExactDist, so a 2D read here shrinks with the cosine
+    // of the slope and arms the leash at a larger true separation on every ramp.
+    inline bool TrailFollowShouldEngage(float toTank, float trailEngage, float lag)
+    {
+        return toTank > trailEngage && toTank > lag;
     }
 
     // One forward hostile for the Dynamic-pull aggro estimate. `chainEligible` is
@@ -172,6 +276,23 @@ namespace DungeonClearMath
                               std::uint32_t now, std::uint32_t graceMs,
                               std::uint32_t& ccSinceOut);
 
+    // Pack-cannot-follow gate (pure). Decides whether a drag-back should be
+    // ABANDONED because the mob being dragged has no combat movement — the caller's
+    // `planted` verdict, read off UNIT_STATE_NO_COMBAT_MOVEMENT at the call site.
+    // Such a mob has had its chase generator removed, so it holds the ground it was
+    // tagged on however far the tank retreats: the drag is not slow, it is
+    // impossible, and the tank should turn around and fight it where it stands.
+    //
+    // Shares the latch/grace contract of ShouldAbortPullForCc exactly (including the
+    // now==0 corner and `confirmMs` == 0 firing on the first tick), and is delegated
+    // to it — kept as a separate name because the QUESTION is different and the two
+    // are tuned independently. The grace is a debounce, not a confidence threshold:
+    // the unit state is exact, but some creatures toggle it transiently (planting
+    // only for the duration of a cast), and those must not lose their drag.
+    bool ShouldAbandonPlantedDrag(bool planted, std::uint32_t plantedSince,
+                                  std::uint32_t now, std::uint32_t confirmMs,
+                                  std::uint32_t& plantedSinceOut);
+
     // Camp-safety valve (pure). A held passive follower should trigger the valve
     // when it is in combat below `safetyHpPct` AND that has persisted for
     // `graceMs`. `attackerIsPullTarget` is the caller's verdict that everything
@@ -206,6 +327,48 @@ namespace DungeonClearMath
     // the trigger; this carries only the decision so it is unit-testable.
     bool ShouldStandDownForPull(bool packIsPullsOwn, bool pullPhaseIdle);
 
+    // Advance's yield to a live engage-trash walk-in (pure). Engage-trash (rel 25)
+    // and Advance (rel 15) share the tank's movement: when the blocking-trash
+    // trigger only holds on alternate ticks, each tick the winner replaces the
+    // other's move — engage's DcMoveTo cancels the escort glide, Advance reads the
+    // resulting POINT generator as "no glide running" and re-issues its spline —
+    // and every replacement starts with a stop, so the tank stands still
+    // (tr-20260924-081931-3, Karazhan Opera balcony stair). Returns true while a
+    // walk-in engage-trash stamped at `stampMs` is at most `holdMs` old, its
+    // target is still alive and the bot is still moving on it. Bounded both
+    // ways: engage going quiet for `holdMs`, or the walk no longer moving (a
+    // real wedge for Advance's stuck ladder), hands the tick back.
+    bool ShouldYieldToEngageWalk(bool walkStamped, bool targetAlive, bool botMoving,
+                                 std::uint32_t stampMs, std::uint32_t now,
+                                 std::uint32_t holdMs);
+
+    // The boss engage's last resort (pure): tag the boss from the standoff because
+    // the walk-in is refused. The at-boss trigger fires the engage once the party is
+    // ready, and the engage walks the tank at the boss; when stock finds no route
+    // there that walk is refused every tick, the engage returns false, Advance's
+    // engage hold parks the tank and clears the stall — and nothing ever pulls
+    // (sk-20261019-003633 tr-…-12: 4063 refusals in 16 minutes at 30.5yd from
+    // Emperor Dagran Thaurissan on his raised throne, party ready throughout, until
+    // the 900s watchdog). True once the walk has been refused for `graceMs` with the
+    // tank standing still, the boss in line of sight and within `maxRange`.
+    bool ShouldTagBossFromStandoff(bool walkRefused, bool botMoving, bool inLos, float dist,
+                                   float maxRange, std::uint32_t refusedSinceMs,
+                                   std::uint32_t now, std::uint32_t graceMs);
+
+    // Engage-trash sticky staleness (pure). The sticky pins a walk-in target so the
+    // pick does not bounce between two equidistant corridor mobs, and it never
+    // releases on distance. But the trigger fires on its OWN fresh pick: once the
+    // sticky is a pack an earlier scan found far down the route, the trigger keeps
+    // firing for the mob in front of the tank while the action walks back to the
+    // sticky, the walk carries that mob out of the band, the trigger drops, Advance
+    // climbs back, and it repeats (tr-20260927-201144-5, Karazhan ramp to
+    // Terestian: a Mana Feeder 90yd back vs an Arcane Protector patrolling ahead).
+    // Returns true to drop the sticky for the fresh pick: a different fresh pick
+    // exists, the sticky is out of combat, and the sticky is more than `margin`
+    // farther away than the fresh pick.
+    bool ShouldDropTrashSticky(bool haveFresh, bool freshIsSticky, bool stickyInCombat,
+                               float stickyDist, float freshDist, float margin);
+
     // Orphaned-pull release gate (pure). The effective pull mode can be forced
     // OFF while a pull is still standing — a PERSISTENT anchored event takes the
     // tank (DungeonClearPullModeCurrentValue), or a Dynamic verdict drops. The
@@ -238,6 +401,21 @@ namespace DungeonClearMath
     // within a few yards of an authored camp.
     bool ShouldReleaseStandingPull(bool effectiveOn, bool standing, bool partyInCombat,
                                    bool holdingPhase, bool bossPullback);
+
+    // Unclassified-aggro gate for the Dynamic governor (pure). Between packs the
+    // governor answers "no target" with the bool OFF, and with the bool off the pull
+    // action is not live — including its Idle-branch "unplanned aggro while scouting
+    // -> fresh camp" drag-back. An aggro the scan never sized therefore became a
+    // walk-in fought where it bit. On a sweep map (RouteSweepRegistry) that spot is
+    // inside a neighbour's reach by definition, so the answer is the safe direction:
+    // flip to ADVANCED and let the maneuver drag it home. `hasVerdict` is the whole
+    // discriminator — a standing LEEROY is a pack the classifier sized and chose to
+    // walk in on, and that choice stands; only an aggro nobody sized is answered.
+    // A boss (or his summoned add) among the attackers is never dragged: that is
+    // the at-boss path's engagement, and scripted bosses misbehave when camp-dragged.
+    // True only for: in combat, phase Idle, bool off, no verdict, sweep map, no boss.
+    bool ShouldAdvanceUnclassifiedAggro(bool inCombat, bool phaseIdle, bool modeOn,
+                                        bool hasVerdict, bool sweepMap, bool bossInFight);
 
     // Dynamic-verdict drop grace gate (pure). A standing Leeroy/Advanced verdict
     // must survive a TRANSIENT no-target read (door veto flicker, long-path cache
@@ -293,7 +471,7 @@ namespace DungeonClearMath
     // up — the way it arrives at a boss — rather than merely "not resting".
     //
     // The ordinary between-pulls floors do not deliver that. They are
-    // min(90, AiPlayerbot.AlmostFullHealth) HP and min(75, AiPlayerbot.HighMana)
+    // min(90, Playerbots.AlmostFullHealth) HP and min(75, Playerbots.HighMana)
     // mana, which on stock config is 85/65, and 65% healer mana is thin for a
     // five-elite heroic pack that contains its own healer. Live
     // (tr-20260805-191834-3): the party reported "Shannon (low mana), Erinerice
@@ -388,6 +566,20 @@ namespace DungeonClearMath
     // the bypass), and `leadMs` == 0 (feature off). The game-state read (leader
     // combat stamp, healer role, tank HP, this bot's combat flag) stays in
     // DcLeaderSignal::IsLeaderFightAssistWanted.
+    // Threat-lead DAMAGE hold (pure — gtested). True when a DPS follower must not
+    // deal damage yet: the leader's fight is live (`combatSinceMs` != 0) and less
+    // than `leadMs` has passed since the leader's FIRST HIT (`firstHitMs`). If the
+    // leader has not landed a hit, the hold lasts at most `leadMs + noHitCapMs`
+    // from the combat flag, so a tank that pulls with a taunt or is stunned on the
+    // opener cannot freeze the party. Never holds an `exempt` bot (the tank), a
+    // follower something is attacking (`beingAttacked` — self-defence), a tank
+    // below `panicHpPct` (<= 0 disables that bypass), or with `leadMs` == 0.
+    // ShouldReleaseFollower below gates DC's own assist MOVEMENT; this gates the
+    // damage every action can do, stock ones included.
+    bool ShouldHoldThreatLead(bool exempt, bool beingAttacked, std::uint32_t combatSinceMs,
+                              std::uint32_t firstHitMs, std::uint32_t now, std::uint32_t leadMs,
+                              std::uint32_t noHitCapMs, float tankHealthPct, float panicHpPct);
+
     bool ShouldReleaseFollower(bool isHealer, bool alreadyInCombat,
                                std::uint32_t combatSinceMs,
                                std::uint32_t now, std::uint32_t leadMs,
@@ -435,10 +627,50 @@ namespace DungeonClearMath
     // walks away from a stationary holder only makes the distance WORSE. The first
     // sample arms the watchdog and counts as closing, so the streak clock in
     // ShouldBreakStuckCombat only starts once the holder has demonstrably stopped.
+    //
+    // `holderDist` is the distance to the nearest holder the bot can SEE (+inf when
+    // none is in LOS), not to the nearest holder outright. "In engage range is a
+    // fight" assumes the two sides can trade blows; a holder 14yd away on the floor
+    // below cannot be targeted by any playerbots action (AttackersValue requires
+    // LOS), so it is only a fight while it is CLOSING (tr-20261018-101829-1).
     inline bool IsHolderProsecutingFight(bool haveHolder, float holderDist,
                                          float engageRange, bool closing)
     {
         return haveHolder && (holderDist <= engageRange || closing);
+    }
+
+    // A holder the party can never TOUCH can never end the fight, so it is not a
+    // fight — it is a flag with no way out. IsHolderProsecutingFight above asks
+    // whether the holder is COMING; this asks the prior question of whether
+    // resolving it is possible at all, and a NO here outranks any answer to that
+    // one: a trigger standing on top of the party reads as toe-to-toe (dist 0.0)
+    // and therefore "prosecuting" forever, which is exactly how it hides.
+    //
+    // TRIGGER creatures are the airtight case and the only one taken here.
+    // CREATURE_FLAG_EXTRA_TRIGGER units are invisible script helpers: never a
+    // pack, never loot, never selectable. No bot can target one, so nothing the
+    // party does can make the reference go away — the fight has no end state.
+    // Utgarde Pinnacle's Skadi gauntlet parks 75 of them (28351) down the hall; a
+    // hunter PET tags one, it chases the party 80yd out of the hall (measured:
+    // "79.7yd from its spawn"), and every member stays PvE-flagged for the rest
+    // of the run. tr-20260902-121659-12 and -13 both died at the 600s no-progress
+    // watchdog with the whole party standing on the tank at full health, teardown
+    // reading `Flame Breath Trigger (Skadi) 0.0yd 100% reach LEGIT fighting
+    // Scorpid` — a perfect legitimate-holder verdict about a unit that cannot be
+    // fought. With the flag never dropping, the Engage-phase camp teardown (gated
+    // on !IsInCombat) never ran, the stale camp kept anchoring the spread gate,
+    // and Advance yielded 2314 and 2617 times respectively.
+    //
+    // NOT-SELECTABLE ALONE IS DELIBERATELY *NOT* THE TEST, and this is the half
+    // worth not re-deriving. UNIT_FLAG_NOT_SELECTABLE is worn TEMPORARILY by real
+    // encounters — boss_ymironAI::Reset() adds it and only SetData(DATA_SKADI,
+    // DONE) takes it off — so keying on it would let the phantom hatch
+    // force-clear combat in the middle of a legitimate boss fight, which is the
+    // one outcome the breaker's raid stand-down exists to prevent. TRIGGER is a
+    // permanent property of the creature template; selectable is encounter state.
+    inline bool IsUnresolvableCombatHolder(bool isCreature, bool isTrigger)
+    {
+        return isCreature && isTrigger;
     }
 
     // "Can this follower attack from where it stands?" for the camp-assist handoff,
@@ -545,6 +777,86 @@ namespace DungeonClearMath
         // `now >= sinceMs` guards the unsigned subtraction against a backward clock
         // step / getMSTime wrap, where "no time has elapsed yet" is the right answer.
         return now >= sinceMs && (now - sinceMs) >= graceMs;
+    }
+
+    // The conditional-event rung's combat gate (pure).
+    //
+    // MayDriveWhileFlagged is right for an event whose work happens BETWEEN
+    // pulls and exactly wrong for one flagged DungeonEvent::drivesInCombat,
+    // whose whole premise is that the driver keeps steering while the party
+    // fights. That exemption used to live only in the COMBAT-engine copy of the
+    // rung, which requires the bot to be running the combat ENGINE — a different
+    // fact from being combat-FLAGGED, and the gap between them is a hole both
+    // rungs fall through:
+    //
+    //   Playerbots never switches engines on Unit::IsInCombat (PlayerbotAI.cpp
+    //   only clears stale targets there); the sole way into BOT_STATE_COMBAT is
+    //   AttackAction::Attack. So a bot that is FLAGGED but holds an empty
+    //   attacker set sits in the NON-combat engine — where this gate shuts it
+    //   down — while the combat rung that would have exempted it is in an engine
+    //   that is not running. The driver then gets no ticks at all.
+    //
+    // Halls of Reflection, tr-20260908-215109-1, wall 4 of the escape: the Lich
+    // King flags the party every second, the twelve summons took the dps and the
+    // healer, the tank's attacker set emptied, and HorDriveEscape was not called
+    // once for thirty seconds. The tank stood beside the leader on a stale
+    // spline while the ranged tanked the batch; recovery was accidental, since
+    // TankAssistTrigger needs attacker count > 0 and had to wait for a summon to
+    // wander into melee. Sibling tr-20260908-215112-9 held the same window open
+    // for fifty-five seconds and wiped inside it.
+    //
+    // `sinceMs` is deliberately UNTOUCHED on the exempt path: the latch is shared
+    // with every other MayDrive-gated rung, so zeroing it here would restart a
+    // grace window one of them is already counting.
+    //
+    // Returns TRUE when the conditional-event rung may own this tick.
+    inline bool EventDueGateOpen(bool drivesInCombat, bool flagged, bool engaged,
+                                 std::uint32_t now, std::uint32_t graceMs,
+                                 std::uint32_t& sinceMs)
+    {
+        if (drivesInCombat)
+            return true;
+        return MayDriveWhileFlagged(flagged, engaged, now, graceMs, sinceMs);
+    }
+
+    // Loot-roll rung starvation bound (pure, by-reference latch).
+    //
+    // The rung that answers an open loot roll sits at relevance 95, above the
+    // whole driving ladder, and only one action runs per tick — so while it
+    // fires and its action reports success, nothing else drives the bot. Safe
+    // only while "fires" and "the vote lands" mean the same thing; when they
+    // came apart the run froze for ten minutes with every watchdog reading zero
+    // (tr-20260831-123946-18). The shared votable-roll predicate closes that
+    // case; this bounds the CLASS.
+    //
+    // `signature` digests the rolls the bot could vote on this tick and
+    // `votable` counts them (counted, not inferred from a zero digest). The
+    // action clears its whole backlog in ONE Execute, so a healthy firing needs
+    // a single tick and the next tick sees an empty set. Consecutive ticks on an
+    // UNCHANGED set therefore mean the votes are not landing — yield the tick.
+    // Any real change (a roll resolved, a new drop) re-arms immediately, which
+    // is what keeps the latch from suppressing legitimate rolling.
+    //
+    // Returns TRUE while the rung may fire. After a call, `unchangedTicks ==
+    // maxUnchangedTicks + 1` marks the single tick the bound first bit, for a
+    // one-shot log.
+    inline bool LootRollRungMayFire(std::uint32_t votable, std::uint64_t signature,
+                                    std::uint32_t maxUnchangedTicks,
+                                    std::uint64_t& lastSignature,
+                                    std::uint32_t& unchangedTicks)
+    {
+        if (!votable)
+        {
+            lastSignature = 0;
+            unchangedTicks = 0;
+            return false;       // nothing pending — full budget for the next window
+        }
+        if (signature != lastSignature)
+        {
+            lastSignature = signature;
+            unchangedTicks = 0;
+        }
+        return ++unchangedTicks <= maxUnchangedTicks;
     }
 
     // Bystander-detour borrow watchdog (pure, by-reference latch).
@@ -668,6 +980,65 @@ namespace DungeonClearMath
         return ChaseVerdict::Hold;
     }
 
+    // --- room-clear give-up clock ------------------------------------------
+    // State for the room-trash value's no-progress valve (RoomClearTimeout).
+    struct RoomClearClock
+    {
+        std::uint32_t lastRemaining = 0;  // count at the last progress (0 = none yet)
+        std::uint32_t idleMs = 0;         // observed ready time since that progress
+        std::uint32_t lastTickMs = 0;     // when the clock last ran (0 = never)
+    };
+
+    // The longest gap between two evaluations that still counts as observed. The
+    // value polls every 500ms while it is read; a longer gap means nobody read it —
+    // the at-boss gate stops reaching it while the party rests or loots — and
+    // time nobody watched must not be charged as "stalled".
+    inline constexpr std::uint32_t DC_ROOM_CLEAR_MAX_OBSERVED_GAP_MS = 2000;
+
+    // One tick of the no-progress valve (pure). True once the room-clear should be
+    // given up on: `idleMs` of READY time has passed with the remaining count never
+    // dropping.
+    //
+    // Only time the party could have been pulling counts. A `busy` tick (in combat,
+    // resting, looting, or not yet set) and an unobserved gap pause the clock
+    // instead of re-arming it, so a room whose packs each need a fight plus a
+    // full-mana rest (Karazhan's Banquet Hall: eight to nine elites per formation)
+    // does not read as stalled between formations, while a respawn churn that never
+    // lowers the count still adds up its ready gaps and gives up.
+    //
+    // Outside the room (`inRoom` false) the clock is held re-armed: the travel leg
+    // is not a stall. Progress (a smaller count, or the first sighting) re-arms it.
+    inline bool RoomClearGiveUpDue(RoomClearClock& c, std::uint32_t remaining, bool inRoom,
+                                   bool busy, std::uint32_t now, std::uint32_t timeoutMs)
+    {
+        std::uint32_t const prevTick = c.lastTickMs;
+        c.lastTickMs = now ? now : 1;
+
+        if (remaining == 0)
+        {
+            c.lastRemaining = 0;
+            c.idleMs = 0;
+            return false;
+        }
+        if (!inRoom || c.lastRemaining == 0 || remaining < c.lastRemaining)
+        {
+            c.lastRemaining = remaining;
+            c.idleMs = 0;
+            return false;
+        }
+        // A patroller walking into the radius raises the count. Track the new high
+        // so that killing it reads as progress, but leave the idle time alone.
+        if (remaining > c.lastRemaining)
+            c.lastRemaining = remaining;
+
+        // `now >= prevTick` guards the unsigned subtraction against a clock wrap.
+        std::uint32_t const elapsed = (prevTick && now >= prevTick) ? now - prevTick : 0;
+        if (!busy && elapsed <= DC_ROOM_CLEAR_MAX_OBSERVED_GAP_MS)
+            c.idleMs += elapsed;
+
+        return timeoutMs && c.idleMs > timeoutMs;
+    }
+
     // Engage-fizzle handoff latch (pure). An advanced-pull "camp fight" ended with
     // the tank out of combat but the pulled pack still ALIVE and IDLE — the drag
     // fizzled (a planted caster evaded home the moment the tank broke LOS at camp).
@@ -740,6 +1111,58 @@ namespace DungeonClearMath
     // Returns 0 for an empty route; callers guard emptiness themselves.
     std::size_t PathProgressCursor(std::vector<G3D::Vector3> const& route,
                                    float botX, float botY, float botZ);
+
+    // True when the straight leg from (px,py,pz) to route[cursor] may be treated
+    // as CORRIDOR rather than as a bee-line through geometry.
+    //
+    // Every consumer that scans "the route ahead of the bot" has to chain from
+    // the bot's own position to the cursor vertex, because the cached route was
+    // built from wherever the last rebuild happened and does not start under the
+    // bot's feet. That joining leg is SYNTHESISED — nothing pathfound it — so it
+    // is only route-like while the bot is actually standing on the route. Once
+    // the bot is far off it, the leg is a straight line through whatever the map
+    // happens to contain, and a consumer that reads geometry off it reads the
+    // wrong rooms.
+    //
+    // The bound is DungeonPathFollower::RESNAP_RADIUS by construction, which is
+    // the module's existing answer to the same question: how far may a bot be
+    // from a route vertex and still be considered ON that route (Resnap will
+    // re-anchor its cursor there) rather than needing a rebuild from where it
+    // stands. Callers pass it in so this stays a leaf header, and add the LOS
+    // half of Resnap's own gate themselves — see DungeonClearBlockingDoorValue,
+    // where the distance half alone would still have let a folded-back dungeon
+    // synthesise a joining leg straight through a mountain.
+    //
+    // False for an empty route or an out-of-range cursor: with no vertex to join
+    // to there is no corridor to read.
+    bool PathCursorIsJoinable(std::vector<G3D::Vector3> const& route,
+                              std::size_t cursor,
+                              float px, float py, float pz, float maxGap);
+
+    // Travel still REMAINING from the bot to where `route` first enters the
+    // door band of (doorX,doorY,doorZ), or FLT_MAX when the route never does
+    // within `maxLookAhead` of the bot's progress cursor, or does so only well
+    // behind that cursor (more than `behindSlack` — a door already walked
+    // past). The pure body of
+    // DcEngageGeometry::DistAlongPathToClosedDoor; the door-blocked walk-in parks
+    // when this drops to DC_DOOR_STOP_DISTANCE.
+    //
+    // Remaining travel = the JOINING LEG (bot -> its progress-cursor vertex, 3D)
+    // + the along-route gap from that vertex to the band entry. The joining leg
+    // used to be left out, which measured from the route vertex nearest the bot
+    // as if the bot stood on it. Karazhan, tr-20260924-130027-4: engage-trash
+    // pulled the tank 28yd off its route beside the Strange Bookcase; the vertex
+    // nearest it still sat 7.4yd short of the doorway, so the walk-in read "at
+    // door" and parked 34yd from the door, outside click range. The blocked-door
+    // watchdog (which trusts the "at door" read) then auto-paused the run five
+    // seconds later without a single click. The blocking-door value, which
+    // flags the door in the first place, already chains the same bot -> cursor
+    // leg into its own look-ahead; this keeps the two measures consistent.
+    float DoorTravelRemaining(std::vector<G3D::Vector3> const& route,
+                              float botX, float botY, float botZ,
+                              float doorX, float doorY, float doorZ,
+                              float band, float zBand,
+                              float maxLookAhead, float behindSlack);
 
     // Index of the LATEST crumb within `rejoinRadius` (3D) of `cur`, or
     // TrailRejoinNone if none qualifies. Used by the breadcrumb recorder: on a
@@ -830,6 +1253,511 @@ namespace DungeonClearMath
     // in each of the four walk-back clones; hoisted here so the four agree by
     // construction.
     inline constexpr float TrailJumpGuard = 12.0f;
+
+    // ---- off-line rejoin rung (DungeonClearAdvanceAction) -------------------
+
+    // Is the bot off the corridor, WITH HYSTERESIS? The rejoin rung engages at
+    // `engageBar` (OFF_PATH_THRESHOLD) and, once it owns the bot, holds until the
+    // deviation falls under the lower `releaseBar`.
+    //
+    // A single bar released exactly where it engaged, so a bot parked in the band
+    // around it alternated rejoin / escort-spline / rejoin tick by tick. That is
+    // not cosmetic: the spline's opening leg is a straight line from the bot to
+    // its cursor, harmless on the line and a chord across the inside of a bend off
+    // it. Live (tr-20260830-115416-5, BWL) a tank sat at 4.1-6.9yd across the
+    // anchor 16->18 hairpin and the sub-bar spline legs walked it into a navmesh
+    // void for five seconds. Same shape as every other bare threshold this module
+    // has had to give hysteresis (the transit pack leash, the moving-camp rung).
+    //
+    // `vertOff` (a corridor Z-band mismatch) is NOT hysteretic: a floor mismatch
+    // is a binary fact about which storey the bot is on, not a drift to damp.
+    inline bool IsOffLineWithHysteresis(float deviation, bool latched, bool vertOff,
+                                        float engageBar, float releaseBar)
+    {
+        return deviation > (latched ? releaseBar : engageBar) || vertOff;
+    }
+
+    struct RejoinRefusalVerdict
+    {
+        bool  haltStaleMove = false;  // cancel the in-flight move; re-issue next tick
+        float bestDeviation = 0.0f;   // baseline to carry into the next tick
+    };
+
+    // The rejoin rung issued no move this tick because stock MoveTo refused it.
+    // Is the move already in flight doing this rung's job, or undoing it?
+    //
+    // MoveTo refuses whenever ANY move is queued, and DcMoveTo's
+    // ResolveEscortConflict clears only an ESCORT generator — so on DC's own
+    // per-point move (gen=POINT, the norm in this rung) a refusal used to hand the
+    // tick back to whatever was moving the bot, unexamined. On tr-20260830-115416-5
+    // that was the move carrying the tank OFF the line: 48 of 53 rejoins refused,
+    // deviation growing 6.2 -> 31.1yd across 22 consecutive refused ticks.
+    //
+    // Judge it on NET PROGRESS, the yardstick the recovery ladder one rung up
+    // already uses: track the best (smallest) deviation seen since the rung took
+    // ownership and halt only once the current deviation has grown past it by
+    // `slack`. Riding a working re-entry matters as much as halting a bad one —
+    // cancelling on every refusal turns the healthy case into a stop/re-issue
+    // stutter. `slack` absorbs a pathed re-entry legitimately swinging wide to
+    // round a corner.
+    //
+    // Seeding `bestDeviation` with FLT_MAX yields exactly one tick of grace: the
+    // first refusal establishes the baseline and never halts.
+    inline RejoinRefusalVerdict DecideRejoinRefusal(float deviation, float bestDeviation,
+                                                    float slack)
+    {
+        RejoinRefusalVerdict v;
+        float const best = std::min(bestDeviation, deviation);
+        v.haltStaleMove  = deviation > best + slack;
+        v.bestDeviation  = v.haltStaleMove ? deviation : best;
+        return v;
+    }
+
+    // The rejoin rung's progress yardstick: plan-view deviation plus any height
+    // gap to the hop beyond the one-storey tolerance. Route deviation alone is 2D,
+    // so on a spiral staircase a re-entry that walks the bot DOWN the helix under
+    // its route point reads as converging — 3.2 -> 0.0yd while the tank sank 33yd
+    // into Karazhan's Servants' Quarters stairwell below the Maiden route
+    // (tr-20260927-101342-8). Counting the excess height makes that descent a
+    // growing gap, which DecideRejoinRefusal halts. Within the tolerance (a ramp,
+    // a stair flight) it is exactly the 2D deviation, as before.
+    inline float RejoinGap(float deviation2d, float dz, float levelTolerance)
+    {
+        float const excess = std::max(0.0f, std::fabs(dz) - levelTolerance);
+        return std::sqrt(deviation2d * deviation2d + excess * excess);
+    }
+
+    // Whether a stalled rejoin should rebuild the route from where the bot stands.
+    // A bot that fell a storey off its route (Karazhan's Opera balcony onto the
+    // audience floor, chasing a floor mob mid-fight, tr-20260927-190943-12) sits
+    // under a hop 14yd overhead: 2.3yd in plan view, so the chunked re-entry's
+    // distance gate never opens, and every MoveTo to the hop is refused because no
+    // route arrives on its floor. A route built from the bot's position reaches the
+    // objective by the level it is actually on. Once per spell without progress, so
+    // a re-path that lands the bot off-level again falls through to the strike ladder.
+    inline bool ShouldRepathOffLevel(float dz, float levelTolerance, bool alreadySpent)
+    {
+        return !alreadySpent && std::fabs(dz) > levelTolerance;
+    }
+
+    // Verdict of a stock path probe to a VERTICALLY SEPARATED boss: is the bot in
+    // the boss's room / on its floor? `routed` = the probe returned NORMAL or
+    // INCOMPLETE (stock had an opinion), `normal` = NORMAL, `endOnLevel` = the
+    // route ends on the boss's level, `los` = the bot can see the boss.
+    //
+    // A route that exists answers the question by its length, as before. NO route
+    // at all (PATHFIND_NOPATH) answers nothing: the probe cannot tell "a floor up"
+    // from "on a dais the mesh doesn't join", so the question falls back to sight.
+    // A boss a storey away is behind a floor slab; one on a throne is in plain view.
+    // Treating NOPATH as "a floor away" parked tr-20261018-101829-3 5.1yd under
+    // Emperor Thaurissan's throne for 7 minutes: not at the boss, not in his room
+    // (so no room clear and no pre-clear hold), and Advance pursued a destination
+    // stock refused every tick.
+    inline bool ProbeSaysSameFloor(bool routed, bool normal, bool endOnLevel,
+                                   float pathLength, float range, bool los)
+    {
+        if (!routed)
+            return los;
+        return normal && endOnLevel && pathLength <= range;
+    }
+
+    struct RejoinProgressVerdict
+    {
+        bool  progressed = false;  // the gap set a new best: re-entry is working
+        bool  idle       = false;  // no new best this tick: counts toward the ladder
+        float best       = 0.0f;   // baseline to carry into the next tick
+    };
+
+    // The rejoin rung's LIVENESS test: is the gap back to the route actually
+    // closing? It used to count ticks whose MoveTo was refused, but on its own
+    // re-issued point stock refuses as a duplicate for a flat MaxWaitForMove (5s)
+    // — while the first move walks the bot in, and after loot or a drift halt
+    // stopped it short. Both read as "issued nothing", so the ladder struck out
+    // in ~10s on a flat floor with the route 6yd away (tp-20260927-114025-1, all
+    // 10 "Stuck off the route" stalls). Progress is the question the ladder asks.
+    //
+    // `best` only moves on progress, so slow steady closing accumulates until it
+    // clears `eps`. FLT_MAX (a fresh episode) makes this tick the baseline and
+    // neither progress nor idle — an off-path rebuild that restarts the episode
+    // every few ticks cannot reset the ladder with a free "progress" tick.
+    inline RejoinProgressVerdict TrackRejoinProgress(float gap, float best, float eps)
+    {
+        RejoinProgressVerdict v;
+        if (best == std::numeric_limits<float>::max())
+        {
+            v.best = gap;
+            return v;
+        }
+        v.progressed = gap < best - eps;
+        v.idle       = !v.progressed;
+        v.best       = v.progressed ? gap : best;
+        return v;
+    }
+
+    // May a follower's combat regroup anchor on this combat holder? Only one it can
+    // actually fight: inside the engagement radius every other combat read already
+    // bounds by, and reachable on its level. A holder that tagged the party and was
+    // then stranded on another floor keeps the tank combat-flagged indefinitely
+    // (instanced creatures never leash); anchoring on it walked Karazhan's whole
+    // raid 140yd back from the Opera balcony to the stage corridor, eight times, for
+    // nine minutes (tr-20260927-103044-10). Nothing qualifying -> the regroup falls
+    // back to the tank.
+    inline bool IsRegroupAnchorCandidate(float dist, float engagementRadius,
+                                         bool levelReachable)
+    {
+        return dist <= engagementRadius && levelReachable;
+    }
+    // --- Room-clear straight pull ---------------------------------------------
+    //
+    // A disc the pull lane must stay clear of: the room-aggro boss at its skirt,
+    // or another pack at the camp clearance.
+    struct LaneKeepAway
+    {
+        float x;
+        float y;
+        float radius;
+    };
+
+    // One candidate lane for a room-clear pull: the tank tags the pack from
+    // (standX, standY) and drags it straight back along the same bearing to
+    // (campX, campY).
+    struct StraightPullLane
+    {
+        float bearing = 0.0f;  // radians, pack -> stand
+        float standX = 0.0f;
+        float standY = 0.0f;
+        float campX = 0.0f;
+        float campY = 0.0f;
+        float margin = 0.0f;   // min over keep-aways of dist(lane) - radius
+        float walk = 0.0f;     // tank's straight-line distance to the stand spot
+        float score = 0.0f;    // margin, less a small charge for the walk
+    };
+
+    // 2D distance from (px,py) to the segment (ax,ay)-(bx,by).
+    inline float PointSegmentDist2d(float px, float py, float ax, float ay,
+                                    float bx, float by)
+    {
+        float const dx = bx - ax;
+        float const dy = by - ay;
+        float const len2 = dx * dx + dy * dy;
+        float t = 0.0f;
+        if (len2 > 1e-6f)
+            t = std::clamp(((px - ax) * dx + (py - ay) * dy) / len2, 0.0f, 1.0f);
+        float const cx = ax + t * dx - px;
+        float const cy = ay + t * dy - py;
+        return std::sqrt(cx * cx + cy * cy);
+    }
+
+    // Walk-distance charge per yard in the lane score: 20yd of extra walk is
+    // worth giving up 1yd of margin.
+    inline constexpr float StraightPullWalkCost = 0.05f;
+
+    // Clearance past this is as good as any more; the cap also keeps the walk
+    // charge meaningful when nothing is in the room.
+    inline constexpr float StraightPullMarginCap = 100.0f;
+
+    // Ranks the straight-pull lanes around a pack, best first.
+    //
+    // In a room pre-clear the tank used to close on the pack from wherever it
+    // stood and tag it at commit range, and the camp was the trail back the way
+    // it came. From the far side of a room that is a diagonal in front of the
+    // boss: the tag spot, the drag and every straggler's run all cross the
+    // boss's aggro (Moroes, tr-20260926-192642-3 — the lane ran 23yd from a
+    // dinner guest). A player walks up square in front of the pack and pulls it
+    // straight back instead.
+    //
+    // For each of `bearings` directions out of the pack: stand spot `standDist`
+    // out, camp straight on along the same line at the farthest drag in
+    // [minDrag, drag] that is inside the camp box (when there is one). The lane
+    // scored is stand -> camp, where the tank and the fight stand, AND the tank's
+    // walk out to the stand spot; its margin is the worst clearance over the
+    // keep-aways. Bearings with no in-box camp are dropped.
+    //
+    // The walk counts because that is where the second pack came from in
+    // tr-20260927-210901-8: the lane itself cleared everything, and the tank woke
+    // a Ghostly Steward and a whole Guest formation on its way to the stand spot.
+    // A keep-away the tank is already standing inside is left out of the walk
+    // term — every walk starts in it, so it would sink every lane equally and
+    // rank nothing.
+    inline std::vector<StraightPullLane> RankStraightPullLanes(
+        float packX, float packY, float tankX, float tankY, float standDist,
+        float drag, float minDrag, std::vector<LaneKeepAway> const& keepAways,
+        bool hasBox, float boxMinX, float boxMaxX, float boxMinY, float boxMaxY,
+        int bearings = 24)
+    {
+        std::vector<StraightPullLane> out;
+        if (bearings <= 0 || standDist <= 0.0f || drag <= 0.0f)
+            return out;
+        minDrag = std::clamp(minDrag, 0.0f, drag);
+        auto inBox = [&](float x, float y)
+        {
+            return !hasBox ||
+                   (x >= boxMinX && x <= boxMaxX && y >= boxMinY && y <= boxMaxY);
+        };
+
+        constexpr float kTwoPi = 6.28318530718f;
+        for (int i = 0; i < bearings; ++i)
+        {
+            float const a = kTwoPi * float(i) / float(bearings);
+            float const ux = std::cos(a);
+            float const uy = std::sin(a);
+
+            StraightPullLane lane;
+            lane.bearing = a;
+            lane.standX = packX + ux * standDist;
+            lane.standY = packY + uy * standDist;
+
+            bool found = false;
+            for (float d = drag; d >= minDrag - 1e-3f; d -= 1.0f)
+            {
+                float const cx = lane.standX + ux * d;
+                float const cy = lane.standY + uy * d;
+                if (inBox(cx, cy))
+                {
+                    lane.campX = cx;
+                    lane.campY = cy;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                continue;
+
+            lane.margin = StraightPullMarginCap;
+            for (LaneKeepAway const& k : keepAways)
+            {
+                lane.margin = std::min(
+                    lane.margin, PointSegmentDist2d(k.x, k.y, lane.standX, lane.standY,
+                                                    lane.campX, lane.campY) -
+                                     k.radius);
+                float const tdx = tankX - k.x;
+                float const tdy = tankY - k.y;
+                if (tdx * tdx + tdy * tdy >= k.radius * k.radius)
+                    lane.margin = std::min(
+                        lane.margin, PointSegmentDist2d(k.x, k.y, tankX, tankY,
+                                                        lane.standX, lane.standY) -
+                                         k.radius);
+            }
+            float const wx = lane.standX - tankX;
+            float const wy = lane.standY - tankY;
+            lane.walk = std::sqrt(wx * wx + wy * wy);
+            lane.score = lane.margin - StraightPullWalkCost * lane.walk;
+            out.push_back(lane);
+        }
+
+        std::stable_sort(out.begin(), out.end(),
+                         [](StraightPullLane const& l, StraightPullLane const& r)
+                         { return l.score > r.score; });
+        return out;
+    }
+
+    // Which room-trash unit a room clear pulls next: the nearest one whose lane has
+    // not been refused, else — everything left is refused — the nearest of all, so
+    // the clear can never stall on its own refusals. -1 when there is nothing.
+    //
+    // Refused = no clean straight lane (DcPullPlanner::ComputeRoomClearLane with
+    // requireClean). Nearest-first alone took a Guest pack 26.8yd from a dinner
+    // guest whose best lane's walk ran inside the next formation's reach
+    // (tr-20260927-210901-8); pulling the packs that CAN be taken cleanly first
+    // clears the room outside-in and opens lanes for the rest.
+    //
+    // `last` marks the boss-side ring (RoomAggroBoss::bossSideLastRadius): a ring
+    // unit is never picked while any unit outside the ring is alive, refused or
+    // not. The ring's penalty alone lost to the refusals — sk-20261019-105358, 13
+    // of 14 unplanned Emperor wakes: every balcony pack refused "no clean lane",
+    // the unrefused ring packs became the only pick, and the walk to them woke the
+    // throne with both balconies still up. A refused pack outside the ring goes as
+    // the last resort first; the ring follows, unrefused before refused.
+    inline int PickRoomTrashIndex(std::vector<float> const& dist,
+                                  std::vector<bool> const& refused,
+                                  std::vector<bool> const& last = {})
+    {
+        // Tier: 0 outside the ring unrefused, 1 outside refused, 2 ring unrefused,
+        // 3 ring refused. Lowest tier wins, nearest within it.
+        int best = -1;
+        int bestTier = 4;
+        for (std::size_t i = 0; i < dist.size(); ++i)
+        {
+            bool const isRefused = i < refused.size() && refused[i];
+            bool const isLast = i < last.size() && last[i];
+            int const tier = (isLast ? 2 : 0) + (isRefused ? 1 : 0);
+            if (tier < bestTier || (tier == bestTier && dist[i] < dist[best]))
+            {
+                best = static_cast<int>(i);
+                bestTier = tier;
+            }
+        }
+        return best;
+    }
+
+    // Lane refusals were measured against the room as it stood; a kill since then
+    // (fewer live room-trash units than when the list was written) can open any of
+    // them, so the list is dropped and every pack is measured again.
+    inline bool ShouldDropLaneRefusals(uint32_t liveNow, uint32_t liveAtWrite)
+    {
+        return liveNow < liveAtWrite;
+    }
+
+    // Whether the walk to a room-clear stand spot rounds the pack on its commit
+    // ring. The ring is a 2D circle snapped to the navmesh at the PACK's height,
+    // so it only describes ground the tank can walk when both stand on one floor.
+    // A pack on a ledge over the tank (the Emperor's corner balconies, 7.5yd up)
+    // puts every ring point on the wrong tier: the two arcs collapse onto spots
+    // beside the tank and it bounced between them for 6m39s instead of taking
+    // the ramp (tr-20261019-183728-12). Across tiers the navmesh path to the
+    // stand spot is the route; nothing on the floor below is in the pack's reach.
+    inline bool StandWalkRoundsPack(float botZ, float packZ, float levelTolerance)
+    {
+        return std::fabs(botZ - packZ) <= levelTolerance;
+    }
+
+    // The distance a room clear ranks a pack by when off-level packs go last
+    // (RoomAggroBoss::detourReachable): an off-level pack sorts behind every pack
+    // on the tank's own floor, so the floor is cleared before the clear climbs to
+    // a ledge, and among the ledge packs the nearest still goes first.
+    //
+    // A room with a boss-side ring (RoomAggroBoss::bossSideLastRadius) ranks the
+    // packs inside it behind everything else, the ledges included: their lanes run
+    // at the boss, so they are the pulls that wake him, and a wake while the rest
+    // of the room still stands brings all of it. `distToBoss` < 0 = no live boss.
+    constexpr float RoomTrashOffLevelPenalty = 1000.0f;
+    constexpr float RoomTrashBossSidePenalty = 2000.0f;
+    inline float RoomTrashPickDistance(float dist2d, float dz, float levelTolerance,
+                                       bool offLevelLast, float distToBoss = -1.0f,
+                                       float bossSideLastRadius = 0.0f)
+    {
+        if (bossSideLastRadius > 0.0f && distToBoss >= 0.0f && distToBoss < bossSideLastRadius)
+            return dist2d + RoomTrashBossSidePenalty;
+        return offLevelLast && std::fabs(dz) > levelTolerance
+                   ? dist2d + RoomTrashOffLevelPenalty
+                   : dist2d;
+    }
+
+    // A pull-mode camp the tank has left further behind than any live camp may sit
+    // (maxTankGap: PartyMaxSpread + the largest legitimate standoff). No member can
+    // be inside PartyMaxSpread of it and inside maxTankGap of the tank at once, so a
+    // spread gate anchored on it can never pass. 0 = no backstop, nothing is stale.
+    inline bool CampAnchorIsStale(float tankToCamp, float maxTankGap)
+    {
+        return maxTankGap > 0.0f && tankToCamp > maxTankGap;
+    }
+
+    // A stock chase toward `target` while a room-aggro boss still sleeps and its
+    // room is being pre-cleared: true when the chase ends inside the boss's wake
+    // sphere (ChaseEndToBoss), i.e. inside the boss's aggro. Mobs in there "come
+    // with the boss" and are excluded from the room clear, but one woken early (a
+    // social pull, a flee-for-assist) still drew the chase in after it.
+    inline bool ChaseWakesSleepingBoss(float chaseEndToBoss, float wakeSphere, bool bossInCombat)
+    {
+        return !bossInCombat && chaseEndToBoss < wakeSphere;
+    }
+
+    // The stalled fallback (DungeonClearClearStalledAction) pulls one nearby mob
+    // and is then done: once that mob is gone and the fight is over, the stall is
+    // cleared and Advance tries the route again.
+    inline bool StallPullIsDone(bool pullTargetAlive, bool inCombat)
+    {
+        return !pullTargetAlive && !inCombat;
+    }
+
+    // Advance's per-point MoveTo fallback: does this refused move count toward
+    // DC_STUCK_LIMIT? Not when the movement arbiter only deferred it — an
+    // equal-or-higher priority move still holds, which is a wait, not a shut way.
+    // Counting those turned ~1s of a post-pull hold into a "movement isn't
+    // progressing" stall (tr-20261019-182249-2). Pursuit already reads a deferred
+    // move as alive.
+    inline bool MoveToFallbackCountsStuck(bool moved, bool deferred)
+    {
+        return !moved && !deferred;
+    }
+
+    // Engage-trash's walk-in on one target: is it getting any nearer? True once the
+    // distance has not improved by `minClose` for `limitMs` of walking. A gap
+    // between ticks longer than `gapMs` (the action lost the tick to a leash
+    // hold, a long-route deferral, a fight) restarts the window rather than
+    // counting the time away against it.
+    //
+    // tr-20261019-182249-1 / sk-20261019-105358-31: the walk-in on a Doomforge
+    // Arcanasmith past Argelmach's door stopped every tick to re-aim and Advance
+    // re-issued its spline in between; the tank stood at (781.7,31.9) for 100s
+    // through 118 yields, the stuck count it never reset climbed to the limit, and
+    // the stall it set ended the run.
+    struct WalkInWatch
+    {
+        float bestDist = -1.0f;
+        uint32_t progressMs = 0;
+        uint32_t lastTickMs = 0;
+    };
+
+    inline bool EngageWalkGivenUp(WalkInWatch& w, float dist, float minClose, uint32_t nowMs,
+                                  uint32_t limitMs, uint32_t gapMs)
+    {
+        bool const restart = w.bestDist < 0.0f || nowMs - w.lastTickMs > gapMs;
+        if (restart || dist < w.bestDist - minClose)
+        {
+            w.bestDist = dist;
+            w.progressMs = nowMs;
+        }
+        w.lastTickMs = nowMs;
+        return nowMs - w.progressMs >= limitMs;
+    }
+
+    // The assist camp's no-LOS close-in on a fight holder: true once every move
+    // toward the SAME holder has been refused for `limitMs` running. A move that
+    // goes restarts it; so does a new holder (its refusals start now).
+    // `refusedSince` is the caller's state, 0 = not refusing.
+    //
+    // sk-20261019-105358 (-70/-72/-73, 2/17): a Reservist or Medic General
+    // Angerforge summons at a random offset landed inside the geometry west of the
+    // fight. Same floor, so the level gate passed it; every member drove at it on
+    // a refused route (900-2000 refusals each), kept re-seeding combat on it over
+    // the stuck-combat breaker, and walked off the tank until the stall watchdog.
+    inline bool AssistCloseGivenUp(bool moved, bool sameTarget, uint32_t nowMs,
+                                   uint32_t limitMs, uint32_t& refusedSince)
+    {
+        if (moved)
+        {
+            refusedSince = 0;
+            return false;
+        }
+        if (!sameTarget || refusedSince == 0)
+        {
+            refusedSince = nowMs != 0 ? nowMs : 1;
+            return false;
+        }
+        return nowMs - refusedSince >= limitMs;
+    }
+
+    // How far from the boss a chase toward a target ENDS (2D): a mover with reach
+    // `range` stops that far short of the target on its own side, and one already
+    // inside it does not move at all. range 0 = it ends on the target (melee, a
+    // gap-closer's leap). Feeds ChaseWakesSleepingBoss.
+    //
+    // sk-20261019-105358 (-61/-57/-47, 900s each): a Doomforge Dragoon with no
+    // combat movement, 26.4yd from the Emperor (sphere 28.3), woke and was fought
+    // where it stands. Testing where the TARGET stood banned every reach toward
+    // it, the ranged included, held 44-50yd out past their spell range — nothing
+    // could ever kill it. A caster stopping 30yd short of it is 48yd from the boss.
+    inline float ChaseEndToBoss(float botX, float botY, float targetX, float targetY,
+                                float bossX, float bossY, float range)
+    {
+        float const dx = botX - targetX;
+        float const dy = botY - targetY;
+        float const toBot = std::sqrt(dx * dx + dy * dy);
+        float endX = targetX;
+        float endY = targetY;
+        if (toBot <= range)
+        {
+            endX = botX;
+            endY = botY;
+        }
+        else if (range > 0.0f)
+        {
+            endX = targetX + dx / toBot * range;
+            endY = targetY + dy / toBot * range;
+        }
+        return std::sqrt((endX - bossX) * (endX - bossX) + (endY - bossY) * (endY - bossY));
+    }
 }
 
 #endif

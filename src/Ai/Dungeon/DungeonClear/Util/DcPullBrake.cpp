@@ -9,6 +9,8 @@
 #include "DungeonClearUtil.h"   // DC_PULL_* log macros
 #include "Ai/Dungeon/DungeonClear/DcPullContext.h"
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcLeaderSignal.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcPullPlanner.h"
 
 #include "Map.h"
 #include "ObjectAccessor.h"
@@ -16,6 +18,7 @@
 #include "Playerbots.h"
 #include "PlayerbotAI.h"
 #include "StringFormat.h"
+#include "Timer.h"
 #include "Unit.h"
 
 #include <string>
@@ -41,7 +44,35 @@ void DcPullBrake::OnEnterCombat(Player* bot)
     if (!ctx)
         return;
 
-    DcPullContext const& pull = ctx->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+    DcPullContext& pull = ctx->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+
+    // UNPLANNED AGGRO WHILE SCOUTING. The maneuver will drag this to a fresh camp,
+    // but only on its first combat tick — and until then the phase reads Idle, the
+    // party reads not-passive, and stock "dps assist" puts every caster on the
+    // aggressor at its spawn (tr-20260923-171623-1). Stamp the hold here, at the
+    // flag. Leader-gated: a follower's own copy of this context is never read.
+    // GetLeaderCampHold applies the pull-mode / camp / run gates.
+    if (pull.phase == DcPullPhase::Idle)
+    {
+        if (DcLeaderSignal::IsDungeonClearLeader(bot))
+        {
+            pull.scoutAggroMs = getMSTime();
+            DC_PULL_DEBUG("[DC:{}] scout aggro: combat flag raised while scouting -> "
+                          "party held passive until the drag-back takes the pull",
+                          bot->GetName());
+            // Ask the Dynamic governor to answer the aggro NOW. In Dynamic mode the
+            // bool is off between packs, and every combat-side reader of the
+            // effective mode (the maneuver trigger first of all) gates on the LATCHED
+            // bool before it ever evaluates the value that runs the governor — so an
+            // aggro nobody sized would stay a walk-in for the whole fight. The
+            // governor's unclassified-aggro gate (sweep maps only) flips the bool to
+            // Advanced here, at the flag, and the maneuver's Idle branch drags the
+            // pack to a fresh camp on its first tick. Off / On / a verdict already
+            // standing: the call is a no-op.
+            DcPullPlanner::UpdateDynamicPullMode(botAI, ctx);
+        }
+        return;
+    }
 
     // Advancing is the ONLY phase with an inbound leg to kill, and it is
     // leader-owned: a follower's own copy of this context never leaves Idle, so the

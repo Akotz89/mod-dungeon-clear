@@ -23,9 +23,17 @@ public:
 // COMBAT-engine companion multiplier. The DungeonClearMultiplier above rides the
 // NON-combat strategy, so it can only touch non-combat actions. This one rides the
 // combat strategy and touches EXACTLY ONE combat action — the stock "drop target"
-// — to stop the flip-early party-assist from ping-ponging the engine (drop target
-// treats an out-of-LOS seeded fight target as invalid and leaves the combat engine
-// before reach can close). Everything else in the combat engine stays fully stock.
+// — because it treats an out-of-LOS target as invalid and leaves the combat engine,
+// which strands two DC maneuvers that put a bot out of LOS on purpose:
+//   - a follower closing on the leader's seeded fight target (the flip-early
+//     party-assist ping-pong), and
+//   - the LEADER mid-drag on an LOS-break pull, whose success condition IS losing
+//     sight of the tagged mob — dropping the tank off the combat engine there
+//     freezes the pull FSM, whose watchdogs only run on that engine.
+// It also enforces the threat lead on the combat engine (a DPS follower's damage
+// waits PullPlayerReleaseDelay after the tank's first hit), the same rule the
+// non-combat multiplier applies to the opener. Everything else in the combat
+// engine stays fully stock.
 class DungeonClearCombatMultiplier : public Multiplier
 {
 public:

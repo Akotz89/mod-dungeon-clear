@@ -21,6 +21,15 @@ enum class ObjectiveArriveResult
     Done,     // objective satisfied — latch it cleared and advance the clear
     Running,  // still working (e.g. mid-interaction) — hold and call again next tick
     Blocked,  // cannot complete unaided (needs the human) — stall the run
+    // The encounter reset (or the work this event already did was undone)
+    // behind the party — REWIND the event to step 0 and run it again. Only
+    // meaningful from inside an event (a Custom step, or a garrison's
+    // WhileHolding hook, which otherwise has its result ignored); a legacy
+    // on-arrival hook treats it as Running. The same rewind the boss-state
+    // gate's RestartOnBossState performs, for encounters whose reset shows in
+    // something other than a boss state: Blackrock Depths' Tomb of the Seven
+    // (instance data) and Lyceum torches (an item that expires in the bags).
+    Restart,
 };
 
 // Optional per-objective behaviour run when the tank reaches a travel objective
@@ -65,6 +74,17 @@ public:
     static bool Has(uint32 hookId);
 };
 
+// Generic hook 40: the RAID MUSTER, at an objective. DcRaidMuster (stage the
+// raid on the tank, top everyone off, run the rebuff round, bounded by its own
+// ceiling) normally gates only the engage of a BOSS anchor. An event that starts
+// a raid encounter itself — Karazhan's Blackened Urn summons Nightbane — needs
+// the same muster before its trigger step, and its anchor is an objective. The
+// hook runs the muster against the current objective as if it were the boss:
+// Running while it holds, Done once it releases. Raid maps only (Done
+// elsewhere, like the muster itself). The objective action yields rest ticks to
+// this step, so the tank can drink under the muster's 100/100 rest override.
+inline constexpr uint32 DC_HOOK_RAID_MUSTER = 40;
+
 // --- per-dungeon hook appenders ------------------------------------------
 // A dungeon gets its own hook TU only when its on-arrival behaviour is a
 // CONTROLLER rather than a one-shot action — i.e. when it re-decides from live
@@ -79,5 +99,104 @@ public:
 //
 // The Black Morass (map 269) — the wave driver. See BlackMorassDriver.cpp.
 void RegisterBlackMorassHooks(ObjectiveHookRegistry::HookTable& out);
+
+// Blackrock Depths (map 230) — the Upper City set pieces: Rocknot's ale run,
+// Hurley's kegs, the Tomb of the Seven and the Lyceum braziers (ids 47-53). They
+// live beside the events in BlackrockDepthsEvents.cpp, which owns the geometry
+// and the instance-data constants they read.
+void RegisterBlackrockDepthsHooks(ObjectiveHookRegistry::HookTable& out);
+
+// Upper Blackrock Spire (map 229) — the Dragonspine Door, the hall runes, the
+// Blackrock Altar and the stadium (ids 56-61). They live beside the events in
+// BlackrockSpireEvents.cpp, which owns the geometry and the instance constants
+// (and the mod-individual-progression layering) they read.
+void RegisterBlackrockSpireHooks(ObjectiveHookRegistry::HookTable& out);
+
+// Stratholme (map 329) — ziggurat crystal repair (ids 44-46). Lives beside the
+// ziggurat events in StratholmeEvents.cpp, which owns the chamber geometry.
+void RegisterStratholmeHooks(ObjectiveHookRegistry::HookTable& out);
+
+// The Violet Hold (map 608) — the siege start, the three defend garrisons and
+// the wave driver. See VioletHoldDriver.cpp. Ids 15-19.
+void RegisterVioletHoldHooks(ObjectiveHookRegistry::HookTable& out);
+
+// Blackwing Lair (map 469) — Razorgore's orb and egg run, the one hook that
+// drives INSIDE a raid boss encounter. See BlackwingLairDriver.cpp. Id 20.
+void RegisterBlackwingLairHooks(ObjectiveHookRegistry::HookTable& out);
+
+// Halls of Stone (map 599) — the Tribunal of Ages garrison (and the one recovery
+// path this dungeon needs, for a dead Brann) plus the wave driver. See
+// HallsOfStoneDriver.cpp. Ids 22-23.
+void RegisterHallsOfStoneHooks(ObjectiveHookRegistry::HookTable& out);
+
+// Halls of Lightning (map 602) — the Slag Furnace transit, the Bjarngrim ->
+// Volkhan leg the ordinary clear has no driver for. See
+// HallsOfLightningDriver.cpp. Id 24.
+void RegisterHallsOfLightningHooks(ObjectiveHookRegistry::HookTable& out);
+
+// Utgarde Pinnacle (map 575) — the two areatrigger starts, the Grauf harpoon
+// driver and the Svala ritual retarget. See UtgardePinnacleDriver.cpp. Ids 25-28.
+//
+// Three of the four are the SHORT kind that would ordinarily live in this file's
+// own table. They are in a TU of their own because they share map 575's constants
+// and its reasoning with the driver, and splitting one dungeon's four hooks across
+// two files to satisfy a size rule would cost more than it saves.
+void RegisterUtgardePinnacleHooks(ObjectiveHookRegistry::HookTable& out);
+
+// Pit of Saron (map 658) — the Ymirjar gauntlet driver and the Tyrannus ledge
+// gate. See PitOfSaronDriver.cpp. Ids 29-30.
+//
+// The gauntlet hook is the controller: three edge-ordered areatrigger gates and
+// two summoned waves, with the arithmetic in the pure kernel
+// Util/DcPosGauntletDecision.h. The ledge hook is the short kind that would
+// ordinarily live in this file's own table; it is in the driver's TU because it
+// shares map 658's constants and its areatrigger forge with the controller.
+void RegisterPitOfSaronHooks(ObjectiveHookRegistry::HookTable& out);
+
+// Halls of Reflection (map 668) — the intro gossip, the altar wave driver, the
+// throne-room cutscene, the point-of-no-return gossip and the escape driver.
+// See HallsOfReflectionDriver.cpp. Ids 31-35.
+//
+// TWO of the five are controllers, which is one more than any other map in the
+// module has, and that is what this dungeon is: hooks 32 and 35 own the party
+// for roughly three quarters of the run (there is nothing to pull between the
+// first gossip and Marwyn's death, and nothing but a footrace after the second).
+// Their arithmetic is in the pure kernels Util/DcHorWaveDecision.h and
+// Util/DcHorEscapeDecision.h. Hooks 31, 33 and 34 are the short kind that would
+// ordinarily live in this file's own table; they are in the driver's TU because
+// they share map 668's constants and its areatrigger forge with the controllers.
+void RegisterHallsOfReflectionHooks(ObjectiveHookRegistry::HookTable& out);
+
+// The Culling of Stratholme (map 595) — the ten-wave controller, and nothing else.
+// See CullingOfStratholmeDriver.cpp. Id 36.
+//
+// ONE hook for a whole dungeon is the point worth recording: nothing on map 595 is
+// started by an areatrigger (so no packet has to be forged the way Pit of Saron's
+// and Utgarde Pinnacle's do), every gossip on the critical path is reachable
+// through the declarative Gossip step or the escort driver's resume branch, and the
+// five crates are the new UseItemAt step. The waves are the single thing with no
+// declarative expression, because what they need is a standing preference
+// re-decided every tick rather than a sequence. Its arithmetic is in the pure
+// kernel Util/DcCosWaveDecision.h.
+void RegisterCullingOfStratholmeHooks(ObjectiveHookRegistry::HookTable& out);
+
+// Trial of the Champion (map 650) — the arena driver: the muster, the three
+// announcer clicks (the first from horseback), and the Argent side-pack pulls.
+// See TrialOfTheChampionDriver.cpp. Id 37. Its decisions are the pure kernel
+// Util/DcTocDriverDecision.h; the joust itself is mod-playerbots' `wotlk-toc`.
+void RegisterTrialOfTheChampionHooks(ObjectiveHookRegistry::HookTable& out);
+
+// The Oculus (map 578) — the flight driver (38: muster, fly, land, Eregos) and the
+// Eregos hold's telemetry (39). See OculusDriver.cpp. Its decisions are the pure
+// kernel Util/DcOculusDriverDecision.h; each member flies its own drake from the
+// rider rung (Action/DcOculusRiderAction.cpp).
+void RegisterOculusHooks(ObjectiveHookRegistry::HookTable& out);
+
+// Karazhan (map 532) — the chess event: arm the conductor (43) and report its
+// verdict back to the event (42). See KarazhanChessDriver.cpp. The game itself is
+// the conductor inside the member rung (Action/DcChessPieceAction.cpp); its
+// decisions are the pure kernels Util/DcChessBoard.h, Util/DcChessDecision.h and
+// Util/DcChessConductor.h.
+void RegisterKarazhanChessHooks(ObjectiveHookRegistry::HookTable& out);
 
 #endif

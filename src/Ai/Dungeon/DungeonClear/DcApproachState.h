@@ -9,7 +9,13 @@
 #include "Define.h"
 #include "ObjectGuid.h"
 #include "Position.h"
+#include "Timer.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcProgressWatchdog.h"
+#include "Ai/Dungeon/DungeonClear/Util/DungeonClearMath.h"
+#include <algorithm>
+#include <limits>
+#include <utility>
+#include <vector>
 
 // All transient per-approach state for one boss-approach run, owned as a single
 // value (DungeonClearApproachStateValue, "dungeon clear approach state") so the
@@ -29,6 +35,30 @@
 // (OnBossChange / OnEnteredEngageRange) replace the old ResetApproachOn* free
 // functions so the reset subsets are named, visible, and co-located instead of
 // inline ->Set(0u) clusters.
+// Targets a driver has given up on, each until a getMSTime it may be tried
+// again. Tiny — a run gives up a handful at most — so a vector scan.
+struct DcGiveUpList
+{
+    std::vector<std::pair<ObjectGuid, uint32>> entries;
+
+    bool Has(ObjectGuid guid, uint32 nowMs) const
+    {
+        for (auto const& [g, until] : entries)
+            if (g == guid && nowMs < until)
+                return true;
+        return false;
+    }
+
+    void Add(ObjectGuid guid, uint32 nowMs, uint32 forMs)
+    {
+        entries.erase(std::remove_if(entries.begin(), entries.end(),
+                                     [&](auto const& e)
+                                     { return e.first == guid || nowMs >= e.second; }),
+                      entries.end());
+        entries.emplace_back(guid, nowMs + forMs);
+    }
+};
+
 struct DcApproachState
 {
     // --- per-approach stuck / recovery watchdogs (nav review F11) ---------
@@ -69,9 +99,34 @@ struct DcApproachState
     // DC_LONGROUTE_DEFER_LIMIT and the tank is dragged away in between — a stutter
     // rather than an engagement. Cleared when the target changes or comes in range.
     bool longRouteDeferBlown = false;
+    // The walk-in engage-trash last drove, and when (getMSTime, 0 = none). Advance
+    // yields while it is fresh instead of overwriting it — see
+    // DungeonClearMath::ShouldYieldToEngageWalk.
+    ObjectGuid engageWalkTarget;
+    uint32 engageWalkMs = 0;
+    // Whether that walk-in is getting any nearer its target, and the targets
+    // given up on when it was not. See DungeonClearMath::EngageWalkGivenUp.
+    ObjectGuid engageWalkWatchTarget;
+    DungeonClearMath::WalkInWatch engageWalkWatch;
+    DcGiveUpList engageWalkGivenUp;
+    // The boss whose engage walk-in stock refused, since when (getMSTime, 0 = not
+    // refused) and the latest refusal — a refusal that lapses restarts the window.
+    // See DungeonClearMath::ShouldTagBossFromStandoff.
+    ObjectGuid bossWalkRefusedTarget;
+    uint32 bossWalkRefusedMs = 0;
+    uint32 bossWalkRefusedLastMs = 0;
     uint32 stuckCount          = 0;  // MoveTo-returned-false backup (was "stuck count")
     uint32 rebuildAttempts     = 0;  // consecutive rebuilds w/o progress ("stride rebuild attempts")
     uint32 resnapAttempts      = 0;  // consecutive Resnap recoveries w/o progress (rung-1 give-up)
+    // Consecutive navmesh-nudges (the ladder's TOP rung) that failed to buy net
+    // progress. The rung had no give-up of its own, and TryFarFromPolyRecovery
+    // succeeds trivially whenever the bot is ON the mesh — a 5yd axis probe from
+    // a walkable poly always paths — so it reset rebuildAttempts and returned
+    // "recovered" forever, making the stall below it dead code. Nine such resets
+    // in nine minutes on the Blackrock Spire ramp (tr-20260818-073620-14) with
+    // zero nudge or stall reaching the player. Same failure shape as the
+    // recoveryProgressWatch comment above, one rung higher up.
+    uint32 nudgeAttempts       = 0;
     uint32 partyNotReadyTicks  = 0;  // consecutive between-pulls not-ready ticks (yield debounce)
 
     // --- approach bookkeeping ---------------------------------------------
@@ -106,6 +161,76 @@ struct DcApproachState
     // changes, and by the approach reset below.
     int8 avoidOrbitDir         = 0;  // 0 = unlatched, +/-1 = committed rotation
     ObjectGuid avoidOrbitSphere;     // pack GUID the current avoid orbit is for
+
+    // The walk to a room-clear stand spot rounds the pack itself on its commit
+    // ring (MoveToStandSkirtingRoomAggro). It ran unlatched, so the long arc it
+    // took one tick was re-decided the next — the same two-point bounce, logged
+    // 45 times in tr-20261019-183728-12. Keyed by the pack; reset with the rest.
+    int8 standOrbitDir         = 0;  // 0 = unlatched, +/-1 = committed rotation
+    ObjectGuid standOrbitPack;       // pack GUID the current stand orbit is for
+
+    // --- off-line rejoin latches ------------------------------------------
+    // HYSTERESIS on the off-line rung. The rung engages at OFF_PATH_THRESHOLD
+    // (6yd of perpendicular deviation) and used to release at the same 6yd, so a
+    // bot parked in the band around it flickered between "rejoin via a generated
+    // path" and "launch the escort spline" tick by tick. That matters because the
+    // spline's OPENING leg is a straight line from the bot to its cursor: on the
+    // line it is harmless, in the 3-6yd band it cuts the inside of a bend. Live
+    // (tr-20260830-115416-5, BWL) the tank sat at 4.1-6.9yd across the anchor
+    // 16->18 hairpin, the rejoin went silent under 6, and the sub-6 spline leg
+    // walked it into a navmesh void — the "tank ran through the wall" report.
+    // Once latched the rung holds until the bot is properly back on the corridor
+    // (DC_OFF_LINE_RELEASE), so re-entry has to actually finish.
+    bool offLineLatched = false;
+
+    // Best (smallest) route deviation seen while the off-line rung has owned the
+    // tick, or FLT_MAX when it has not run since the last reset. The rung's
+    // DcMoveTo is refused whenever a move is already queued, and DcMoveTo's
+    // ResolveEscortConflict only cancels an ESCORT generator — so when DC's own
+    // per-point move is what is in flight (gen=POINT) a refusal handed the tick
+    // straight back to the move that was carrying the bot OFF the line, while the
+    // rung logged success and returned ReturnTrue. Measured on the same run: 48 of
+    // 53 rejoins refused, deviation grew 6.2 -> 31.1yd across 22 consecutive
+    // refused ticks. Tracking the best deviation lets the rung tell a re-entry
+    // that is working (ride it — cancelling every refusal would stutter the
+    // healthy case into a stop/re-issue loop) from one that is not (halt it).
+    float rejoinBestDev = std::numeric_limits<float>::max();
+
+    // Best rejoin gap that counted as PROGRESS this off-line episode (FLT_MAX =
+    // none yet). Separate from rejoinBestDev, which is rebaselined on every issued
+    // move for the drift test; this one moves only when the gap truly closes and
+    // drives rejoinRefusals (DungeonClearMath::TrackRejoinProgress).
+    float rejoinProgressBest = std::numeric_limits<float>::max();
+
+    // Consecutive off-line rejoin ticks that made NO progress (issued nothing, or
+    // issued a move that bought no ground). rejoinBestDev
+    // above only measures DRIFT, and drift is the wrong question when the answer
+    // is zero: a bot whose DcMoveTo is refused every tick never moves at all, so
+    // its deviation is CONSTANT, `deviation > best + slack` is false forever, and
+    // the rung rides a move that does not exist. Measured on tr-20260901-223655-10
+    // (Halls of Lightning): 3924 consecutive refusals over 10m30s at a fixed
+    // 267.2yd, zero halts logged, every watchdog reading clear, the run ending
+    // only on the 600s no-progress timer. Counting the refusals themselves is the
+    // liveness signal the deviation cannot carry.
+    uint32 rejoinRefusals = 0;
+
+    // The off-level re-path (DungeonClearMath::ShouldRepathOffLevel) has been spent.
+    // Cleared only by real progress toward the objective or a boss change, NOT on
+    // the off-line episode boundary: the re-path itself ends the episode (fresh
+    // cursor, deviation ~0), so an episode-scoped latch would re-path forever.
+    bool offLevelRepathSpent = false;
+
+    // Deadline (getMSTime) while a LONG re-entry glide owns the bot; 0 = none.
+    // A deliberate re-entry from far off the route reads, to every rung that
+    // measures against the route, exactly like the wedge it is curing: IsOffPath
+    // is true for its whole length, so DoOffPathRebuild would fire on the third
+    // tick and ResolveEscortConflict would cancel the glide DC just launched —
+    // two ticks of travel per attempt, forever. This latch says "the distance is
+    // known and being walked off", and the off-path rebuild stands down while it
+    // holds. A DEADLINE rather than a bool, sized to the glide's own travel time
+    // (the module's longPathExpiresMs idiom), so a glide that dies silently can
+    // never wedge the rung that is meant to notice.
+    uint32 rejoinGlideUntilMs = 0;
 
     // --- chase leash (approach to a MOVING trash target) ------------------
     // A trash target is latched by GUID and read live, so a walking mob turns
@@ -174,9 +299,30 @@ struct DcApproachState
     // takes the same auto-pause path as a door it knows it can't open.
     // doorStallLastMs re-arms the window: a gap in observations means the stall
     // ended (door opened, run moved on) and a later stall starts fresh.
+    //
+    // "Parked AT the door" is load-bearing, not shorthand: the action's park is
+    // also the fall-through for every walk-in failure, and the door is flagged
+    // up to 80yd ahead along the corridor, so those parks land anywhere on the
+    // approach. Only the arrival park feeds this watchdog. When it fed all of
+    // them the (5s default) budget went on travel time and runs auto-paused at
+    // doors they had never touched — see the atDoor gate in
+    // DungeonClearDoorBlockedAction.
     ObjectGuid doorStallGuid;        // door the current Blocked stall is on
     uint32 doorStallSinceMs    = 0;  // when that stall began (getMSTime)
     uint32 doorStallLastMs     = 0;  // last tick the stall was observed
+
+    // True while the current StallReason was written by the door-blocked action
+    // ("A gate has closed on us", "Opening the door to X"). Such a reason is only
+    // true while the blocking-door value names a door; when it drops the door,
+    // the value releases the reason (ReleaseDoorOwnedStall). Nothing else would:
+    // the door-blocked trigger stops firing once the value is empty, and only a
+    // successful Advance clears a stall — which the stalled fallback, owning
+    // every between-pulls tick while a reason is set, never lets happen.
+    // tr-20260924-094111-3 (Karazhan) died exactly so: a phantom Gatehouse Door
+    // flag, an unplaced walk-in hold, "corridor clear" the same second, then 2m
+    // of the fallback chasing an off-level mob until the 120s stall watchdog.
+    // Any non-door StallDungeonClear / ClearStall drops the ownership.
+    bool doorOwnsStallReason = false;
 
     // --- long-path cache state --------------------------------------------
     // The cached long-range A* result lives in its own value ("dungeon clear
@@ -203,6 +349,67 @@ struct DcApproachState
     uint32 lastProgressSegmentIdx = 0;
     uint32 lastProgressPointIdx   = 0;
 
+    // THE reset authority for every recovery counter. Call once per advance
+    // tick; nothing else may clear these five.
+    //
+    // The recovery ladder is a set of counters that only ever increment on a
+    // FAILURE (a resnap that cured nothing, a rebuild that changed nothing, a
+    // nudge that bought no ground, a move that was refused). Each one exists to
+    // let a rung give up and escalate. Each one is therefore only as good as the
+    // rule that clears it — and this module has now shipped the same bug four
+    // times by clearing them on something that is not progress:
+    //
+    //   S1089  a Resnap that "succeeded" reset the ladder          (rung 1 pinned)
+    //   S1487  any tick that DISPLACED 0.5yd reset the ladder      (87/87 at rung 1)
+    //   S2227  a rejoin that refused still reset stuckCount        (3924 refusals, clear diag)
+    //   S2238  an off-path REBUILD reset the rejoin's refusals     (68 refusals, strike never fired)
+    //
+    // Every one of those is the same mistake with a different subject: treating
+    // "something happened" as "we got somewhere". Motion is not progress; an
+    // issued move is not an arrival; a rung reporting success is not a cure; and
+    // an episode ending is not an episode succeeding. The only fact that
+    // deserves to clear a give-up counter is NET PROGRESS TOWARD THE OBJECTIVE —
+    // nearer than this approach has ever been — which a shuttling, refusing or
+    // frozen bot can never produce and a travelling one produces every tick.
+    //
+    // So the rule is structural rather than a matter of care at each call site:
+    // the counters are private to this decision. A rung that wants to say "I
+    // fixed it" says it by moving the bot closer, and this watchdog notices.
+    // Returns true when progress was made (callers may log it).
+    bool NoteRecoveryProgress(float distToObjective, float minClose, uint32 nowMs)
+    {
+        if (!recoveryProgressWatch.TickClosing(distToObjective, minClose, nowMs))
+            return false;
+        stuckCount      = 0;
+        rebuildAttempts = 0;
+        resnapAttempts  = 0;
+        nudgeAttempts   = 0;   // a nudge that bought ground costs nothing
+        rejoinRefusals  = 0;
+        offLevelRepathSpent = false;
+        return true;
+    }
+
+    // The assist camp's no-LOS close-in (DungeonClearAssistCampActionBase): the
+    // fight holder it last drove at, since when every move toward it has been
+    // refused (getMSTime, 0 = not refusing), and the holders it has given up on,
+    // each with the getMSTime it may be tried again. See
+    // DungeonClearMath::AssistCloseGivenUp.
+    ObjectGuid assistRefusedTarget;
+    uint32 assistRefusedSince = 0;
+    DcGiveUpList assistGivenUp;
+
+    bool AssistGivenUp(ObjectGuid guid, uint32 nowMs) const
+    {
+        return assistGivenUp.Has(guid, nowMs);
+    }
+
+    void GiveUpAssist(ObjectGuid guid, uint32 nowMs, uint32 forMs)
+    {
+        assistGivenUp.Add(guid, nowMs, forMs);
+        assistRefusedTarget = ObjectGuid::Empty;
+        assistRefusedSince = 0;
+    }
+
     // Full reset: every approach AND long-path-cache field. Used on dc on/off,
     // death, all-cleared, and every pull interrupt — the run-state teardown.
     void Reset() { *this = DcApproachState{}; }
@@ -224,14 +431,25 @@ struct DcApproachState
         longRouteDeferWatch.Reset();
         longRouteDeferTarget.Clear();
         longRouteDeferBlown = false;
+        engageWalkTarget.Clear();
+        engageWalkMs        = 0;
         rebuildAttempts     = 0;
         resnapAttempts      = 0;
+        nudgeAttempts       = 0;
         partyNotReadyTicks  = 0;
         lastPos             = Position();
         skirtOrbitDir       = 0;
+        offLineLatched      = false;
+        rejoinBestDev       = std::numeric_limits<float>::max();
+        rejoinProgressBest  = std::numeric_limits<float>::max();
+        rejoinRefusals      = 0;
+        offLevelRepathSpent = false;
+        rejoinGlideUntilMs  = 0;
         skirtOrbitTarget.Clear();
         avoidOrbitDir       = 0;
         avoidOrbitSphere.Clear();
+        standOrbitDir       = 0;
+        standOrbitPack.Clear();
         chaseTarget.Clear();
         chaseAnchor         = Position();
         chaseOrigin         = Position();
@@ -250,6 +468,52 @@ struct DcApproachState
     {
         finalApproachWatch.Reset();
         pursuitWatch.Reset();
+    }
+
+    // One observation of the blocked-state watchdog, from the door-blocked
+    // action's ARRIVAL park only (see the doorStall* field comments for why the
+    // approach parks must not call this). Arms the window on a new door or after
+    // a rearmMs observation gap, records the observation, and returns whether the
+    // bot has now been working this door past timeoutMs without it opening.
+    bool ObserveDoorStall(ObjectGuid door, uint32 now, uint32 rearmMs, uint32 timeoutMs)
+    {
+        if (doorStallGuid != door || getMSTimeDiff(doorStallLastMs, now) >= rearmMs)
+        {
+            doorStallGuid    = door;
+            doorStallSinceMs = now;
+        }
+        doorStallLastMs = now;
+        return getMSTimeDiff(doorStallSinceMs, now) >= timeoutMs;
+    }
+
+    // The stall is OVER: the door has been seen open, or the corridor flag moved
+    // to a different door / cleared entirely. The next arrival park arms a fresh
+    // window instead of resuming the old one.
+    //
+    // Load-bearing for auto-closing gates. Stratholme's two King's Square Gates
+    // carry door.autoCloseTime 3000, so the cycle is: click, gate opens, tank
+    // walks through, gate re-shuts 3s later, click again. The observation-gap
+    // re-arm inside ObserveDoorStall cannot see that — DC_DOOR_STALL_REARM_MS is
+    // 10s and the gap between two arrival parks on a 3s gate is only ~3s — so
+    // three successful opens accumulated into one 7s "stall" and tripped the
+    // (5s default) watchdog on a gate the bot was opening every single time.
+    // Run tr-20260816-151006-14 died exactly there, 27.9yd from Hearthsinger
+    // Forresten with 8/13 bosses down. "The door opened" is the signal; a gap in
+    // observations is only a proxy for it.
+    void ClearDoorStall()
+    {
+        doorStallGuid.Clear();
+        doorStallSinceMs = 0;
+        doorStallLastMs  = 0;
+    }
+
+    // The blocking-door value found no blocker: returns true (and drops the
+    // ownership) when the stall reason is the door's own and must be cleared.
+    bool ReleaseDoorOwnedStall()
+    {
+        bool const owned = doorOwnsStallReason;
+        doorOwnsStallReason = false;
+        return owned;
     }
 };
 

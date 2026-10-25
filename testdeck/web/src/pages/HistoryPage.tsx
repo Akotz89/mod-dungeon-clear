@@ -26,6 +26,8 @@ import {
   useToast,
 } from "../components/ui";
 import { useSession } from "../auth/SessionContext";
+import type { SoakIndex } from "../api/types";
+import { SessionList } from "./ContinuousPage";
 
 const QUALITY_NAME: Record<number, string> = Object.fromEntries(
   QUALITY_CHOICES.map((q) => [q.v, q.label]),
@@ -36,7 +38,7 @@ const fmtT = (t?: number) =>
   t === undefined ? "·" : fmtDuration(t).replace(" ", "");
 
 export default function HistoryPage() {
-  const [tab, setTab] = useState<"runs" | "plans">("runs");
+  const [tab, setTab] = useState<"runs" | "plans" | "continuous">("runs");
   return (
     <div>
       <div className="mb-6 flex items-end justify-between">
@@ -48,7 +50,7 @@ export default function HistoryPage() {
         </div>
         {/* Same segmented treatment as the launch drawer's mode tabs. */}
         <div className="flex gap-1 rounded-xl border border-ink-800 bg-ink-950/70 p-1">
-          {(["runs", "plans"] as const).map((t) => (
+          {(["runs", "plans", "continuous"] as const).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -63,9 +65,31 @@ export default function HistoryPage() {
           ))}
         </div>
       </div>
-      {tab === "runs" ? <RunsTab /> : <PlansTab />}
+      {tab === "runs" ? <RunsTab /> : tab === "plans" ? <PlansTab /> : <ContinuousTab />}
     </div>
   );
+}
+
+/* ---- continuous sessions ---- */
+
+function ContinuousTab() {
+  const { data, error } = usePoll(() => api.get<SoakIndex>("/api/soak"), 15000);
+  if (error)
+    return (
+      <EmptyState icon="⚠️" title="Cannot reach the server">
+        {error}
+      </EmptyState>
+    );
+  if (!data) return <Spinner label="loading sessions…" />;
+  const all = [...(data.active ? [data.active] : []), ...data.recent];
+  if (!all.length)
+    return (
+      <EmptyState icon="♾️" title="No continuous sessions yet">
+        Start one from the Continuous page; every session stays listed here,
+        with every failure it recorded.
+      </EmptyState>
+    );
+  return <SessionList sessions={all} />;
 }
 
 /* ---- shared row plumbing ---- */
@@ -222,7 +246,7 @@ function RunsTab() {
         {session?.admin && (
           <ConfirmButton
             label="Clear history"
-            message="Wipe the entire run history? A one-level .bak backup is kept on the server."
+            message="Wipe the entire run history? A one-level .bak backup is kept on the server. Continuous sessions keep their own ledgers and are not affected."
             className="ml-auto rounded-lg border border-ink-800 px-3 py-1.5 text-xs text-ink-500 hover:border-red-900 hover:text-red-300"
             onConfirm={() => {
               api
@@ -251,9 +275,25 @@ function RunsTab() {
                 {r.heroic && (
                   <span className="text-xs text-fuchsia-300">heroic</span>
                 )}
+                {(r.size ?? 0) > 5 && (
+                  <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-xs text-amber-300">
+                    {r.size}-man
+                  </span>
+                )}
                 {r.roster && (
                   <span className="rounded bg-sky-500/15 px-1.5 py-0.5 text-xs text-sky-300">
                     roster
+                  </span>
+                )}
+                {r.scenario && (
+                  <span
+                    title={`scenario of ${r.scenarioOf ?? "?"}`}
+                    className="rounded bg-teal-500/15 px-1.5 py-0.5 text-xs text-teal-300"
+                  >
+                    scenario
+                    {r.successBy && r.successBy !== "allCleared"
+                      ? ` · by ${r.successBy}`
+                      : ""}
                   </span>
                 )}
                 <WipeBadge r={r} />
@@ -332,6 +372,7 @@ function RerunButton({
       "Every one of them must be offline right now."
     : `Start a new run at ${where} with this run's setup — level ` +
       `${spec.level || "default"}, comp seed ${spec.seed || "random"}, ` +
+      (spec.size ? `size ${spec.size}, ` : "") +
       `${describeGear(spec)}. It gets its own run id.`;
 
   const rerun = async () => {
@@ -403,7 +444,7 @@ function WipeBadge({ r }: { r: RunRecord }) {
   );
 }
 
-function RunDetail({ r }: { r: RunRecord }) {
+export function RunDetail({ r }: { r: RunRecord }) {
   return (
     <div className="space-y-4 border-t border-ink-800/70 px-4 py-4">
       <Line tone="dim">
@@ -446,6 +487,24 @@ function RunDetail({ r }: { r: RunRecord }) {
           ))}
         </div>
       )}
+
+      {r.scenario && (
+        <Section title="Scenario">
+          <Line>
+            of {r.scenarioOf ?? "?"}
+            {r.focus?.length ? <> · focus {r.focus.join(", ")}</> : null} ·
+            passes on {r.successPredicate || "all-cleared"}
+          </Line>
+          {r.successBy && (
+            <Line tone={r.tailPending ? "warn" : ""}>
+              succeeded by {r.successBy}
+              {r.tailPending ? " — the event's tail was still pending" : ""}
+            </Line>
+          )}
+        </Section>
+      )}
+
+      <ExtrasSection extras={r.extras} />
 
       {r.wipeOpponent && (
         <Section title="Wiped on">
@@ -530,6 +589,27 @@ function RunDetail({ r }: { r: RunRecord }) {
 /* Every pull the Dynamic governor took a verdict on (schema 7+), predicted
  * size against what turned up. Flagged when the two disagree by 2+ bodies —
  * that row, not the total, is where an over-pull actually happened. */
+/* The flat key/value map a running event published (record schema 13). */
+function ExtrasSection({ extras }: { extras?: RunRecord["extras"] }) {
+  const entries = Object.entries(extras ?? {});
+  if (!entries.length) return null;
+  return (
+    <Section title="Event extras">
+      <div className="flex flex-wrap gap-2 text-sm">
+        {entries.map(([k, v]) => (
+          <span
+            key={k}
+            className="rounded-lg border border-ink-800 bg-ink-950 px-2 py-1"
+          >
+            <span className="text-ink-500">{k}</span>{" "}
+            <span className="font-mono text-ink-200">{String(v)}</span>
+          </span>
+        ))}
+      </div>
+    </Section>
+  );
+}
+
 function PullLine({ p }: { p: PullEntry }) {
   const over = (p.observed ?? 0) - (p.predicted ?? 0);
   const tone = p.wipedHere || over >= 2 ? "warn" : "dim";
@@ -665,6 +745,16 @@ function PlansTab() {
     () => api.get<{ plans: PlanRecord[] }>("/api/testplans?limit=50"),
     15000,
   );
+  /* The plan summary carries no per-run extras; a scenario plan's detail
+     joins them in from the run history by runId. */
+  const { data: runData } = usePoll(
+    () => api.get<{ runs: RunRecord[] }>("/api/testruns?limit=200"),
+    30000,
+  );
+  const runsById = useMemo(
+    () => new Map((runData?.runs ?? []).map((r) => [r.runId ?? "", r])),
+    [runData],
+  );
   const { session } = useSession();
   const toast = useToast();
   const [open, setOpen] = useState<Set<string>>(new Set());
@@ -760,7 +850,7 @@ function PlansTab() {
                   />
                 </span>
               </div>
-              {expanded && <PlanDetail p={p} />}
+              {expanded && <PlanDetail p={p} runsById={runsById} />}
             </Card>
           );
         })}
@@ -769,7 +859,18 @@ function PlansTab() {
   );
 }
 
-function PlanDetail({ p }: { p: PlanRecord }) {
+function PlanDetail({
+  p,
+  runsById,
+}: {
+  p: PlanRecord;
+  runsById: Map<string, RunRecord>;
+}) {
+  const withExtras = (p.runIds ?? [])
+    .map((id) => runsById.get(id))
+    .filter(
+      (r): r is RunRecord => !!r && Object.keys(r.extras ?? {}).length > 0,
+    );
   const launched = p.runs?.launched ?? 0;
   const dur = p.duration ?? {};
   const pulls = p.pulls;
@@ -905,6 +1006,26 @@ function PlanDetail({ p }: { p: PlanRecord }) {
           </Line>
         </Section>
       ) : null}
+
+      {withExtras.length > 0 && (
+        <Section title="Event extras per run" scroll>
+          {withExtras.map((r) => (
+            <Line key={r.runId}>
+              <span className="font-mono text-xs text-ink-500">{r.runId}</span>{" "}
+              <span className={r.result === "success" ? "" : "text-red-300"}>
+                {r.result}
+              </span>
+              {r.successBy && r.successBy !== "allCleared" && (
+                <span className="text-ink-500"> ({r.successBy})</span>
+              )}{" "}
+              ·{" "}
+              {Object.entries(r.extras ?? {})
+                .map(([k, v]) => `${k} ${v}`)
+                .join(" · ")}
+            </Line>
+          ))}
+        </Section>
+      )}
 
       {p.runIds && p.runIds.length > 0 && (
         <Section title="Runs" scroll>

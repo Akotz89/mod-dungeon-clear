@@ -345,7 +345,7 @@ inline constexpr float DC_SCRIPTED_PULL_CREEP = 0.0f;
 // footwork" — and that number is wrong the moment a ground effect lands ON the camp,
 // because then the two rungs driving the bot are asking for incompatible places and
 // neither ever wins:
-//   * the generic avoid-aoe hops min(radius + 1, AiPlayerbot.FleeDistance) = 5yd from
+//   * the generic avoid-aoe hops min(radius + 1, Playerbots.FleeDistance) = 5yd from
 //     wherever the bot is standing, and CheckLastFlee then forbids reversing that hop
 //     for 5s — so a bot hauled back does not settle, it re-hops SIDEWAYS;
 //   * MgT's Magic Dampening Field step-out is stricter still: it only accepts a spot
@@ -538,6 +538,32 @@ inline constexpr float  DC_SCRIPTED_PULL_LOSE_GROUND = 2.5f;
 inline constexpr bool ScriptedPullLostGround(float bestSoFar, float now)
 {
     return bestSoFar > 0.0f && now > bestSoFar + DC_SCRIPTED_PULL_LOSE_GROUND;
+}
+
+// --- a follower recall that runs away ------------------------------------------
+// The losing-ground ratchet above re-bases its best-so-far to the CURRENT distance
+// every time it fires, so that the re-issued leg is measured from where it starts.
+// That is right for a leg some other generator stole — the re-issue takes it back —
+// and wrong for a leg whose OWN path is the thing carrying the bot away, because
+// then every re-issue reproduces the same path and the re-based ratchet lets the
+// bot sail off one loss at a time, forever.
+//
+// Live (tr-20260927-184653-9, Karazhan, Moroes -> Maiden): the advanced pull moved
+// the camp into a doorway, and a healer's recall to her slot 10yd away "lost
+// ground" twenty times in a row — 10, 20, 47 ... 85yd — at run speed, down into the
+// Servants' Quarters below the corridor. She died to the Shadowbats there, and the
+// rezzers walking down after her took the whole party with them.
+//
+// So a second measure that never re-bases: the closest the bot has ever been on
+// this recall. Once it is this far past that, the recall is walking the bot
+// somewhere other than its slot, and it is stood down rather than re-issued.
+// Wide enough that a recall around a pillar or through a doorway arc never trips
+// it; the ratchet (2.5yd per loss) has fired several times by then.
+inline constexpr float DC_CAMP_RECALL_RUNAWAY = 12.0f;
+
+inline constexpr bool CampRecallRanAway(float closestEver, float now)
+{
+    return closestEver > 0.0f && now > closestEver + DC_CAMP_RECALL_RUNAWAY;
 }
 
 // --- the camp fight's only clock -----------------------------------------

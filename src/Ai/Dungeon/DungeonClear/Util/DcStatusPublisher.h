@@ -8,6 +8,7 @@
 
 #include <functional>
 #include <string>
+#include <vector>
 #include "Define.h"
 #include "ObjectGuid.h"
 
@@ -40,6 +41,15 @@ public:
     static void MarkActiveTank(ObjectGuid tank);
 
     static void UnmarkActiveTank(ObjectGuid tank);
+
+    // Snapshot of every bot currently running a clear — the same registry the
+    // status detector walks, exposed because it is the module's one
+    // authoritative "who has `dc on`" list and other global-tick sweeps need it
+    // too (DcCombatPurge). Copied out under the lock and returned by value, so
+    // the caller iterates without holding it; entries may be stale by the time
+    // it does, exactly as they may be for TickStatusPushes, and callers
+    // re-resolve each GUID through ObjectAccessor.
+    static std::vector<ObjectGuid> ActiveTanks();
 
     static void TickStatusPushes(uint32 diff);
 

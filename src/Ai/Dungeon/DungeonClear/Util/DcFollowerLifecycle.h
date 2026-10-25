@@ -24,7 +24,7 @@ public:
     // gluing it to the tank with no way to self-heal (a real player has no AI to
     // clear it). MarkFollowing records every player that currently has such a
     // generator; ReapOrphanedFollows (driven each world tick from a
-    // PlayerbotScript) finds any marked player still in world whose AI has gone
+    // WorldScript) finds any marked player still in world whose AI has gone
     // away and clears the generator, returning movement control to the player.
     static void MarkFollowing(ObjectGuid player);
 
@@ -50,7 +50,7 @@ public:
     // skips them so they keep the camp hold but stay free to heal the tank through
     // the drag-back (the camp-hold action yields the tick for a parked healer so
     // its heals fire). ReapStrandedPassives runs every world
-    // tick (from the same PlayerbotScript as ReapOrphanedFollows) and is the
+    // tick (from the same WorldScript as ReapOrphanedFollows) and is the
     // SINGLE authoritative teardown: it removes DC passive from any registered
     // player whose leader is no longer in a holding pull phase (pull released /
     // dc off / paused / death / leader gone), which reliably un-passives even a

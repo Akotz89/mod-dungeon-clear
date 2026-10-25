@@ -7,6 +7,8 @@
 #define _PLAYERBOT_DCTESTPLANSUMMARY_H
 
 #include <cstdint>
+#include <deque>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -108,9 +110,64 @@ namespace DcTestPlanSummary
         std::uint32_t unattributedWipes = 0;
         PullStats pulls;
         std::vector<std::string> runIds;
+        // True when runIds holds only the most recent runs (an endless plan
+        // caps the list so a days-long soak doesn't grow without bound).
+        bool runIdsRecent = false;
     };
 
     Stats Build(std::vector<DcTestPlan::RunOutcome> const& outcomes);
+
+    // Incremental twin of Build: fold outcomes in one at a time, read Stats
+    // out at any point. Keeps histograms rather than per-run samples, so its
+    // memory is bounded by the number of DISTINCT durations / pull sizes /
+    // reasons, not by the number of runs — an endless plan can run for days.
+    // Build(outcomes) is exactly Accumulator-over-outcomes, so both produce
+    // byte-identical summaries.
+    class Accumulator
+    {
+    public:
+        // runIdCap 0 keeps every run id (a finite plan's summary lists them
+        // all); N keeps the last N (Stats::runIdsRecent then reads true once
+        // any were dropped).
+        explicit Accumulator(std::size_t runIdCap = 0) : _runIdCap(runIdCap) {}
+
+        void Add(DcTestPlan::RunOutcome const& o);
+        Stats Build() const;
+
+        std::uint32_t Launched() const { return _launched; }
+        std::uint32_t Succeeded() const { return _succeeded; }
+        std::uint32_t Failed() const { return _failed; }
+
+        // Distinct fail reasons / trash names kept before new ones fold into
+        // "(other)" — fail reasons can embed names and numbers.
+        static constexpr std::size_t kMaxDistinctKeys = 500;
+
+    private:
+        struct FunnelAcc
+        {
+            std::uint32_t killed = 0;
+            std::uint32_t wiped = 0;
+            std::uint64_t posSum = 0;
+        };
+
+        std::size_t _runIdCap = 0;
+        std::uint32_t _launched = 0;
+        std::uint32_t _succeeded = 0;
+        std::uint32_t _failed = 0;
+        std::map<std::string, std::uint32_t> _verdicts;
+        std::map<std::string, std::uint32_t> _reasons;
+        std::map<std::uint32_t, std::uint32_t> _successDurations;  // seconds -> runs
+        std::uint64_t _successDurationSum = 0;
+        std::map<std::string, FunnelAcc> _funnel;
+        std::map<std::string, std::uint32_t> _trashWipes;
+        std::uint32_t _unattributedWipes = 0;
+        PullStats _pulls;
+        std::map<std::uint32_t, std::uint32_t> _observed;  // pull size -> pulls
+        std::map<std::int32_t, std::uint32_t> _errors;     // signed error -> pulls
+        std::vector<std::string> _roster;
+        std::deque<std::string> _runIds;
+        bool _runIdsDropped = false;
+    };
 
     // Plan identity + disposition, carried alongside the aggregated stats.
     struct Header
@@ -120,7 +177,9 @@ namespace DcTestPlanSummary
         //    unattributedWipes
         // 4: added the pull population (predicted vs observed)
         // 5: added the campaign's gear ceiling (gearIlvl/gearQuality)
-        std::uint32_t schema = 5;
+        // 6: pool plans — `endless`, `checkpoint`, `pick`, per-entry `pool`
+        //    stats, `runIdsRecent`
+        std::uint32_t schema = 6;
         std::string planId;
         std::string dungeon;
         std::string dungeonName;
@@ -129,6 +188,7 @@ namespace DcTestPlanSummary
         std::uint32_t level = 0;
         bool heroic = false;
         std::uint32_t seedBase = 0;
+        std::uint32_t size = 0;      // 0 = classic 5-man comp
         // Gear ceiling asked for, as typed rather than resolved: 0 = "whatever
         // the server is set to", -1 = no limit. Resolved per run (and recorded
         // there); a campaign summary only needs to say what it requested.
@@ -138,13 +198,33 @@ namespace DcTestPlanSummary
         std::uint64_t endedAtMs = 0;
         std::uint32_t durationS = 0;
         std::string result;       // "completed" | "stopped" | "aborted"
+                                  // | "running" (checkpoint lines)
         std::string abortReason;  // "" unless aborted
+        bool endless = false;
+        // A periodic line an endless plan writes while it runs, so a crash
+        // loses at most one checkpoint interval of aggregate. The plan's final
+        // line has checkpoint false; readers take the last line per planId.
+        bool checkpoint = false;
+        std::string pick;         // "bag" | "random"; "" for a single-dungeon plan
     };
 
-    std::string ToJsonl(Header const& h, Stats const& s);
+    // One pool entry's own slice of a pool plan's stats (per dungeon +
+    // difficulty — a boss funnel only means something within one dungeon).
+    struct PoolEntryStats
+    {
+        std::string token;
+        bool heroic = false;
+        std::uint32_t size = 0;
+        bool inPool = true;       // false: edited out of the pool, still has runs
+        Stats stats;
+    };
+
+    // `pool` empty = a single-dungeon plan: the line carries no "pool" key.
+    std::string ToJsonl(Header const& h, Stats const& s,
+                        std::vector<PoolEntryStats> const& pool = {});
 
     std::string CapturePath();
-    void Append(Header const& h, Stats const& s);
+    void Append(Header const& h, Stats const& s, std::vector<PoolEntryStats> const& pool = {});
 }
 
 #endif  // _PLAYERBOT_DCTESTPLANSUMMARY_H

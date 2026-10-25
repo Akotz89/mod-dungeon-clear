@@ -19,11 +19,22 @@ class Player;
 // instead of trailing the player master. For the leader bot itself it resolves
 // to the bot, which is how the driving ladder and follow-tank trigger tell the
 // single leader apart from the followers it leads.
+//
+// UNCACHED (checkInterval 1) ON PURPOSE — do not "optimise" it back to a TTL.
+// CalculatedValue stores the raw `Player*` it last computed, so any interval > 1
+// hands out a pointer nobody revalidates for the length of the TTL. A tank that
+// logs out, is despawned, or leaves the map inside that window leaves every
+// follower holding a dangling or foreign-thread pointer, and the follow-tank rung
+// then WRITES through it (MotionMaster::MoveFollow -> Unit::FollowerAdded, which
+// checks only for null) — a SIGSEGV in the follow target's m_followingMe, reported
+// as issue #20. Calculate() re-resolves through ObjectAccessor every read, and
+// FindLeaderTank keeps its own 250 ms election memo, so the recompute is a couple
+// of hash lookups, not a group walk.
 class DungeonClearPartyTankValue : public CalculatedValue<Player*>
 {
 public:
     DungeonClearPartyTankValue(PlayerbotAI* botAI)
-        : CalculatedValue<Player*>(botAI, DcKey::PartyTank, 2)
+        : CalculatedValue<Player*>(botAI, DcKey::PartyTank, 1)
     {
     }
 

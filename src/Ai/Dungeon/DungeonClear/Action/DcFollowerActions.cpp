@@ -18,6 +18,7 @@
 
 #include "Creature.h"
 #include "DBCStores.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcFormation.h"
 #include "GameObject.h"
 #include "Group.h"
 #include "Log.h"
@@ -32,9 +33,14 @@
 #include "Position.h"
 #include "ServerFacade.h"
 #include "SharedDefines.h"
+#include "SmartEnum.h"
+#include "Spell.h"
+#include "SpellMgr.h"
 #include "Ai/Dungeon/DungeonClear/DcApproachState.h"
 #include "Ai/Dungeon/DungeonClear/Data/DcEventDoorRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
+#include "Ai/Dungeon/DungeonClear/Data/HealLeashRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcEngageGeometry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcHazard.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcPlayerbotCompat.h"
@@ -56,6 +62,7 @@
 #include "Ai/Dungeon/DungeonClear/Data/FightInPlaceRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/ScriptedPullRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTargeting.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTickMemo.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearTuning.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearUtil.h"
@@ -67,6 +74,7 @@
 #include "Playerbots.h"
 #include "DcActionShared.h"
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
+#include "Util/DcPlayerbotsConfig.h"
 
 using namespace DcActionShared;
 
@@ -107,6 +115,62 @@ namespace
         for (Position const& p : trail)
             window.emplace_back(p.GetPositionX(), p.GetPositionY(), p.GetPositionZ());
         return DcMovement::SplinePath(botAI, window);
+    }
+
+    // A TRANSIT OWNS THE COLUMN — follow-tank stands down for it. A true return
+    // means "return false, this tick is not yours".
+    //
+    // Two rungs cannot both position the column, and during a transit they aim at
+    // points that are nowhere near each other. DungeonClearTransitPackTrigger
+    // (relevance 36) walks a follower to within `TransitPackLeash - margin` of the
+    // LEADER'S PUBLISHED ROUTE CURSOR; this action (25) walks it to a crumb `lag`
+    // yards behind the TANK. On an ordinary leg those coincide, because the tank
+    // is at its own cursor. On the Blackwing Lair Suppression Rooms crossing it
+    // does not: the Suppression Device aura is -80% movement speed and the tank
+    // eats it almost continuously while followers spend much of the leg outside a
+    // bubble, so the tank falls a MEASURED median 21yd — p90 31, max 48 — behind
+    // the cursor it is publishing (tr-20260828-183508-4, 310 driver ticks; 80 of
+    // them beyond the 25yd pack leash on their own).
+    //
+    // What that produced: the pack rung walks a follower forward to the cursor
+    // band and, the instant it is inside, goes inert by design ("the fine
+    // positioning inside the pack stays the raid strategy's") and hands the tick
+    // down to follow-tank — which walks it 17yd back down the corridor to the
+    // snared tank, out of the band again, so the pack rung re-arms and walks it
+    // forward. In that run 114 follower moves inside the crossing corridor went
+    // BACKWARDS along the route; the trail branch below was logging on every one
+    // of them (80% of its moves went backwards, median 17.4yd), while the pack
+    // rung as the sole mover went backwards 0 times in 57 and the tank 0 in 10.
+    // That is the reported "the raid walks back through the suppression room over
+    // and over"; it is followers-only because a leader never trails itself.
+    //
+    // It also starved the crossing it was undoing. The driver's advance gate is a
+    // quorum on the followers' distance to the CURSOR, so dragging them off the
+    // cursor is precisely what kept `pack trailing` holding 217 of 310 ticks.
+    //
+    // Standing down does not strand anyone: outside the band the pack rung
+    // outranks this action anyway, and inside it the right behaviour is to hold
+    // and fight rather than retrace 17yd through a 30s-respawn whelp field.
+    // Returning false (not true) yields the tick to the rotation / rest / loot
+    // pipeline exactly as the in-bubble scout-lag branch below does.
+    bool StandDownForTransit(Player* bot)
+    {
+        Position anchor;
+        if (!bot || !DcLeaderSignal::GetTransitAnchor(bot, anchor))
+            return false;
+
+        // Same loose end StandDownForRezzer clears, for the same reason: this
+        // action installs a PERSISTENT MoveFollow generator, and with it no longer
+        // executing nothing else cancels it — it would keep driving the follower
+        // back to the tank underneath the pack rung's point moves. Clear it once.
+        // Self-limiting: after this the active generator is the pack walk itself,
+        // so the guard is false on every later tick and an in-flight transit glide
+        // is never chopped (the driver deliberately avoids a stop packet per tick
+        // of a two-minute elite fight; so must this).
+        MotionMaster* mm = bot->GetMotionMaster();
+        if (mm && mm->GetCurrentMovementGeneratorType() == FOLLOW_MOTION_TYPE)
+            DcMovement::StopBot(bot, DcMovement::Stop::Hold);
+        return true;
     }
 
     // THE ELECTED REZZER MUST BE ABLE TO WALK — every mover on this bot stands
@@ -277,6 +341,91 @@ bool DungeonClearFollowTankAction::Execute(Event /*event*/)
         lootYieldStart = 0;  // not looting -> reset the commit timer
     }
 
+    // A transit is driving the column to a published cursor: every branch below
+    // positions against the TANK instead, and while the tank is snared behind its
+    // own cursor those two answers fight each other tick by tick. See
+    // StandDownForTransit. Placed after the loot-policy upkeep above so a
+    // follower's give-up timers keep advancing across the crossing (five minutes
+    // of whelp corpses is exactly when an unfinishable one gets camped).
+    if (StandDownForTransit(bot))
+    {
+        LOG_DEBUG("playerbots.dungeonclear",
+                  "[DC:{}] follow-tank: standing down, the transit owns the column",
+                  bot->GetName());
+        return false;
+    }
+
+    // BLACKROCK DEPTHS' IRON HALL: a follower parked clear of the fire in the stop
+    // its tank holds stays parked, and one still walking to a stop is not turned
+    // round. The golden-angle follow slot below is as likely as not inside a
+    // Guardian's circle in a gap 8yd wide, so following there would only hand
+    // the bot back to the safe-spot hop to walk out again (DcIronHallHoldsFollow).
+    // Yield, don't claim: drinking and looting on the stop still get the tick.
+    if (DcIronHallHoldsFollow(bot, botAI, tank))
+        return false;
+
+    // ON FOOT THROUGH THE JOUST: the lance and the horse are mod-playerbots' walk,
+    // not ours. `toc mount` (64) outranks this rung but only keeps the ticks it
+    // SUCCEEDS on, and its MoveTo fails every tick the walk to the horse is still
+    // in flight — so without this the follower was turned back to the tank on each
+    // of those ticks and never reached a horse farther away than follow distance
+    // (see DcTocDriver::FollowerMountsItself). Clear a MoveFollow left from before
+    // the stand-down, the same once-only teardown as the rezzer's; the walk to the
+    // horse is a point move, so the guard never touches it.
+    if (TocFollowerMountsItself(bot))
+    {
+        followedTank = tank->GetGUID();
+        DcFollowerLifecycle::MarkFollowing(bot->GetGUID());
+        MotionMaster* mm = bot->GetMotionMaster();
+        if (mm && mm->GetCurrentMovementGeneratorType() == FOLLOW_MOTION_TYPE)
+            DcMovement::StopBot(bot, DcMovement::Stop::Hold);
+        return false;
+    }
+
+    // MOUNTED: FOLLOW WITH THE HORSE, NEVER THE PASSENGER. Every mover below acts
+    // on the bot's own MotionMaster — the persistent MoveFollow, the trail glide's
+    // escort spline — and on a vehicle the bot is the passenger: its position is
+    // the seat's, and a generator on it walks nothing. Trial of the Champion puts
+    // the whole party on horses for the joust, and a follower left to those
+    // branches micro-steps in the saddle while its horse stands at the wall.
+    //
+    // DcMoveTo takes MovementAction::MoveTo's vehicle branch, which drives the
+    // vehicle BASE when the seat has CAN_CONTROL (and refuses when it does not,
+    // which is the right answer for a seat that cannot steer). Same golden-angle
+    // fan as the Follow() slot at the bottom, so the riders spread the same way
+    // the walkers do; inside the bubble the tick is yielded, as Follow()'s own
+    // in-range early-out does.
+    if (bot->GetVehicle())
+    {
+        // THE OCULUS: every rider flies its own drake on its own lane (the rider
+        // rung), to a pad the tank may not even have reached yet. Following the
+        // tank here would pull the drake off its lane every tick.
+        if (bot->GetMapId() == DcOculus::MAP_ID)
+            return false;
+
+        followedTank = tank->GetGUID();
+        DcFollowerLifecycle::MarkFollowing(bot->GetGUID());
+
+        // A MoveFollow installed on foot, before the mount, would otherwise stay
+        // on the passenger for the whole ride.
+        MotionMaster* mm = bot->GetMotionMaster();
+        if (mm && mm->GetCurrentMovementGeneratorType() == FOLLOW_MOTION_TYPE)
+            mm->Clear();
+
+        float const riderDist = std::min<float>(DC_PB_CONFIG(FollowDistance, followDistance), 6.0f);
+        if (bot->GetExactDist(tank) <= riderDist + kTrailArrival)
+            return false;
+
+        float const riderAngle = Position::NormalizeOrientation(
+            static_cast<float>(bot->GetGUID().GetCounter()) * 2.39996323f);
+        bool const moved = DcMoveTo(tank->GetMapId(),
+                                    tank->GetPositionX() + std::cos(riderAngle) * riderDist,
+                                    tank->GetPositionY() + std::sin(riderAngle) * riderDist,
+                                    tank->GetPositionZ(), false, false, /*normal_only=*/false);
+        Unit* const horse = bot->GetVehicleBase();
+        return moved || (horse && horse->isMoving());
+    }
+
     // In DYNAMIC pull mode, trail the tank at a lag distance while it scouts toward
     // the next pack and decides Leeroy vs Advanced (leader out of combat, phase
     // Idle). The tight follow bubble otherwise dragged the party onto the tank's
@@ -367,8 +516,14 @@ bool DungeonClearFollowTankAction::Execute(Event /*event*/)
         // the reported "hugging walls / falling off ledges in dynamic pull". Trail
         // points are reachability-gated centered crumbs, so the move stays on the
         // safe route the tank already cleared.
+        // probeReachable=false: this resolve exists to MEASURE the crumb (the
+        // arrival hold below), and the two branches that then move — the glide and
+        // the single-point step — each run their own reachability gate on the
+        // ground they actually use. Probing here bought a second full Detour query
+        // per follower per tick whose answer was thrown away.
         Position trailPoint;
-        if (DcLeaderSignal::GetLeaderScoutTrailPoint(bot, lag, trailPoint))
+        if (DcLeaderSignal::GetLeaderScoutTrailPoint(bot, lag, trailPoint,
+                                                     /*probeReachable=*/false))
         {
             // ARRIVAL HOLD. The hold gate above measures STRAIGHT-LINE distance to
             // the tank (toTank <= lag), but the trail point is the crumb at `lag`
@@ -409,8 +564,13 @@ bool DungeonClearFollowTankAction::Execute(Event /*event*/)
             // normal_only: reject (don't straight-line to) a point that isn't
             // reachable over a real navmesh path. Crumbs are already gated for
             // reachability, but keep the guard as a belt-and-braces backstop.
-            // Reached only when the glide window was too short / unreachable.
-            if (DcMoveTo(bot->GetMapId(), trailPoint.GetPositionX(),
+            // Reached only when the glide window was too short / unreachable —
+            // which is where the PROBED resolve belongs: this is the one branch
+            // that walks the follower to the crumb, so it re-resolves with the
+            // reachability / zone-line gate on (falling back to a farther-back
+            // crumb when the exact-lag point is across a seam, exactly as before).
+            if (DcLeaderSignal::GetLeaderScoutTrailPoint(bot, lag, trailPoint) &&
+                DcMoveTo(bot->GetMapId(), trailPoint.GetPositionX(),
                        trailPoint.GetPositionY(), trailPoint.GetPositionZ(),
                        false, false, /*normal_only=*/true))
             {
@@ -475,7 +635,7 @@ bool DungeonClearFollowTankAction::Execute(Event /*event*/)
     // Tighter cluster than default. Keeps followers in healer LOS and out
     // of mob aggro-radius arcs during the advance. Default followDistance
     // (~10yd) had them strung out by the time the tank engaged.
-    float const dist = std::min<float>(sPlayerbotAIConfig.followDistance, 6.0f);
+    float const dist = std::min<float>(DC_PB_CONFIG(FollowDistance, followDistance), 6.0f);
 
     // Centered trail-follow. Stock Follow() / MoveFollow re-paths to the follow
     // slot through the core PathGenerator, which returns Detour's taut, wall-
@@ -497,25 +657,44 @@ bool DungeonClearFollowTankAction::Execute(Event /*event*/)
     // and the stock Follow() fan is the right fallback.
     if (DcSettings::GetBool(ObjectGuid::Empty, "PathCenterEnable"))
     {
-        float const toTank = bot->GetExactDist2d(tank);
+        // 3D, NOT 2D — the same metric everything else in this rung uses (the
+        // crumb spacing is walked 3D distance, the arrival hold below is
+        // GetExactDist, the tank's own spread gate is GetDistance). A 2D read
+        // here shrinks with the cosine of the slope, so on a ramp the leash
+        // arms at a LARGER true separation than on the flat and the correction
+        // the rung then issues is correspondingly bigger. Identical reasoning
+        // to the scout-lag branch above, which was fixed and this one was not.
+        float const toTank = bot->GetExactDist(tank);
         // Only trail once the tank is beyond the tight follow bubble — i.e. a
         // real corridor traversal is involved, not a fan-out shuffle. Below this
         // the Follow() fan below keeps the cluster tight in healer LOS.
         float const trailEngage = dist + 2.0f;
-        if (toTank > trailEngage)
+        // Per-bot stagger so the column spreads single-file ALONG the
+        // centered trail rather than every follower targeting the one crumb
+        // at `dist` behind the tank and piling onto it. Stable per GUID, same
+        // spirit as the golden-angle fan below but projected onto the trail.
+        uint32 const slot = static_cast<uint32>(bot->GetGUID().GetCounter()) % 4u;
+        float const lag = dist + static_cast<float>(slot) * 3.0f;
+        // Past the leash AND past our own stagger slot, so the crumb we aim at is
+        // genuinely ahead of us — a catch-up, never a retreat. The `toTank > lag`
+        // half is what stops this rung gliding a follower BACKWARD down the trail
+        // and handing it straight back to the Follow() fan below, which is the
+        // ping-pong the party does behind a moving tank (worst on ramps, where the
+        // two legs are down and back up the incline). Live numbers and the full
+        // reasoning: DungeonClearMath::TrailFollowShouldEngage.
+        if (DungeonClearMath::TrailFollowShouldEngage(toTank, trailEngage, lag))
         {
-            // Per-bot stagger so the column spreads single-file ALONG the
-            // centered trail rather than every follower targeting the one crumb
-            // at `dist` behind the tank and piling onto it. Stable per GUID, same
-            // spirit as the golden-angle fan below but projected onto the trail.
-            uint32 const slot = static_cast<uint32>(bot->GetGUID().GetCounter()) % 4u;
-            float const lag = dist + static_cast<float>(slot) * 3.0f;
             Position trailPoint;
             // Skip the trail when the chosen crumb is one we already occupy: re-
             // issuing MoveTo to a point we're basically on micro-steps in place
             // (the scout-lag "two steps forward, two back" dance). Let Follow()
             // take it — it early-outs cleanly when in range.
-            if (DcLeaderSignal::GetLeaderScoutTrailPoint(bot, lag, trailPoint) &&
+            //
+            // probeReachable=false: same reason as the scout-lag resolve above —
+            // this answer is only MEASURED here, and both movers below gate their
+            // own ground. This ran on every trailing tick of every follower.
+            if (DcLeaderSignal::GetLeaderScoutTrailPoint(bot, lag, trailPoint,
+                                                         /*probeReachable=*/false) &&
                 bot->GetExactDist(&trailPoint) > kTrailArrival)
             {
                 // Keep the teardown / orphan-reaper bookkeeping live; the point-
@@ -542,8 +721,11 @@ bool DungeonClearFollowTankAction::Execute(Event /*event*/)
                 // normal_only: never straight-line to a crumb that isn't reachable
                 // over a real navmesh path (belt-and-braces — crumbs are already
                 // reachability-gated in GetLeaderScoutTrailPoint). Reached only
-                // when the glide window was too short / unreachable.
-                if (DcMoveTo(bot->GetMapId(), trailPoint.GetPositionX(),
+                // when the glide window was too short / unreachable — the one
+                // branch here that MOVES to the crumb, so it re-resolves with the
+                // probe on.
+                if (DcLeaderSignal::GetLeaderScoutTrailPoint(bot, lag, trailPoint) &&
+                    DcMoveTo(bot->GetMapId(), trailPoint.GetPositionX(),
                            trailPoint.GetPositionY(), trailPoint.GetPositionZ(),
                            false, false, /*normal_only=*/true))
                 {
@@ -573,10 +755,25 @@ bool DungeonClearFollowTankAction::Execute(Event /*event*/)
     // stock collision shuffle permanently armed). Same deterministic
     // golden-angle fan as ComputeCampSlot, so the cluster spreads evenly and
     // each bot's slot never moves between ticks.
+    //
+    // RAID: the subgroup picks one of eight ring segments and the seed fans
+    // within it, and the follow distance grows with the same-map population —
+    // 40 bots on one golden spiral at 5-man distance is a conga line whose
+    // tail laps the corridor (DcFormation::RaidFollowAngle).
     uint32 const seed = static_cast<uint32>(bot->GetGUID().GetCounter());
-    float const angle =
-        Position::NormalizeOrientation(static_cast<float>(seed) * 2.39996323f);
-    return Follow(tank, dist, angle);
+    float angle = Position::NormalizeOrientation(static_cast<float>(seed) * 2.39996323f);
+    float followDist = dist;
+    if (bot->GetMap() && bot->GetMap()->IsRaid())
+    {
+        angle = DcFormation::RaidFollowAngle(bot->GetSubGroup(), seed);
+        uint32 sameMap = 0;
+        if (Group* group = bot->GetGroup())
+            for (GroupReference* gref = group->GetFirstMember(); gref; gref = gref->next())
+                if (gref->GetSource() && gref->GetSource()->GetMapId() == bot->GetMapId())
+                    ++sameMap;
+        followDist = std::max(followDist, DcFormation::RingRadius(sameMap, followDist));
+    }
+    return Follow(tank, followDist, angle);
 }
 
 bool DungeonClearFilterLootAction::Execute(Event /*event*/)
@@ -716,7 +913,7 @@ bool DungeonClearCampHoldActionBase::Execute(Event /*event*/)
     {
         Unit* const healTarget = AI_VALUE(Unit*, DcKey::Stock::PartyToHeal);
         uint8 const lowestPct = AI_VALUE2(uint8, DcKey::Stock::Health, DcKey::Stock::PartyToHeal);
-        if (healTarget && lowestPct < sPlayerbotAIConfig.almostFullHealth)
+        if (healTarget && lowestPct < DC_PB_CONFIG(AlmostFullHealth, almostFullHealth))
         {
             float const healRange = botAI->GetRange("heal");
             bool const canCast = bot->GetExactDist(healTarget) <= healRange &&
@@ -850,7 +1047,10 @@ bool DungeonClearCampHoldActionBase::Execute(Event /*event*/)
         {
             DC_PULL_TRACE("[DC:{}] hold-at-camp: in bounds mid-fight ({:.1f}yd) -> "
                           "yielding to the rotation", bot->GetName(), toCamp);
-            context->GetValue<DcPullContext&>(DcKey::PullContext)->Get().campHoldBest = 0.0f;
+            DcPullContext& held = context->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+            held.campHoldBest = 0.0f;
+            held.campHoldClosest = 0.0f;
+            held.campHoldRunaway = false;
             return false;
         }
         DcMovement::StopBot(bot, DcMovement::Stop::Soft);
@@ -859,8 +1059,12 @@ bool DungeonClearCampHoldActionBase::Execute(Event /*event*/)
         DcFaceIfNeeded(bot, DcLeaderSignal::FindLeaderTank(bot));
         DC_PULL_TRACE("[DC:{}] hold-at-camp: parked ({:.1f}yd, passive={})",
                       bot->GetName(), toCamp, passive);
-        // Settled: re-arm the losing-ground ratchet for the next recall.
-        context->GetValue<DcPullContext&>(DcKey::PullContext)->Get().campHoldBest = 0.0f;
+        // Settled: re-arm the losing-ground ratchet and the runaway latch for the
+        // next recall.
+        DcPullContext& settled = context->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+        settled.campHoldBest = 0.0f;
+        settled.campHoldClosest = 0.0f;
+        settled.campHoldRunaway = false;
         // During a holding phase (the tank is tagging) OWN the tick so nothing can
         // break the hold while the pull is live. While merely camped between pulls
         // (scout phase, passive==false) YIELD so the party can rest / loot at camp
@@ -917,13 +1121,79 @@ bool DungeonClearCampHoldActionBase::Execute(Event /*event*/)
         return false;
     }
 
+    // A NEW CAMP IS A NEW RECALL. The advanced pull moves the camp as the tank
+    // closes, and every campHold* distance was measured against the old one.
+    if (std::hypot(camp.GetPositionX() - ownPull.campHoldKeyX,
+                   camp.GetPositionY() - ownPull.campHoldKeyY) > DC_PULL_SLOT_RADIUS)
+    {
+        ownPull.campHoldKeyX = camp.GetPositionX();
+        ownPull.campHoldKeyY = camp.GetPositionY();
+        ownPull.campHoldBest = 0.0f;
+        ownPull.campHoldClosest = 0.0f;
+        ownPull.campHoldRunaway = false;
+    }
+
+    // A RECALL THAT RUNS AWAY IS STOOD DOWN, NOT RE-ISSUED. See CampRecallRanAway:
+    // the ratchet below re-bases outward on every loss, so a recall whose own path
+    // leads away from the slot is re-issued onto that same path indefinitely.
+    if (!ownPull.campHoldRunaway)
+    {
+        if (ownPull.campHoldClosest <= 0.0f || toCamp < ownPull.campHoldClosest)
+            ownPull.campHoldClosest = toCamp;
+        else if (CampRecallRanAway(ownPull.campHoldClosest, toCamp))
+        {
+            ownPull.campHoldRunaway = true;
+            DcMovement::StopBot(bot, DcMovement::Stop::HardPin);
+            DcMovement::ClearMovementWait(bot);
+
+            // What was the recall actually walking? Never logged before, so the
+            // one live case (tr-20260927-184653-9) could not say why a 10yd recall
+            // went down a floor. One Detour query, on a latch that fires once.
+            PathGenerator probe(bot);
+            probe.CalculatePath(slot.GetPositionX(), slot.GetPositionY(), slot.GetPositionZ(),
+                                /*forceDest*/ false);
+            Movement::PointsArray const& pts = probe.GetPath();
+            float pathLen = 0.0f;
+            float lowZ = bot->GetPositionZ();
+            for (std::size_t i = 0; i < pts.size(); ++i)
+            {
+                lowZ = std::min(lowZ, pts[i].z);
+                if (i)
+                    pathLen += (pts[i] - pts[i - 1]).length();
+            }
+            LOG_INFO("playerbots.dungeonclear",
+                     "[DC:{}] hold-at-camp: recall RAN AWAY ({:.1f}yd from the slot, "
+                     "closest {:.1f}) -> stood down, holding here | bot ({:.1f},{:.1f},{:.1f}) "
+                     "slot ({:.1f},{:.1f},{:.1f}) camp ({:.1f},{:.1f},{:.1f}) | path type {} "
+                     "{} pts {:.1f}yd, lowest z {:.1f}",
+                     bot->GetName(), toCamp, ownPull.campHoldClosest, bot->GetPositionX(),
+                     bot->GetPositionY(), bot->GetPositionZ(), slot.GetPositionX(),
+                     slot.GetPositionY(), slot.GetPositionZ(), camp.GetPositionX(),
+                     camp.GetPositionY(), camp.GetPositionZ(),
+                     static_cast<uint32>(probe.GetPathType()), pts.size(), pathLen, lowZ);
+        }
+    }
+    if (ownPull.campHoldRunaway)
+    {
+        // Held where the runaway was caught — the same return as "parked": own the
+        // tick while the tank is tagging so nothing else drifts us, yield between
+        // pulls so rest, loot and the tank-follow (which walks the tank's own
+        // breadcrumbs, not a fresh path) carry on.
+        DC_PULL_TRACE("[DC:{}] hold-at-camp: recall stood down after a runaway "
+                      "({:.1f}yd out)", bot->GetName(), toCamp);
+        return passive;
+    }
+
     if (ScriptedPullLostGround(ownPull.campHoldBest, toCamp))
     {
         DcMovement::StopBot(bot, DcMovement::Stop::HardPin);
         DcMovement::ClearMovementWait(bot);
         DC_PULL_DEBUG("[DC:{}] hold-at-camp: losing ground ({:.1f}yd vs best {:.1f}) "
-                      "-> cancelled whatever is carrying us and re-issuing",
-                      bot->GetName(), toCamp, ownPull.campHoldBest);
+                      "-> cancelled whatever is carrying us and re-issuing | bot "
+                      "({:.1f},{:.1f},{:.1f}) slot ({:.1f},{:.1f},{:.1f})",
+                      bot->GetName(), toCamp, ownPull.campHoldBest, bot->GetPositionX(),
+                      bot->GetPositionY(), bot->GetPositionZ(), slot.GetPositionX(),
+                      slot.GetPositionY(), slot.GetPositionZ());
         ownPull.campHoldBest = toCamp;
     }
     else if (toCamp < ownPull.campHoldBest || ownPull.campHoldBest <= 0.0f)
@@ -937,7 +1207,7 @@ bool DungeonClearCampHoldActionBase::Execute(Event /*event*/)
                   "inRoom={})", bot->GetName(), toCamp, passive, moved, inNoGoRoom);
 
     // BACKSTOP — the recall was refused, the bot is standing still, and a stale
-    // EQUAL-priority movement wait is what is holding it down. IsWaitingForLastMove
+    // EQUAL-priority movement block is what is holding it down. The arbiter
     // only yields to a STRICTLY greater priority, so a combat mover that grabbed
     // this follower a moment ago (the camp assist seeding a target and flipping it
     // to the combat engine is the usual culprit) silently starves every recall tick
@@ -949,7 +1219,7 @@ bool DungeonClearCampHoldActionBase::Execute(Event /*event*/)
     // "move REFUSED and not moving -> IsWaitingForLastMove ... prio=3", and walked
     // into the room. The tank's drag-back and camp recall both carry this backstop
     // already; the follower hold never did.
-    if (!moved && !bot->isMoving() && IsWaitingForLastMove(prio))
+    if (!moved && !bot->isMoving() && DcMoveDeferred(prio))
     {
         DcMovement::StopBot(bot, DcMovement::Stop::HardPin);
         DcMovement::ClearMovementWait(bot);
@@ -963,6 +1233,13 @@ bool DungeonClearCampHoldActionBase::Execute(Event /*event*/)
 
 namespace
 {
+    // The assist camp's no-LOS close-in gives a fight holder up once every move
+    // toward it has been refused this long, and skips it for the second span
+    // (DungeonClearMath::AssistCloseGivenUp). Five seconds is well past an arbiter
+    // deferral or a door's swing; a minute lets a mob that moves be tried again.
+    constexpr uint32 DC_ASSIST_REFUSED_GIVE_UP_MS = 5 * 1000;
+    constexpr uint32 DC_ASSIST_GIVEN_UP_MS = 60 * 1000;
+
     // The mob the PARTY is actually fighting, for a follower to assist onto. The old
     // lookup only considered the LEADER's attacker list + victim — which is EMPTY
     // whenever the pack is ranged, or the mobs fixated a DPS instead of the tank, so
@@ -976,8 +1253,34 @@ namespace
     // Returns the nearest valid, reachable such hostile, or nullptr → the caller
     // STANDS DOWN (never orbits the leader). Members are gated within 1.5x
     // PartyMaxSpread of the tank so this stays "the tank's fight", not a far skirmish.
-    Unit* PickPartyFightTarget(Player* bot, Player* leader)
+    //
+    // "REACHABLE" was a promise this comment made and the code did not keep: there
+    // was no level test at all. While the party's own pack is alive that costs
+    // nothing, because it is nearer than anything else and wins the rank. The
+    // moment the pack DIES the rank re-resolves over whatever is still flagged in
+    // combat with the group — and if that is a mob on another floor, this returned
+    // it instead of returning nullptr. The caller then closes on it (the no-LOS
+    // branch of AssistCampActionBase drives straight at the mob) and, because a
+    // Player is handed PATHFIND_NORMAL even where no route exists, walks into the
+    // geometry.
+    //
+    // Live on map 469 (tp-20260828-142623-1, 4 of 5 runs, 0/5 killed Broodlord):
+    // the corridor pack died at 14:36:25, this picked a Blackwing Warlock standing
+    // on the drake-hall floor 24.5yd STRAIGHT UP two ticks later, and the raid
+    // crossed from the Broodlord approach hall at z 424.5 into Firemaw's room at
+    // z 449.3 in eleven seconds.
+    //
+    // Note the rank is deliberately left in 2D. Ranking in 3D does NOT separate
+    // these — the overhead Warlock is 29.8yd away against 49.5yd for the corridor
+    // pack on our own floor, so it wins either metric. Only reachability tells
+    // them apart, and this is the one place in the module that was missing it: the
+    // ledge fix (fix/ledge-target-path-distance) wired IsLevelReachable into all
+    // four DcTargeting pickers and none of the followers' own.
+    Unit* PickPartyFightTarget(Player* bot, AiObjectContext* context, Player* leader)
     {
+        DcApproachState const& approach =
+            context->GetValue<DcApproachState&>(DcKey::ApproachState)->Get();
+        uint32 const now = getMSTime();
         Unit* best = nullptr;
         float bestDist = 0.0f;
         auto consider = [&](Unit* u)
@@ -987,19 +1290,48 @@ namespace
             if (!bot->IsValidAttackTarget(u))
                 return;
             float const d = bot->GetExactDist2d(u);
-            if (!best || d < bestDist)
-            {
-                best = u;
-                bestDist = d;
-            }
+            if (best && d >= bestDist)
+                return;
+            // A holder this bot was refused every route to (the assist camp's
+            // no-LOS close-in, AssistCloseGivenUp) is no fight it can join.
+            if (approach.AssistGivenUp(u->GetGUID(), now))
+                return;
+            // CHEAPEST LAST: only a candidate that would actually WIN the rank pays
+            // for the probe, and the same-level answer is one float compare — so a
+            // fight on one floor, which is nearly every fight in nearly every
+            // dungeon, never reaches PathGenerator at all.
+            //
+            // MEMOISED, because the expensive case is not the rare one: the loop
+            // below ranks every attacker of every groupmate within 1.5x
+            // PartyMaxSpread, and in the state this probe was added for — a mob
+            // formation overhead flagging a forty-man through the floor — that is a
+            // dozen Detour queries, on every follower, on every tick, for the same
+            // dozen candidates. The answer cannot change inside one tick.
+            if (!DcTickMemoAccess::LevelReachable(bot, context, u))
+                return;
+            best = u;
+            bestDist = d;
         };
+        // EVERY HOLDER, NOT JUST THE MELEE ONES. getAttackers() lists units whose
+        // CURRENT VICTIM is `src`; a mob that tagged the party from range and then
+        // stood off is in none of it, while its CombatReference holds the whole
+        // party flagged forever (instanced creatures never leash). That fight is
+        // real, it is what the party is stuck in, and resolving nullptr for it is
+        // what sends the caller to a fallback that cannot end.
+        //
+        // Live on map 604 (tr-20260830-195435-2 / -6): three Drakkari Raiders
+        // (29982) dismount from the Gal'darah-causeway rhino stampede, hold all
+        // five members at 16-26yd without ever closing, and the teardown reads
+        // `attackers=0 victim=- held by Drakkari Raider(29982) 16.5yd 100%
+        // reachable -> LEGITIMATE` for nine minutes.
         auto considerFrom = [&](Unit* src)
         {
             if (!src)
                 return;
-            for (Unit* a : src->getAttackers())
-                consider(a);
-            consider(src->GetVictim());
+            std::vector<Unit*> holders;
+            DcTargeting::CollectCombatHolders(src, holders);
+            for (Unit* h : holders)
+                consider(h);
         };
 
         // 1. The leader's own fight takes priority (the pack it is holding).
@@ -1041,12 +1373,21 @@ bool DungeonClearAssistCampActionBase::Execute(Event /*event*/)
     // to the tank's fight radius so a stale far-away target can't hijack the
     // assist; anything outside falls through to the fresh pick below.
     Unit* target = nullptr;
+    DcApproachState& approach = context->GetValue<DcApproachState&>(DcKey::ApproachState)->Get();
+    uint32 const now = getMSTime();
     if (Unit* cur = context->GetValue<Unit*>(DcKey::Stock::CurrentTarget)->Get())
     {
+        // Same level gate as the fresh pick below. A target already in the slot —
+        // seeded by an instance strategy's focus value, or held over from before
+        // the party changed floors — must not keep its grip merely by being there;
+        // that is the one route left by which an unreachable mob could still reach
+        // the approach code.
         if (cur->IsAlive() && cur->GetMapId() == bot->GetMapId() &&
             bot->IsValidAttackTarget(cur) &&
             cur->GetExactDist2d(leader) <=
-                DcSettings::GetFloat(bot, "PartyMaxSpread") * 1.5f)
+                DcSettings::GetFloat(bot, "PartyMaxSpread") * 1.5f &&
+            DcTickMemoAccess::LevelReachable(bot, context, cur) &&
+            !approach.AssistGivenUp(cur->GetGUID(), now))
             target = cur;
     }
 
@@ -1059,7 +1400,7 @@ bool DungeonClearAssistCampActionBase::Execute(Event /*event*/)
     // attacker list populates.
     if (!target)
     {
-        target = PickPartyFightTarget(bot, leader);
+        target = PickPartyFightTarget(bot, context, leader);
         if (!target)
             return false;
 
@@ -1137,6 +1478,7 @@ bool DungeonClearAssistCampActionBase::Execute(Event /*event*/)
 
     if (bot->IsWithinLOSInMap(target))
     {
+        approach.assistRefusedSince = 0;  // the refusal clock runs on the close-in only
         if (inAttackRange)
         {
             if (!bot->HasInArc(CAST_ANGLE_IN_FRONT, target))
@@ -1174,6 +1516,29 @@ bool DungeonClearAssistCampActionBase::Execute(Event /*event*/)
                   "moved={})", bot->GetName(), target->GetGUID().ToString(), dist,
                   prio == MovementPriority::MOVEMENT_COMBAT ? "combat" : "normal", closing);
 
+    // Refused every route to it for long enough: give it up (see
+    // DungeonClearMath::AssistCloseGivenUp), drop it as the target, and yield.
+    // Neither pick above offers it again until the give-up lapses, so nothing
+    // re-seeds combat on it and the stuck-combat breaker's clear holds.
+    // A false return while the bot is still walking is the arbiter waiting on the
+    // last move, not a refusal; only "refused and not moving" counts.
+    bool const sameTarget = approach.assistRefusedTarget == target->GetGUID();
+    approach.assistRefusedTarget = target->GetGUID();
+    if (DungeonClearMath::AssistCloseGivenUp(closing || bot->isMoving(), sameTarget, now,
+                                             DC_ASSIST_REFUSED_GIVE_UP_MS,
+                                             approach.assistRefusedSince))
+    {
+        uint32 const refusedMs = now - approach.assistRefusedSince;
+        approach.GiveUpAssist(target->GetGUID(), now, DC_ASSIST_GIVEN_UP_MS);
+        LOG_INFO("playerbots.dungeonclear",
+                 "[DC:{}] assist camp: no route to {} {} ({:.1f}yd, refused {} ms) -> given "
+                 "up for {}s", bot->GetName(), target->GetName(), target->GetGUID().ToString(),
+                 dist, refusedMs, DC_ASSIST_GIVEN_UP_MS / 1000);
+        bot->SetSelection(ObjectGuid::Empty);
+        context->GetValue<Unit*>(DcKey::Stock::CurrentTarget)->Set(nullptr);
+        return false;
+    }
+
     return true;
 }
 
@@ -1201,7 +1566,7 @@ bool DungeonClearRegroupCombatAction::Execute(Event /*event*/)
     if (isHealer)
         anchorPos = tank->GetPosition();
     else
-        anchorUnit = DcTargeting::LeaderFightAnchor(bot, tank, anchorPos);
+        anchorUnit = DcTargeting::LeaderFightAnchor(bot, context, tank, anchorPos);
 
     // Role-range standoff ring. Ranged DPS: 0.8x spell range (inside range so target
     // wobble doesn't drop it back out). Healer: max(5, 0.6x heal range) — the same
@@ -1230,34 +1595,39 @@ bool DungeonClearRegroupCombatAction::Execute(Event /*event*/)
     }
 
     // Fallback: no ring point validated (tight geometry, snap misses), or a melee.
-    // Close on the anchor with pathfinding, stopping attackRange short so a ranged
-    // class doesn't pile into the melee/AoE and a melee lands in swing range. The
-    // predicate clears the instant a mob comes into sight, so this only ever walks
-    // far enough to round the corner.
+    // Close on the anchor, stopping attackRange short so a ranged class doesn't
+    // pile into the melee/AoE and a melee lands in swing range. The predicate
+    // clears the instant a mob comes into sight, so this only ever walks far
+    // enough to round the corner.
+    //
+    // Along the ROUTE to the anchor, never the straight line: see the heal
+    // reposition's fallback and DcEngageGeometry::PathedCloseOn — the straight
+    // line is how DPS walked into the Maiden hairpin's wall. No route onto the
+    // anchor's floor -> hold.
     if (!sampled)
     {
-        float const ax = anchorPos.GetPositionX();
-        float const ay = anchorPos.GetPositionY();
-        float const az = anchorPos.GetPositionZ();
         float const attackRange = isMelee
             ? (bot->GetCombatReach() + (anchorUnit ? anchorUnit->GetCombatReach() : 0.0f) + 1.0f)
             : std::max(5.0f, botAI->GetRange("spell") - CONTACT_DISTANCE);
-        float const dist = bot->GetExactDist2d(ax, ay);
-        x = ax;
-        y = ay;
-        z = az;
-        if (dist > attackRange)
+        Position close;
+        if (!DcEngageGeometry::PathedCloseOn(bot, anchorPos, attackRange, close))
         {
-            float const frac = (dist - attackRange) / dist;
-            x = bot->GetPositionX() + (ax - bot->GetPositionX()) * frac;
-            y = bot->GetPositionY() + (ay - bot->GetPositionY()) * frac;
+            DC_PULL_TRACE("[DC:{}] regroup: no route onto the anchor's floor ({:.1f}yd) "
+                          "-> holding", bot->GetName(), bot->GetExactDist2d(&anchorPos));
+            return false;
         }
+        x = close.GetPositionX();
+        y = close.GetPositionY();
+        z = close.GetPositionZ();
     }
 
     // Re-issue guard: the trigger latches and re-fires every tick, but re-plotting a
     // near-identical spline each time stutters and clips casts (cf. spline-reissue
     // freeze). While already travelling toward within 3yd of the same point, own the
-    // tick without touching the move.
+    // tick without touching the move. Owning it is correct HERE (unlike the no-op tail
+    // below): a reconnect spline really is in flight, and the trigger only armed
+    // because the bot has nothing in sight to shoot anyway — so nothing below is being
+    // starved, and yielding would just let a lower mover fight this spline.
     if (bot->isMoving() && _lastDestValid &&
         _lastDest.GetExactDist2d(x, y) < 3.0f)
         return true;
@@ -1279,12 +1649,23 @@ bool DungeonClearRegroupCombatAction::Execute(Event /*event*/)
                   anchorUnit ? anchorUnit->GetGUID().ToString() : "tank",
                   prio == MovementPriority::MOVEMENT_COMBAT ? "combat" : "normal");
 
-    if (DcMoveTo(map->GetId(), x, y, z, /*idle*/ false, /*react*/ false,
-                 /*normal_only*/ false, /*exact_waypoint*/ false, prio))
-    {
-        _lastDest = Position(x, y, z, 0.0f);
-        _lastDestValid = true;
-    }
+    // OWN THE TICK ONLY IF WE ACTUALLY MOVED. This action sits at rel 29, above stock
+    // `reach spell` (20) and the entire class rotation (5-20), and Engine::DoNextAction
+    // stops the tick at the first action that returns true — so an unconditional true
+    // here is a full mute of the follower's damage for as long as the rung stays
+    // latched. That is exactly what it was: when DcMoveTo declines (destination
+    // unreachable, already there, movement throttled) the bot stood still AND cast
+    // nothing, every tick, and since it never dealt damage it never gained the threat
+    // that would have refilled `attackers` and released the latch. Yielding on a no-op
+    // costs the reconnect nothing — the trigger stays latched and re-plots next tick —
+    // and hands the tick back to the rotation, which is the whole point of the rung
+    // sitting below stock combat movement.
+    if (!DcMoveTo(map->GetId(), x, y, z, /*idle*/ false, /*react*/ false,
+                  /*normal_only*/ false, /*exact_waypoint*/ false, prio))
+        return false;
+
+    _lastDest = Position(x, y, z, 0.0f);
+    _lastDestValid = true;
     return true;
 }
 
@@ -1315,9 +1696,6 @@ bool DungeonClearHealRepositionAction::Execute(Event /*event*/)
 
     float const healRange = botAI->GetRange("heal");
     Position const targetPos = target->GetPosition();
-    float const tx = targetPos.GetPositionX();
-    float const ty = targetPos.GetPositionY();
-    float const tz = targetPos.GetPositionZ();
 
     // Stand a little INSIDE heal range so a step of target movement doesn't drop us
     // straight back out. Floor at 5yd so we never try to stack on the target.
@@ -1325,23 +1703,58 @@ bool DungeonClearHealRepositionAction::Execute(Event /*event*/)
 
     // First ring point around the target that snaps, sits within heal range, has
     // LOS, and is reachable (shared with the combat regroup — see FindStandoffPoint).
-    float dx = 0.0f, dy = 0.0f, dz = 0.0f;
-    bool const haveDest = FindStandoffPoint(map, targetPos, standoff, healRange, dx, dy, dz);
+    // Camp leash, on HealLeashRegistry maps only, and only while the healer is
+    // fighting at a standing pull camp (the trigger has already deferred to the
+    // passive holding phases). Everywhere else leashRadius stays 0 and nothing
+    // below changes.
+    Position camp;
+    bool campPassive = false;
+    float const leashRadius =
+        (bot->IsInCombat() && DcLeaderSignal::GetLeaderCampHold(bot, camp, campPassive))
+            ? HealLeashRegistry::Radius(map->GetId())
+            : 0.0f;
+    Position const* const leash = leashRadius > 0.0f ? &camp : nullptr;
 
-    // Fallback: no sampled point validated (tight geometry, snap misses). Close
-    // straight on the target with pathfinding — rounding corners is what regains
-    // LOS — stopping 5yd short, exactly the old regroup behaviour.
+    float dx = 0.0f, dy = 0.0f, dz = 0.0f;
+    bool const haveDest =
+        FindStandoffPoint(map, targetPos, standoff, healRange, dx, dy, dz, leash, leashRadius);
+
+    // Fallback: no sampled point validated (tight geometry, snap misses). Close on
+    // the target — rounding corners is what regains LOS — stopping 5yd short, at
+    // a point ALONG THE ROUTE to it (DcEngageGeometry::PathedCloseOn).
+    //
+    // It used to be a point on the straight bot->target line. Across a wall that
+    // point is in the wall or behind it, and the walk to it goes through: the
+    // Maiden hairpin in Karazhan had healers walking into the wall toward a tank
+    // on the other leg and dropping to the Servants' Quarters below
+    // (tr-20260927-190943-12, "closing on heal target ... los=0, sampled=0"). With
+    // no complete route onto the target's floor there is nowhere honest to walk,
+    // so hold and let the stock heal stack work what is in sight.
     if (!haveDest)
     {
-        float const dist = bot->GetExactDist2d(target);
-        dx = tx;
-        dy = ty;
-        dz = tz;
-        if (dist > 5.0f)
+        Position close;
+        if (!DcEngageGeometry::PathedCloseOn(bot, targetPos, /*stopShort*/ 5.0f, close))
         {
-            float const frac = (dist - 5.0f) / dist;
-            dx = bot->GetPositionX() + (tx - bot->GetPositionX()) * frac;
-            dy = bot->GetPositionY() + (ty - bot->GetPositionY()) * frac;
+            DC_PULL_TRACE("[DC:{}] heal reposition: no route onto {}'s floor ({:.1f}yd, "
+                          "los=0) -> holding", bot->GetName(),
+                          target->GetGUID().ToString(), bot->GetExactDist2d(target));
+            return false;
+        }
+        dx = close.GetPositionX();
+        dy = close.GetPositionY();
+        dz = close.GetPositionZ();
+
+        // A leashed healer never takes the close past its leash: that walk is
+        // exactly the one that carried it onto the Banquet Hall floor. Yield the
+        // tick so the stock heal stack works whatever is in sight from the camp.
+        if (leash && !HealLeashRegistry::WithinLeash(camp.GetPositionX(), camp.GetPositionY(),
+                                                     leashRadius, dx, dy))
+        {
+            DC_PULL_TRACE("[DC:{}] heal reposition: leashed to camp ({:.0f}yd) -> holding, "
+                          "heal target {} is {:.1f}yd out",
+                          bot->GetName(), leashRadius, target->GetGUID().ToString(),
+                          bot->GetExactDist2d(target));
+            return false;
         }
     }
 
@@ -1368,19 +1781,62 @@ bool DungeonClearHealRepositionAction::Execute(Event /*event*/)
 
 bool DungeonClearHazardVacateAction::Execute(Event /*event*/)
 {
-    // The nearest unfightable emitter whose pulse the bot is in. Re-read here
-    // (trigger/action gap); bail if it despawned or the bot cleared in between.
-    DcHazard::VacateEmitter const danger = DcHazard::NearestVacate(bot);
+    // Sample the live hazard world ONCE and answer every question below from it.
+    // Each DcHazard Player* entry point resolves three AiObjectContext values and
+    // one ObjectAccessor lookup per guid; the fan loop below asks two of them per
+    // candidate, so the unsampled form re-resolved the same unchanged world up to
+    // twenty times per Execute on top of the NearestVacate the trigger just ran.
+    // Nothing in this function can move an emitter, so one sample is the whole
+    // tick's truth.
+    DcHazard::LiveSet const live = DcHazard::Sample(bot);
+
+    // The nearest emitter whose pulse the bot is in. Re-read here (trigger/action
+    // gap); bail if it despawned or the bot cleared in between.
+    DcHazard::VacateEmitter const danger =
+        DcHazard::NearestVacate(live, bot->GetPositionX(), bot->GetPositionY(),
+                                bot->GetPositionZ());
     if (!danger.ok)
+    {
+        _fleeToValid = false;
         return false;
+    }
 
     Map* map = bot->GetMap();
     if (!map)
         return false;
 
-    // Aim just PAST the pulse rim: far enough that a step of jitter doesn't drop
-    // the bot straight back in. Measured from the emitter centre.
-    float const clearDist = danger.pulseRadius + DcHazard::VacateRetreatSlack;
+    // COMMIT to one destination and ride it out. The trigger re-fires every tick
+    // while the bot is in the band, and recomputing from scratch each time is what
+    // turned this action into a thrash generator the moment a map had more than one
+    // emitter in play: NearestVacate returns whichever pulse is momentarily closest,
+    // so a step of drift re-elects a different centre and the away-bearing REVERSES.
+    // tr-20260815-134844-5 logged four re-issues inside one second sending the tank
+    // to (946.2,-279.2), then (968.0,-277.9) 22yd the other way, then back — net
+    // travel about zero, in the middle of eight sludges. It died there.
+    //
+    // So while the committed point is still clean and the bot is still travelling
+    // toward it, own the tick and DON'T touch the move. The re-plot is the bug.
+    //
+    // The commitment is TIME-CAPPED, because riding one is only safe as long as
+    // the point deserved it. tr-20260815-154816-5 rode a single committed point
+    // for 47 seconds — the candidate had passed "a path exists" while sitting on
+    // the far side of a wall, so the walk to it left the room, went round, and
+    // dragged the tank ~60yd with twelve sludges behind. The detour bound below is
+    // what stops such a point being chosen at all; this cap is the backstop for
+    // every other way a commitment can go stale (the emitter drifts, the bot
+    // wedges) and keeps "committed" from ever meaning "unsupervised".
+    uint32 const nowMs = getMSTime();
+    if (_fleeToValid && bot->isMoving() &&
+        GetMSTimeDiffToNow(_fleeSetAtMs) < DC_VACATE_COMMIT_MAX_MS &&
+        bot->GetExactDist2d(&_fleeTo) > 3.0f &&
+        !DcHazard::PointIsInVacateBand(live, _fleeTo.GetPositionX(), _fleeTo.GetPositionY(),
+                                       _fleeTo.GetPositionZ()))
+        return true;
+
+    // Aim past the pulse rim by THIS row's slack — the Destroyed Sentinel's 6 to
+    // leave-and-move-on, the Creeping Sludge's 9 to clear its wide hold band with
+    // an arrival margin. Measured from the emitter centre.
+    float const clearDist = danger.pulseRadius + danger.retreatSlack;
 
     // Bearing directly away from the emitter. If the bot is somehow exactly on
     // the centre (degenerate), fall back to its own facing so the direction is
@@ -1397,6 +1853,17 @@ bool DungeonClearHazardVacateAction::Execute(Event /*event*/)
     // the rest of DC. First candidate that snaps, lands outside the pulse, and
     // is reachable wins.
     static constexpr float kFan[] = { 0.0f, 0.5f, -0.5f, 1.0f, -1.0f, 1.6f, -1.6f, 2.4f, -2.4f, 3.14159f };
+
+    // Best SECOND-CHOICE: a point that clears this emitter's own pulse and is a
+    // short walk, but still sits in something else's band. Not a solution — the
+    // trigger will fire again — but strictly better than standing here, and it is
+    // what keeps a boxed-in bot moving now that the unvalidated last resort is
+    // gone. Seeded with where the bot already stands, so it is only ever taken
+    // when it genuinely opens distance from the emitter.
+    float bestPartialClear = bot->GetExactDist2d(ex, ey);
+    float bestPartialX = 0.0f, bestPartialY = 0.0f, bestPartialZ = 0.0f;
+    bool  havePartial = false;
+
     for (float delta : kFan)
     {
         float const ang = away + delta;
@@ -1410,40 +1877,102 @@ bool DungeonClearHazardVacateAction::Execute(Event /*event*/)
         // The snap can pull the point back toward the emitter (onto the only
         // nearby mesh) — keep it only if it truly clears the pulse.
         float const dxp = snap.x - ex, dyp = snap.y - ey;
-        if (dxp * dxp + dyp * dyp < danger.pulseRadius * danger.pulseRadius)
+        float const fromEmitter = std::sqrt(dxp * dxp + dyp * dyp);
+        if (fromEmitter < danger.pulseRadius)
             continue;
+
+        // Record it as a fallback before the stricter screens below reject it.
+        // Deliberately geometry-only here — the path probe is expensive and the
+        // fallback is probed once, at the end, only if it is actually needed.
+        if (fromEmitter > bestPartialClear + 2.0f)
+        {
+            bestPartialClear = fromEmitter;
+            bestPartialX = snap.x;
+            bestPartialY = snap.y;
+            bestPartialZ = snap.z;
+            havePartial = true;
+        }
 
         // Don't flee this pulse straight into ANOTHER hazard's — Sentinels and
-        // their summons sit in overlapping clusters on this map. PointIsHot covers
-        // every live emitter's keep-out cylinder (the fled emitter's own is only
-        // its raw pulse, which this 19yd point already clears), so a candidate
-        // that trades one pulse for another is rejected and the fan tries again.
-        if (DcHazard::PointIsHot(bot, snap.x, snap.y, snap.z))
+        // their summons sit in overlapping clusters on this map, and a Maraudon
+        // sludge pack is nothing but overlap. PointIsHot covers every live
+        // emitter's PLACEMENT keep-out (the fled emitter's own is only its raw
+        // pulse, which this point already clears)...
+        if (DcHazard::PointIsHot(live, snap.x, snap.y, snap.z))
             continue;
 
+        // ...and this covers every live emitter's DANGER band, which is the one
+        // that decides whether the trigger fires again. The two are different
+        // predicates and a row whose hold band is wider than its placement radius
+        // (Creeping Sludge: 11 vs 8) passes the first and fails the second. Landing
+        // on such a point means fleeing again on arrival — forever. Reject it here
+        // and let the fan keep looking.
+        if (DcHazard::PointIsInVacateBand(live, snap.x, snap.y, snap.z))
+            continue;
+
+        // Reachable AND actually near: the path to this point must be commensurate
+        // with the straight line to it. An unbounded reachability test cannot tell
+        // "6yd away" from "6yd away through a wall, 60yd round" — both are
+        // PATHFIND_NORMAL — and the second is not a retreat, it is a march. This is
+        // the check that was missing in tr-20260815-154816-5.
         Position const cand(snap.x, snap.y, snap.z);
-        if (!DcEngageGeometry::IsNavReachable(bot, cand))
+        float pathLen = 0.0f;
+        if (!DcEngageGeometry::IsNavReachableWithin(bot, cand, DC_VACATE_DETOUR_RATIO,
+                                                    DC_VACATE_DETOUR_SLACK, &pathLen))
             continue;
 
         DC_PULL_TRACE("[DC:{}] hazard vacate: clearing {:.0f}yd pulse, moving to "
-                      "({:.1f},{:.1f}) delta={:.1f}",
-                      bot->GetName(), danger.pulseRadius, snap.x, snap.y, delta);
+                      "({:.1f},{:.1f}) delta={:.1f} straight={:.1f}yd path={:.1f}yd",
+                      bot->GetName(), danger.pulseRadius, snap.x, snap.y, delta,
+                      bot->GetExactDist2d(snap.x, snap.y), pathLen);
         DcMoveTo(map->GetId(), snap.x, snap.y, snap.z, /*idle*/ false, /*react*/ false,
                  /*normal_only*/ false, /*exact_waypoint*/ false,
                  MovementPriority::MOVEMENT_COMBAT);
+        _fleeTo = Position(snap.x, snap.y, snap.z, 0.0f);
+        _fleeToValid = true;
+        _fleeSetAtMs = nowMs;
         return true;
     }
 
-    // No validated bearing (boxed in on every side). Last resort: drive the raw
-    // straight-away point through the mover anyway — it pathfinds and clamps, so
-    // the bot at least tries to open distance rather than standing in the pulse
-    // owning the tick for nothing.
-    float const rx = ex + clearDist * std::cos(away);
-    float const ry = ey + clearDist * std::sin(away);
-    DcMoveTo(map->GetId(), rx, ry, bot->GetPositionZ(), /*idle*/ false, /*react*/ false,
-             /*normal_only*/ false, /*exact_waypoint*/ false,
-             MovementPriority::MOVEMENT_COMBAT);
-    return true;
+    // Nothing fully clears. Take the best partial — still in someone's band, but
+    // further from THIS pulse and a short walk away — provided it is genuinely
+    // short. Probed here rather than in the loop so the fallback costs one path
+    // query, not ten.
+    _fleeToValid = false;
+    if (havePartial)
+    {
+        Position const partial(bestPartialX, bestPartialY, bestPartialZ);
+        float pathLen = 0.0f;
+        if (DcEngageGeometry::IsNavReachableWithin(bot, partial, DC_VACATE_DETOUR_RATIO,
+                                                   DC_VACATE_DETOUR_SLACK, &pathLen))
+        {
+            DC_PULL_TRACE("[DC:{}] hazard vacate: no fully-clear bearing, taking partial "
+                          "({:.1f},{:.1f}) {:.1f}yd from the {:.0f}yd pulse, path={:.1f}yd",
+                          bot->GetName(), bestPartialX, bestPartialY, bestPartialClear,
+                          danger.pulseRadius, pathLen);
+            DcMoveTo(map->GetId(), bestPartialX, bestPartialY, bestPartialZ,
+                     /*idle*/ false, /*react*/ false, /*normal_only*/ false,
+                     /*exact_waypoint*/ false, MovementPriority::MOVEMENT_COMBAT);
+            return true;
+        }
+    }
+
+    // Boxed in on every bearing. There used to be a last resort here that drove the
+    // raw straight-away point through the mover regardless, on the reasoning that
+    // trying to open distance beats standing in the pulse. That reasoning does not
+    // survive contact with a wall: the mover pathfinds, so an unvalidated point
+    // behind one produces exactly the long way round this action just spent ten
+    // candidates rejecting — and it does it with no length bound at all, which is
+    // the worst version of the tr-20260815-154816-5 march.
+    //
+    // So: yield the tick instead. The bot keeps fighting from where it stands and
+    // the trigger re-fires next tick, by which time the emitters (or the bot) will
+    // have moved and a bearing may open. Standing in a pulse for another tick is a
+    // known, bounded cost; being walked out of the room is not.
+    DC_PULL_TRACE("[DC:{}] hazard vacate: no bearing clears the {:.0f}yd pulse within "
+                  "the detour bound — holding this tick",
+                  bot->GetName(), danger.pulseRadius);
+    return false;
 }
 
 bool DungeonClearLeaderAssistAction::Execute(Event /*event*/)
@@ -1481,30 +2010,39 @@ bool DungeonClearLeaderAssistAction::Execute(Event /*event*/)
             bestFighterDist = md;
         }
 
-        // Everything meleeing this groupmate, plus its own victim — the pack we
-        // must peel onto the tank.
-        for (Unit* a : member->getAttackers())
+        // Everything holding this groupmate in combat — the pack we must peel onto
+        // the tank. CollectCombatHolders, not getAttackers(), for the reason it
+        // documents: a RANGED OR STANDOFF TAGGER APPEARS IN NEITHER
+        // getAttackers() NOR GetVictim(), so the old scan resolved nullptr for it
+        // and dropped straight through to the groupmate fallback below — which
+        // walks the tank at a flagged party member at MOVEMENT_COMBAT, claims the
+        // tick at DcRel::LeaderAssist(24) over DcRel::Advance(15), and never
+        // closes because the member is following the tank. Live on map 604
+        // (tr-20260830-195435-2): 2m30s of
+        //   leader assist: closing on party fight (13.9yd, target=groupmate, prio=combat)
+        //   move REFUSED ... (dest 1914.8,743.7,136.5 at 45.3yd, prio=2)
+        // — the boss approach starved by the assist, the tank pinned 27-42yd from
+        // Gal'darah, and a boss that therefore never aggroed at all.
+        //
+        // Level-gated for the reason PickPartyFightTarget documents at length, and
+        // it matters more here: the LEADER walks at whatever this resolves, so one
+        // overhead pick takes the tank through the ceiling and the followers'
+        // tethers bring the rest of the raid with it.
+        std::vector<Unit*> holders;
+        DcTargeting::CollectCombatHolders(member, holders);
+        for (Unit* a : holders)
         {
             if (!a || !a->IsAlive() || a->GetMapId() != bot->GetMapId())
                 continue;
             if (!bot->IsValidAttackTarget(a))
                 continue;
             float const d = bot->GetExactDist2d(a);
-            if (!target || d < bestTargetDist)
-            {
-                target = a;
-                bestTargetDist = d;
-            }
-        }
-        if (!target)
-        {
-            Unit* const victim = member->GetVictim();
-            if (victim && victim->IsAlive() && victim->GetMapId() == bot->GetMapId() &&
-                bot->IsValidAttackTarget(victim))
-            {
-                target = victim;
-                bestTargetDist = bot->GetExactDist2d(victim);
-            }
+            if (target && d >= bestTargetDist)
+                continue;
+            if (!DcTickMemoAccess::LevelReachable(bot, context, a))
+                continue;
+            target = a;
+            bestTargetDist = d;
         }
     }
 
@@ -1512,6 +2050,38 @@ bool DungeonClearLeaderAssistAction::Execute(Event /*event*/)
     // driving ladder (advance / stall) run.
     if (!target && !nearestFighter)
         return false;
+
+    // THE GROUPMATE FALLBACK NEEDS SOMEWHERE TO GO. Walking at `nearestFighter`
+    // when no attacker resolves is only defensible while the fight is somewhere
+    // ELSE — the comment above says so: "the tank at least rounds the corner back
+    // into sight". A flagged member standing ON the tank has no corner to round,
+    // so the destination is the tank's own position, the mover refuses it, and the
+    // unconditional `return true` at the bottom of this function burns the tick.
+    // At DcRel::LeaderAssist (24) that starves DcRel::Advance (15) — one action
+    // per tick — and the party never walks out of whatever is flagging it, so the
+    // flag never clears either.
+    //
+    // Live: tp-20260828-175353-1, all five BWL raids. The party parked under the
+    // upper suppression room, trash 24.3yd overhead flagged it through the floor
+    // and went EVADING where it stood, IsLevelReachable (correctly) rejected every
+    // holder, and the tank logged nothing but
+    //   leader assist: closing on party fight (0.0yd, target=groupmate)
+    //   move REFUSED ... (dest <own position> at 0.0yd)
+    // for 3m17s, watchdogs all clear, until the operator aborted. Force-clearing
+    // the phantom combat could not break it (59 clears in 3.5 min for one party):
+    // the only escape is to WALK, and this rung is what was starving the walker.
+    //
+    // Bounded by the same distance the follower rungs treat as "already here", so
+    // a genuine round-the-corner assist — the case this fallback exists for — is
+    // untouched.
+    if (!target && bestFighterDist <= DC_LEADER_ASSIST_COLOCATED_RANGE)
+    {
+        DC_PULL_TRACE("[DC:{}] leader assist: nothing reachable to assist and the "
+                      "nearest flagged member is {:.1f}yd away -> yielding the tick "
+                      "to the driving ladder",
+                      bot->GetName(), bestFighterDist);
+        return false;
+    }
 
     Unit* const moveTo = target ? target : static_cast<Unit*>(nearestFighter);
 
@@ -1528,8 +2098,17 @@ bool DungeonClearLeaderAssistAction::Execute(Event /*event*/)
         context->GetValue<Unit*>(DcKey::Stock::CurrentTarget)->Set(target);
         if (!bot->IsInCombat())
             bot->SetInCombatWith(target);
+        // Engage for real, the way stock AttackAction does: switch to the combat
+        // engine and start the attack. Only an attack switches the engine, and
+        // a tank already combat-flagged by its party (no victim, nothing on it)
+        // sat on the non-combat engine with this "succeeding" every tick and
+        // nothing happening — while Raiders shot a DPS 23yd away (Pull Lab
+        // gundrak-ranged-standoff). The combat engine's rotation, taunt and
+        // reach take it from here.
+        botAI->ChangeEngine(BOT_STATE_COMBAT);
+        bot->Attack(target, botAI->IsMelee(bot));
         DC_PULL_TRACE("[DC:{}] leader assist: in sight of party fight ({:.1f}yd) "
-                      "-> took threat, combat engine takes over",
+                      "-> attacking, combat engine takes over",
                       bot->GetName(), bot->GetExactDist(target));
         return true;
     }
@@ -1551,10 +2130,13 @@ bool DungeonClearLeaderAssistAction::Execute(Event /*event*/)
                   target ? target->GetGUID().ToString() : "groupmate",
                   prio == MovementPriority::MOVEMENT_COMBAT ? "combat" : "normal");
 
-    DcMoveTo(moveTo->GetMapId(), moveTo->GetPositionX(), moveTo->GetPositionY(),
-           moveTo->GetPositionZ(), /*idle*/ false, /*react*/ false,
-           /*normal_only*/ false, /*exact_waypoint*/ false, prio);
-    return true;
+    // Report the move's own verdict rather than discarding it. A refused move is a
+    // tick this rung did not use, and claiming it anyway is what let the co-located
+    // case above spin forever; the same claim on any other refusal (no path, a
+    // duplicate order) would sit on the ladder just as hard.
+    return DcMoveTo(moveTo->GetMapId(), moveTo->GetPositionX(), moveTo->GetPositionY(),
+                    moveTo->GetPositionZ(), /*idle*/ false, /*react*/ false,
+                    /*normal_only*/ false, /*exact_waypoint*/ false, prio);
 }
 
 namespace
@@ -1585,6 +2167,68 @@ namespace
     // cast gate to the spell edge would only hide that, and would put the cast right
     // on the boundary where a single snap flaps it in and out of range.
     constexpr float DC_REZ_CAST_RANGE = 20.0f;
+
+    // WHY the cast was refused — the one thing "not possible yet" never said.
+    //
+    // PlayerbotAI::CastSpell returns a bare bool and swallows every reason, so a
+    // refusal reads identically whether the caster is combat-flagged, still gliding,
+    // sitting, out of mana, out of LOS, or blocked by the instance. Four hundred
+    // identical trace lines (tr-20260827-075417-165) narrow that to nothing, and
+    // every candidate has a different fix. So name it, from both sides:
+    //
+    //   * the gates PlayerbotAI::CastSpell applies BEFORE it builds a spell at all —
+    //     stand state and "moving with a cast time" — which never reach CheckCast and
+    //     so leave no verdict of their own. Both are live here: every party rez is a
+    //     multi-second cast, and this rung asks for a stop it may not have got yet
+    //     ([[dc-stop-strength-noop-on-bots]]).
+    //   * the core's own verdict, from the same probe CanCastSpell uses. Two codes
+    //     matter and neither is visible any other way:
+    //       SPELL_FAILED_AFFECTING_COMBAT             the caster is combat-FLAGGED.
+    //         Every party rez carries SPELL_ATTR0_NOT_IN_COMBAT_ONLY_PEACEFUL
+    //         (verified in Spell.dbc for all four), so the flag alone refuses it —
+    //         and a bot can hold that flag while running the non-combat engine this
+    //         rung lives on ([[pb-combat-flag-vs-combat-engine]]), which is exactly
+    //         how a rung gated on !IsInCombat can still meet the refusal.
+    //       SPELL_FAILED_TARGET_CANNOT_BE_RESURRECTED the INSTANCE refuses it while
+    //         an encounter is in progress (Spell.cpp, "Xinef: exploit protection").
+    //
+    // INFO, not trace, because the question it answers is the first one asked of a
+    // run that ends "couldn't get X resurrected in time". Throttled per bot — the
+    // rung retries at tick rate — on the bot's own run state; see
+    // Util/DcThrottle.h for why not in a file-scope thread_local map keyed by GUID.
+    void RezRefusalDiag(PlayerbotAI* botAI, Player* bot, Player* target,
+                        char const* rezAction)
+    {
+        if (DcRun::Of(botAI).Throttled(DcThrottle::RezRefusalLog, 3000))
+            return;
+
+        uint32 const spellId =
+            botAI->GetAiObjectContext()->GetValue<uint32>("spell id", rezAction)->Get();
+        SpellInfo const* const info = spellId ? sSpellMgr->GetSpellInfo(spellId) : nullptr;
+
+        char const* verdict = spellId ? "spell not in spellbook" : "no spell id for name";
+        if (info)
+        {
+            // Same construction CanCastSpell uses for its probe: a throwaway Spell,
+            // the unit target set, CheckCast(strict), delete. TRIGGERED_NONE so the
+            // caster-state checks we are asking about are actually applied.
+            Spell* probe = new Spell(bot, info, TRIGGERED_NONE);
+            probe->m_targets.SetUnitTarget(target);
+            SpellCastResult const result = probe->CheckCast(true);
+            delete probe;
+            verdict = EnumUtils::ToString(result).Constant;
+        }
+
+        uint32 const maxMana = bot->GetMaxPower(POWER_MANA);
+        LOG_INFO("playerbots.dungeonclear",
+                 "[DC:{}] rez party: '{}' on {} REFUSED \xe2\x80\x94 {} | flagged={} "
+                 "moving={} standing={} mana={}% dist={:.1f}yd los={}",
+                 bot->GetName(), rezAction, target->GetName(), verdict,
+                 bot->IsInCombat() ? 1 : 0, bot->isMoving() ? 1 : 0,
+                 bot->IsStandState() ? 1 : 0,
+                 maxMana ? bot->GetPower(POWER_MANA) * 100 / maxMana : 0,
+                 bot->GetExactDist(target), bot->IsWithinLOSInMap(target) ? 1 : 0);
+    }
 }
 
 bool DungeonClearRezPartyAction::Execute(Event /*event*/)
@@ -1593,16 +2237,26 @@ bool DungeonClearRezPartyAction::Execute(Event /*event*/)
     // tick): confirm this bot is still the elected rezzer and resolve the
     // target member kernel-index -> GUID -> Player at execution time.
     DcRezRecovery::Plan const plan = DcRezRecovery::Evaluate(bot);
+    // PairedTargetFor resolves the corpse THIS bot is assigned: the single
+    // election's target everywhere, or this bot's parallel pair on a raid run
+    // (each paired rezzer walks to its own body). Empty = not a rezzer.
+    ObjectGuid const targetGuid = DcRezRecovery::PairedTargetFor(plan, bot);
     if (plan.verdict.outcome != DcRezDecision::Outcome::Hold ||
         plan.verdict.reason != DcRezDecision::Reason::Recovering ||
-        plan.rezzer != bot->GetGUID())
+        targetGuid.IsEmpty())
         return false;
 
     char const* rezAction = RezActionNameFor(bot->getClass());
+    // Any other class was elected through the spell it knows (IsRezClass ->
+    // KnownResurrectSpell); cast that one by name, the same lookup the four
+    // stock names go through. Null while that spell is on cooldown, i.e. right
+    // after it landed: the offer branch below needs no spell, so the check for
+    // a missing name waits until after it.
     if (!rezAction)
-        return false;  // election guarantees a rez class; belt-and-braces
+        if (SpellInfo const* known = DcRezRecovery::KnownResurrectSpell(bot))
+            rezAction = known->SpellName[0];
 
-    Player* target = ObjectAccessor::FindPlayer(plan.target);
+    Player* target = ObjectAccessor::FindPlayer(targetGuid);
     if (!target || !target->isDead() || target->GetMapId() != bot->GetMapId())
         return false;  // vanished between trigger and action — re-elect next tick
 
@@ -1632,12 +2286,16 @@ bool DungeonClearRezPartyAction::Execute(Event /*event*/)
         return true;
     }
 
+    if (!rezAction)
+        return false;  // a custom class's resurrect on cooldown; else belt-and-braces
+
     // Beyond cast range (or no line of sight): close on the body.
     //
     // COMBAT priority, though the rezzer is out of combat by the trigger's gate.
     // The priority here is not a claim about combat, it is who wins the movement
-    // arbitration: MovementAction::IsWaitingForLastMove refuses any move whose
-    // priority is not STRICTLY GREATER than the last one's, for up to 5 seconds. At
+    // arbitration: the movement arbiter (DcMoveDeferred) refuses any move whose
+    // priority is not STRICTLY GREATER than the last one's while its block stands
+    // (up to 5 seconds before mod-playerbots #2747; only under a hold after it). At
     // NORMAL this rung ties with follow-tank, scout-lag and hold-at-camp — which
     // move constantly — so the approach was refused over and over while the corpse
     // sat there: 259 consecutive "move REFUSED" in run -52 with the rezzer stranded
@@ -1654,7 +2312,7 @@ bool DungeonClearRezPartyAction::Execute(Event /*event*/)
     // scout-lag's inside-the-lag-bubble branch (StopBot(Hold)) tore the approach
     // spline down a few hundred ms in. The rezzer then could not re-issue either,
     // because its OWN cancelled leg had recorded a MOVEMENT_COMBAT wait sized to
-    // the whole leg and IsWaitingForLastMove will not let an equal priority through.
+    // the whole leg and the arbiter would not let an equal priority through.
     //
     // Live: tr-20260807-080834-115, 301 consecutive "approaching Rederen's body"
     // over 99 seconds with the distance pinned at 86.1 -> 85.8yd — 0.3yd of net
@@ -1665,6 +2323,23 @@ bool DungeonClearRezPartyAction::Execute(Event /*event*/)
     {
         DC_PULL_TRACE("[DC:{}] rez party: approaching {}'s body ({:.1f}yd)",
                       bot->GetName(), target->GetName(), dist);
+
+        // NOT FROM A SADDLE, AND NOT TO A BODY IN THE AIR. A rezzer on a vehicle
+        // cannot walk (its position is the seat's) and cannot cast; and on The
+        // Oculus a member who died on a drake hangs where the drake was, 50yd above
+        // the nearest floor, where no walk ends within cast range. Owning the tick
+        // there only spins until the recovery timeout — hand it back instead, and
+        // let the flight driver's regroup take the unreachable body.
+        if (bot->GetVehicle())
+            return false;
+        if (bot->GetMapId() == DcOculus::MAP_ID)
+        {
+            NavmeshSnap::Result const snap = NavmeshSnap::Snap(bot->GetMap(), target->GetPositionX(),
+                                                               target->GetPositionY(), target->GetPositionZ(),
+                                                               DcOculus::SNAP_RADIUS, DcOculus::SNAP_VERT);
+            if (!snap.ok)
+                return false;
+        }
         // Standing still with a walk owed means the recorded wait is stale — the
         // leg it was sized for is not running any more (cancelled by whatever last
         // stopped us, or refused outright). Drop it so the replacement leg can go
@@ -1712,8 +2387,12 @@ bool DungeonClearRezPartyAction::Execute(Event /*event*/)
     if (bot->GetShapeshiftForm() != FORM_NONE)
         botAI->DoSpecificAction("caster form", Event(), /*silent*/ true);
     bool const cast = botAI->CastSpell(rezAction, target);
-    DC_PULL_TRACE("[DC:{}] rez party: cast '{}' on {} -> {}",
-                  bot->GetName(), rezAction, target->GetName(),
-                  cast ? "started" : "not possible yet");
-    return cast;
+    if (cast)
+    {
+        DC_PULL_TRACE("[DC:{}] rez party: cast '{}' on {} -> started", bot->GetName(),
+                      rezAction, target->GetName());
+        return true;
+    }
+    RezRefusalDiag(botAI, bot, target, rezAction);
+    return false;
 }

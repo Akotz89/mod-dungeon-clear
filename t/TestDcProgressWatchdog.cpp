@@ -7,9 +7,14 @@
 // progress signals the route-glide / door-walk-in wedge detectors and the swim
 // leg were consolidated onto, at the exact thresholds those sites use, so the
 // consolidation stays behavior-preserving.
+//
+// Also covers DcApproachState's blocked-state DOOR watchdog (last section) —
+// a different clock with the same job: decide when a hold has gone on long
+// enough to be a failure rather than a wait.
 
 #include "gtest/gtest.h"
 #include "DcProgressWatchdog.h"
+#include "Ai/Dungeon/DungeonClear/DcApproachState.h"
 
 namespace
 {
@@ -153,4 +158,170 @@ TEST(DcProgressWatchdog, ResetClearsEverything)
     EXPECT_EQ(w.lastProgressMs, 0u);
     // After Reset the next closing sample re-arms as a fresh first sample.
     EXPECT_TRUE(w.TickClosing(99.0f, MIN_CLOSE, 600u));
+}
+
+// ---- Blocked-state door watchdog (DcApproachState::ObserveDoorStall) ------
+//
+// The door-blocked action's give-up clock. Only its ARRIVAL park observes it;
+// the walk-in failure parks (which fire anywhere along the up-to-80yd approach)
+// must not, or the budget goes on travel time and the run auto-pauses at a door
+// it never touched. Scholomance batch tp-20260815-132009-1 lost two runs that
+// way with zero Use() calls behind either pause.
+
+namespace
+{
+    constexpr uint32 REARM_MS   = 10000;  // DC_DOOR_STALL_REARM_MS
+    constexpr uint32 TIMEOUT_MS = 5000;   // DoorBlockedTimeout default, 5s
+
+    // Scholomance's Iron Gates, by their real spawn low-guids. Entry is
+    // irrelevant here — the watchdog keys on GUID identity only.
+    ObjectGuid DoorGuid(ObjectGuid::LowType low)
+    {
+        return ObjectGuid(HighGuid::GameObject, /*entry*/ 175612, low);
+    }
+}
+
+TEST(DcDoorStallWatchdog, ArmsOnFirstObservationAndTimesOutAtTheBudget)
+{
+    DcApproachState s;
+    ObjectGuid const gate = DoorGuid(40);
+    EXPECT_FALSE(s.ObserveDoorStall(gate, 1000u, REARM_MS, TIMEOUT_MS));
+    EXPECT_EQ(s.doorStallGuid, gate);
+    EXPECT_EQ(s.doorStallSinceMs, 1000u);
+    // Still inside the window.
+    EXPECT_FALSE(s.ObserveDoorStall(gate, 1000u + TIMEOUT_MS - 1, REARM_MS, TIMEOUT_MS));
+    // Budget spent working the SAME door -> give up.
+    EXPECT_TRUE(s.ObserveDoorStall(gate, 1000u + TIMEOUT_MS, REARM_MS, TIMEOUT_MS));
+}
+
+TEST(DcDoorStallWatchdog, ADifferentDoorStartsAFreshWindow)
+{
+    DcApproachState s;
+    s.ObserveDoorStall(DoorGuid(40), 1000u, REARM_MS, TIMEOUT_MS);
+    // The corridor's next gate, observed after the first one's budget would
+    // have expired: it gets its own full window, not the predecessor's accrual.
+    EXPECT_FALSE(s.ObserveDoorStall(DoorGuid(32), 9000u, REARM_MS, TIMEOUT_MS));
+    EXPECT_EQ(s.doorStallSinceMs, 9000u);
+}
+
+TEST(DcDoorStallWatchdog, AnObservationGapRearmsTheWindow)
+{
+    DcApproachState s;
+    ObjectGuid const gate = DoorGuid(40);
+    s.ObserveDoorStall(gate, 1000u, REARM_MS, TIMEOUT_MS);
+    // The run moved on and came back (a fight, a loot pass, a re-route). A gap
+    // of at least REARM_MS means the previous stall ended, so the door gets a
+    // clean budget rather than instantly timing out on stale accrual.
+    EXPECT_FALSE(s.ObserveDoorStall(gate, 1000u + REARM_MS, REARM_MS, TIMEOUT_MS));
+    EXPECT_EQ(s.doorStallSinceMs, 1000u + REARM_MS);
+}
+
+TEST(DcDoorStallWatchdog, GapUnderTheRearmKeepsAccruingWhenTheDoorNeverOpens)
+{
+    DcApproachState s;
+    ObjectGuid const gate = DoorGuid(40);
+    s.ObserveDoorStall(gate, 1000u, REARM_MS, TIMEOUT_MS);
+    // A short gap in observations on its own proves nothing — the bot may simply
+    // have missed a tick. Without an explicit "the door opened" signal the window
+    // keeps accruing, so a bot genuinely livelocked on a door still times out.
+    EXPECT_FALSE(s.ObserveDoorStall(gate, 4000u, REARM_MS, TIMEOUT_MS));
+    EXPECT_EQ(s.doorStallSinceMs, 1000u);
+    EXPECT_TRUE(s.ObserveDoorStall(gate, 6000u, REARM_MS, TIMEOUT_MS));
+}
+
+TEST(DcDoorStallWatchdog, SeeingTheDoorOpenEndsTheWindow)
+{
+    // The tr-20260816-151006-14 regression. Stratholme's King's Square Gate
+    // (175352) carries door.autoCloseTime 3000: the tank clicks it, walks
+    // through, and ~3s later it re-shuts and re-flags. Three of those cycles
+    // are three SUCCESSFUL opens, but the gaps between arrival parks are ~3s —
+    // far under REARM_MS — so the raw gap rule stitched them into one 7s stall
+    // and tripped the 5s budget on a gate the bot was opening every time. The
+    // run auto-paused 27.9yd from Hearthsinger Forresten with 8/13 bosses down.
+    //
+    // ClearDoorStall is the missing signal: the door-blocked action calls it the
+    // moment the GO reads open, and the blocking-door value calls it whenever
+    // the flagged blocker changes or clears.
+    DcApproachState s;
+    ObjectGuid const gate = DoorGuid(98);
+
+    // Cycle 1: park, click, gate swings open.
+    EXPECT_FALSE(s.ObserveDoorStall(gate, 1000u, REARM_MS, TIMEOUT_MS));
+    s.ClearDoorStall();
+    EXPECT_EQ(s.doorStallGuid, ObjectGuid::Empty);
+    EXPECT_EQ(s.doorStallSinceMs, 0u);
+    EXPECT_EQ(s.doorStallLastMs, 0u);
+
+    // Cycle 2: it auto-closed 3s later. Fresh window, not 3s of stale accrual.
+    EXPECT_FALSE(s.ObserveDoorStall(gate, 4000u, REARM_MS, TIMEOUT_MS));
+    EXPECT_EQ(s.doorStallSinceMs, 4000u);
+    s.ClearDoorStall();
+
+    // Cycle 3: the tick that used to auto-pause the run (7s past cycle 1).
+    EXPECT_FALSE(s.ObserveDoorStall(gate, 8000u, REARM_MS, TIMEOUT_MS));
+    EXPECT_EQ(s.doorStallSinceMs, 8000u);
+
+    // And the give-up clock still works on the door that stops opening: no
+    // ClearDoorStall this time, so the budget runs out as designed.
+    EXPECT_TRUE(s.ObserveDoorStall(gate, 8000u + TIMEOUT_MS, REARM_MS, TIMEOUT_MS));
+}
+
+TEST(DcDoorStallWatchdog, UnobservedApproachTicksNeverAccrue)
+{
+    // The regression itself, expressed on the state: the bot walks the corridor
+    // for well over the timeout while the approach parks decline to observe.
+    // Arrival must then get a FULL window — under the old code the walk-in's
+    // parks had already armed and spent it, and the arrival tick auto-paused
+    // without ever clicking.
+    DcApproachState s;
+    ObjectGuid const gate = DoorGuid(40);
+    // 60s of approach: not one observation.
+    EXPECT_EQ(s.doorStallGuid, ObjectGuid::Empty);
+    EXPECT_EQ(s.doorStallSinceMs, 0u);
+    // Arrival.
+    EXPECT_FALSE(s.ObserveDoorStall(gate, 60000u, REARM_MS, TIMEOUT_MS));
+    EXPECT_EQ(s.doorStallSinceMs, 60000u);
+    // A click's worth of ticks still inside the fresh budget.
+    EXPECT_FALSE(s.ObserveDoorStall(gate, 62500u, REARM_MS, TIMEOUT_MS));
+}
+
+TEST(DcDoorStallWatchdog, OnBossChangeClearsTheStall)
+{
+    DcApproachState s;
+    ObjectGuid const gate = DoorGuid(40);
+    s.ObserveDoorStall(gate, 1000u, REARM_MS, TIMEOUT_MS);
+    s.OnBossChange(10503);
+    EXPECT_EQ(s.doorStallGuid, ObjectGuid::Empty);
+    EXPECT_EQ(s.doorStallSinceMs, 0u);
+    EXPECT_EQ(s.doorStallLastMs, 0u);
+}
+
+// --- door-owned stall reason ------------------------------------------------
+// tr-20260924-094111-3: the door walk-in's unplaced hold wrote "A gate has
+// closed on us", the blocking-door value dropped the phantom door the same
+// second, and nothing cleared the reason — the stalled fallback owned every
+// tick until the 120s watchdog. The value now releases a door-owned reason
+// whenever it finds no blocker; ReleaseDoorOwnedStall is that decision.
+
+TEST(DcDoorStallWatchdog, ReleaseClearsOnlyADoorOwnedReasonAndOnlyOnce)
+{
+    DcApproachState s;
+    EXPECT_FALSE(s.ReleaseDoorOwnedStall());   // Advance's own stall: never ours
+
+    s.doorOwnsStallReason = true;              // StallDungeonClearForDoor
+    EXPECT_TRUE(s.ReleaseDoorOwnedStall());
+    EXPECT_FALSE(s.doorOwnsStallReason);
+    EXPECT_FALSE(s.ReleaseDoorOwnedStall());   // a later non-door reason survives
+}
+
+TEST(DcDoorStallWatchdog, OwnershipFollowsTheReasonNotTheTarget)
+{
+    // A boss change leaves the reason itself to NextDungeonBossValue; the
+    // ownership must not be dropped under a reason that is still set.
+    DcApproachState s;
+    s.doorOwnsStallReason = true;
+    s.OnBossChange(15687);
+    EXPECT_TRUE(s.doorOwnsStallReason);
+    s.Reset();
+    EXPECT_FALSE(s.doorOwnsStallReason);
 }

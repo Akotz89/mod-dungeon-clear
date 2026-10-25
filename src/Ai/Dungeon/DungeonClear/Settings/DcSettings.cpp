@@ -37,10 +37,17 @@ namespace
     }
 
     // The heroic sibling of a conf key: "DungeonClear.<Key>.Heroic". Read only
-    // while the run is at DUNGEON_DIFFICULTY_HEROIC.
+    // while the run's map is heroic-tier.
     std::string FullKeyHeroic(char const* keySuffix)
     {
         return FullKey(keySuffix) + ".Heroic";
+    }
+
+    // The raid sibling: "DungeonClear.<Key>.Raid". Read only while the run's
+    // map is a raid (any raid difficulty).
+    std::string FullKeyRaid(char const* keySuffix)
+    {
+        return FullKey(keySuffix) + ".Raid";
     }
 
     // Read one registry key straight from conf (uncached), as a double.
@@ -97,6 +104,14 @@ namespace
     // Rows without one skip the difficulty lookup entirely, so the map/instance
     // read is paid only by the handful of keys that can actually differ.
     std::array<std::atomic<bool>, kDcSettingCount> g_heroicLayer;
+    // The RAID twin of the pair above: each key's folded raid value ("<Key>.Raid"
+    // conf line, else the registry's authored raidVal) and whether the row has a
+    // raid layer at all. A raid read that has no raid layer falls through to the
+    // heroic pair (a 10H/25H raid is heroic-tier too), then to the normal value —
+    // the layer chain is picked per read in GetRaw, but every fold is done once
+    // at warm time so any read is still exactly one atomic load.
+    std::array<std::atomic<double>, kDcSettingCount> g_confCacheRaid;
+    std::array<std::atomic<bool>, kDcSettingCount> g_raidLayer;
     std::atomic<bool> g_confCacheReady{false};
     std::mutex g_confCacheLoadMutex;
 
@@ -139,6 +154,40 @@ namespace
         return false;
     }
 
+    // Raid twin of ResolveHeroic: "<Key>.Raid" conf line, else the authored
+    // raidVal. Same string-probe presence test, same warm-time-only cost.
+    bool ResolveRaid(DcSettingDef const& d, double normalValue, double& out)
+    {
+        out = normalValue;
+        std::string const full = FullKeyRaid(d.key);
+        if (!sConfigMgr->GetOption<std::string>(full, "", false).empty())
+        {
+            switch (d.type)
+            {
+                case DcType::Bool:
+                    out = sConfigMgr->GetOption<bool>(full, false, false) ? 1.0 : 0.0;
+                    break;
+                case DcType::UInt:
+                    out = static_cast<double>(sConfigMgr->GetOption<uint32>(full, 0, false));
+                    break;
+                case DcType::Int:
+                    out = static_cast<double>(sConfigMgr->GetOption<int32>(full, 0, false));
+                    break;
+                case DcType::Float:
+                default:
+                    out = static_cast<double>(sConfigMgr->GetOption<float>(full, 0.0f, false));
+                    break;
+            }
+            return true;
+        }
+        if (DcHasRaidDefault(d))
+        {
+            out = d.raidVal;
+            return true;
+        }
+        return false;
+    }
+
     // Resolve every key from conf into g_confCache and its heroic twin (relaxed
     // stores; an individual slot's load can never tear, and the keys are
     // independent so a reader seeing a half-applied reload for one tick is
@@ -155,6 +204,11 @@ namespace
             bool const layered = ResolveHeroic(kDcSettings[i], normal, heroic);
             g_confCacheHeroic[i].store(heroic, std::memory_order_relaxed);
             g_heroicLayer[i].store(layered, std::memory_order_relaxed);
+
+            double raid = normal;
+            bool const raidLayered = ResolveRaid(kDcSettings[i], normal, raid);
+            g_confCacheRaid[i].store(raid, std::memory_order_relaxed);
+            g_raidLayer[i].store(raidLayered, std::memory_order_relaxed);
         }
         g_confCacheReady.store(true, std::memory_order_release);
     }
@@ -202,30 +256,54 @@ namespace
         return g_heroicLayer[slot].load(std::memory_order_relaxed);
     }
 
-    // Is the run this read belongs to running at heroic difficulty?
+    // Raid twins of the pair above.
+    bool HasRaidLayer(DcSettingDef const& d)
+    {
+        std::size_t const slot = CacheSlot(d);
+        if (slot == kDcSettingCount)
+            return false;
+        return g_raidLayer[slot].load(std::memory_order_relaxed);
+    }
+
+    double RaidConfValue(DcSettingDef const& d)
+    {
+        std::size_t const slot = CacheSlot(d);
+        if (slot == kDcSettingCount)
+            return ConfValueUncached(d);
+        return g_confCacheRaid[slot].load(std::memory_order_relaxed);
+    }
+
+    // The map the reading run is on, or nullptr when it can't be resolved.
     //
     // `mapCtx` is the bot the read came through when there was one — the hot
     // path, since almost every call site is DcSettings::GetX(bot, key) — and
-    // reading the difficulty off its own map costs nothing. The GUID-only path
-    // (the addon sync payload and `.dc config`, both once-per-request, never
-    // per tick) falls back to resolving the leader; server-only keys pass an
-    // empty owner and never reach here at all.
-    bool IsHeroicRun(ObjectGuid owner, Player* mapCtx)
+    // reading its own map costs nothing. The GUID-only path (the addon sync
+    // payload and `.dc config`, both once-per-request, never per tick) falls
+    // back to resolving the leader; server-only keys pass an empty owner and
+    // never reach here at all.
+    Map* RunMap(ObjectGuid owner, Player* mapCtx)
     {
         Player* p = mapCtx;
         if (!p && !owner.IsEmpty())
             p = ObjectAccessor::FindPlayer(owner);
-        Map* map = p ? p->FindMap() : nullptr;
-        return map && map->IsDungeon() && map->GetDifficulty() == DUNGEON_DIFFICULTY_HEROIC;
+        return p ? p->FindMap() : nullptr;
     }
 
     // The full resolution chain for one registry entry:
     //
-    //   per-run override -> conf "<Key>.Heroic" -> registry heroicVal
+    //   per-run override -> conf "<Key>.Raid"   -> registry raidVal    | raid maps
+    //                    -> conf "<Key>.Heroic" -> registry heroicVal  | heroic-tier maps
     //                    -> conf "<Key>"        -> registry defVal
     //
-    // The override is deliberately difficulty-BLIND and sits above the heroic
-    // layer: a human who typed a value for this run means it for this run, and a
+    // The raid layer sits above the heroic layer: a raid-authored value governs
+    // every raid difficulty, and a raid row WITHOUT a raid layer still picks up
+    // its heroic layer on a heroic-tier raid (10H/25H, when WotLK raids arrive).
+    // Map::IsHeroic/IsRaid decode the difficulty per map type, so a 25-man
+    // NORMAL raid (raw difficulty 1, the same integer as dungeon heroic) can
+    // never read the heroic layer by encoding collision — see DcDiffKey.
+    //
+    // The override is deliberately difficulty-BLIND and sits above both layers:
+    // a human who typed a value for this run means it for this run, and a
     // default — however well chosen — must never overrule an explicit one.
     double GetRaw(ObjectGuid owner, DcSettingDef const& d, Player* mapCtx = nullptr)
     {
@@ -239,8 +317,22 @@ namespace
                     return keyIt->second;  // already clamped at SetOverride time
             }
         }
-        bool const heroic = HasHeroicLayer(d) && IsHeroicRun(owner, mapCtx);
-        return ConfValue(d, heroic);
+        bool const hasRaid   = HasRaidLayer(d);
+        bool const hasHeroic = HasHeroicLayer(d);
+        if (hasRaid || hasHeroic)
+        {
+            // One map resolution serves both layer tests — paid only by the
+            // handful of rows that carry a layer at all.
+            Map* const map = RunMap(owner, mapCtx);
+            if (map && map->IsDungeon())
+            {
+                if (hasRaid && map->IsRaid())
+                    return RaidConfValue(d);
+                if (hasHeroic && map->IsHeroic())
+                    return ConfValue(d, /*heroic*/ true);
+            }
+        }
+        return ConfValue(d, /*heroic*/ false);
     }
 
     // Resolve the run owner from any bot in the run. Skipped (Empty) for

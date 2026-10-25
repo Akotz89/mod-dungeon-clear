@@ -32,163 +32,184 @@ namespace DcTestPlanSummary
             return out;
         }
 
-        // Nearest-rank percentile on an ALREADY-SORTED sample: no interpolation,
-        // exact on a sample of one, and every returned value is a value that
-        // really occurred. Empty sample -> 0, which is also the natural "no
-        // pulls were observed" reading.
-        template <typename T>
-        T Percentile(std::vector<T> const& sorted, std::uint32_t pct)
+        // The idx-th element (0-based) of the sorted sample a histogram
+        // describes. idx must be < the histogram's total count.
+        template <typename K>
+        K NthFromHist(std::map<K, std::uint32_t> const& hist, std::uint64_t idx)
         {
-            if (sorted.empty())
-                return T{};
-            std::size_t idx = (static_cast<std::size_t>(pct) * sorted.size()) / 100;
-            if (idx >= sorted.size())
-                idx = sorted.size() - 1;
-            return sorted[idx];
+            for (auto const& [value, count] : hist)
+            {
+                if (idx < count)
+                    return value;
+                idx -= count;
+            }
+            return hist.empty() ? K{} : hist.rbegin()->first;
+        }
+
+        // Nearest-rank percentile over a histogram of the sample: no
+        // interpolation, exact on a sample of one, and every returned value is
+        // a value that really occurred. Empty sample -> 0, which is also the
+        // natural "no pulls were observed" reading.
+        template <typename K>
+        K PercentileFromHist(std::map<K, std::uint32_t> const& hist, std::uint64_t n,
+                             std::uint32_t pct)
+        {
+            if (n == 0)
+                return K{};
+            std::uint64_t idx = (static_cast<std::uint64_t>(pct) * n) / 100;
+            if (idx >= n)
+                idx = n - 1;
+            return NthFromHist(hist, idx);
+        }
+
+        void CountKey(std::map<std::string, std::uint32_t>& counts, std::string const& key)
+        {
+            auto it = counts.find(key);
+            if (it != counts.end())
+                ++it->second;
+            else if (counts.size() < Accumulator::kMaxDistinctKeys)
+                counts.emplace(key, 1);
+            else
+                ++counts["(other)"];
         }
     }
 
     Stats Build(std::vector<DcTestPlan::RunOutcome> const& outcomes)
     {
-        Stats s;
-        s.launched = static_cast<std::uint32_t>(outcomes.size());
+        Accumulator acc;
+        for (DcTestPlan::RunOutcome const& o : outcomes)
+            acc.Add(o);
+        return acc.Build();
+    }
 
-        std::map<std::string, std::uint32_t> verdicts;
-        std::map<std::string, std::uint32_t> reasons;
-        std::vector<std::uint32_t> successDurations;
+    void Accumulator::Add(DcTestPlan::RunOutcome const& o)
+    {
+        ++_launched;
+
+        // Progression order, taken from the longest roster any run reported.
+        // Longest rather than first because a run that failed during setup never
+        // got one, and a multi-wing map filters the roster to the wing the party
+        // spawned in — the fullest list is the one that names the most bosses.
+        if (o.bossRoster.size() > _roster.size())
+            _roster = o.bossRoster;
+
+        _runIds.push_back(o.runId);
+        if (_runIdCap && _runIds.size() > _runIdCap)
+        {
+            _runIds.pop_front();
+            _runIdsDropped = true;
+        }
+
+        ++_verdicts[o.result];
+        if (o.result == "success")
+        {
+            ++_succeeded;
+            ++_successDurations[o.durationS];
+            _successDurationSum += o.durationS;
+        }
+        else
+        {
+            ++_failed;
+            if (!o.failReason.empty())
+                CountKey(_reasons, o.failReason);
+        }
 
         // Funnel: per boss name, kill count (deduped within a run), wipe count,
         // and the sum of timeline positions, so entries with no roster to order
         // them still sort into progression order by mean position even when runs
         // kill in slightly different orders.
-        struct FunnelAcc
+        std::vector<std::string> seen;
+        for (std::size_t pos = 0; pos < o.bossKills.size(); ++pos)
         {
-            std::uint32_t killed = 0;
-            std::uint32_t wiped = 0;
-            std::uint64_t posSum = 0;
-        };
-        std::map<std::string, FunnelAcc> funnel;
-        std::map<std::string, std::uint32_t> trashWipes;
+            std::string const& name = o.bossKills[pos];
+            if (std::find(seen.begin(), seen.end(), name) != seen.end())
+                continue;
+            seen.push_back(name);
+            FunnelAcc& f = _funnel[name];
+            ++f.killed;
+            f.posSum += pos;
+        }
+
+        if (!o.wipeOpponent.empty())
+        {
+            if (o.wipeOnBoss)
+                ++_funnel[o.wipeOpponent].wiped;
+            else
+                CountKey(_trashWipes, o.wipeOpponent);
+        }
+        else if (o.result == "wipe")
+        {
+            // A wipe the harness could not pin on anything — the party was
+            // out of combat when the last member fell.
+            ++_unattributedWipes;
+        }
 
         // Pull population, pooled across every run in the plan. Pooled rather
         // than averaged per run on purpose: one 90-pull run and one that wiped
         // on its second pull contribute the pulls they actually made, so a plan
         // that keeps dying early cannot flatter its own numbers by weighting a
         // two-sample run as heavily as a full clear.
-        std::vector<std::uint32_t> observed;
-        std::vector<std::int32_t> errors;
-
-        // Progression order, taken from the longest roster any run reported.
-        // Longest rather than first because a run that failed during setup never
-        // got one, and a multi-wing map filters the roster to the wing the party
-        // spawned in — the fullest list is the one that names the most bosses.
-        std::vector<std::string> roster;
-
-        for (DcTestPlan::RunOutcome const& o : outcomes)
+        for (DcTestPlan::PullSample const& p : o.pulls)
         {
-            if (o.bossRoster.size() > roster.size())
-                roster = o.bossRoster;
-
-            s.runIds.push_back(o.runId);
-            ++verdicts[o.result];
-            if (o.result == "success")
+            ++_pulls.pulls;
+            if (p.advanced)
+                ++_pulls.advanced;
+            if (p.observed > p.predicted)
+                ++_pulls.underestimated;
+            ++_observed[p.observed];
+            ++_errors[static_cast<std::int32_t>(p.observed) -
+                      static_cast<std::int32_t>(p.predicted)];
+            if (p.wipedHere)
             {
-                ++s.succeeded;
-                successDurations.push_back(o.durationS);
-            }
-            else
-            {
-                ++s.failed;
-                if (!o.failReason.empty())
-                    ++reasons[o.failReason];
-            }
-
-            std::vector<std::string> seen;
-            for (std::size_t pos = 0; pos < o.bossKills.size(); ++pos)
-            {
-                std::string const& name = o.bossKills[pos];
-                if (std::find(seen.begin(), seen.end(), name) != seen.end())
-                    continue;
-                seen.push_back(name);
-                FunnelAcc& acc = funnel[name];
-                ++acc.killed;
-                acc.posSum += pos;
-            }
-
-            if (!o.wipeOpponent.empty())
-            {
-                if (o.wipeOnBoss)
-                    ++funnel[o.wipeOpponent].wiped;
-                else
-                    ++trashWipes[o.wipeOpponent];
-            }
-            else if (o.result == "wipe")
-            {
-                // A wipe the harness could not pin on anything — the party was
-                // out of combat when the last member fell.
-                ++s.unattributedWipes;
-            }
-
-            for (DcTestPlan::PullSample const& p : o.pulls)
-            {
-                ++s.pulls.pulls;
-                if (p.advanced)
-                    ++s.pulls.advanced;
-                if (p.observed > p.predicted)
-                    ++s.pulls.underestimated;
-                observed.push_back(p.observed);
-                errors.push_back(static_cast<std::int32_t>(p.observed) -
-                                 static_cast<std::int32_t>(p.predicted));
-                if (p.wipedHere)
-                {
-                    ++s.pulls.wipePulls;
-                    s.pulls.wipeObservedMax =
-                        std::max(s.pulls.wipeObservedMax, p.observed);
-                }
+                ++_pulls.wipePulls;
+                _pulls.wipeObservedMax = std::max(_pulls.wipeObservedMax, p.observed);
             }
         }
+    }
 
-        s.verdicts = CountSorted(verdicts);
-        s.failReasons = CountSorted(reasons);
+    Stats Accumulator::Build() const
+    {
+        Stats s;
+        s.launched = _launched;
+        s.succeeded = _succeeded;
+        s.failed = _failed;
+        s.verdicts = CountSorted(_verdicts);
+        s.failReasons = CountSorted(_reasons);
+        s.unattributedWipes = _unattributedWipes;
+        s.runIds.assign(_runIds.begin(), _runIds.end());
+        s.runIdsRecent = _runIdsDropped;
 
-        if (!successDurations.empty())
+        if (_succeeded)
         {
-            std::sort(successDurations.begin(), successDurations.end());
-            s.minS = successDurations.front();
-            s.maxS = successDurations.back();
-            std::uint64_t sum = 0;
-            for (std::uint32_t d : successDurations)
-                sum += d;
-            s.avgS = static_cast<std::uint32_t>(sum / successDurations.size());
-            std::size_t const n = successDurations.size();
-            s.medianS = n % 2 ? successDurations[n / 2]
-                              : (successDurations[n / 2 - 1] + successDurations[n / 2]) / 2;
+            std::uint64_t const n = _succeeded;
+            s.minS = _successDurations.begin()->first;
+            s.maxS = _successDurations.rbegin()->first;
+            s.avgS = static_cast<std::uint32_t>(_successDurationSum / n);
+            s.medianS = n % 2 ? NthFromHist(_successDurations, n / 2)
+                              : (NthFromHist(_successDurations, n / 2 - 1) +
+                                 NthFromHist(_successDurations, n / 2)) / 2;
         }
 
-        if (!observed.empty())
-        {
-            std::sort(observed.begin(), observed.end());
-            std::sort(errors.begin(), errors.end());
-            s.pulls.observedP50 = Percentile(observed, 50);
-            s.pulls.observedP90 = Percentile(observed, 90);
-            s.pulls.observedMax = observed.back();
-            s.pulls.errorP50 = Percentile(errors, 50);
-            s.pulls.errorP90 = Percentile(errors, 90);
-        }
+        s.pulls = _pulls;
+        s.pulls.observedP50 = PercentileFromHist(_observed, _pulls.pulls, 50);
+        s.pulls.observedP90 = PercentileFromHist(_observed, _pulls.pulls, 90);
+        s.pulls.observedMax = _observed.empty() ? 0 : _observed.rbegin()->first;
+        s.pulls.errorP50 = PercentileFromHist(_errors, _pulls.pulls, 50);
+        s.pulls.errorP90 = PercentileFromHist(_errors, _pulls.pulls, 90);
 
-        s.trashWipes = CountSorted(trashWipes);
+        s.trashWipes = CountSorted(_trashWipes);
 
         // Roster order first, so a boss no run ever reached still gets a row
         // (0 killed, 0 wiped) instead of vanishing from the funnel entirely —
         // "nobody got that far" is the single most useful thing a plan can say.
         std::vector<std::string> placed;
-        for (std::string const& name : roster)
+        for (std::string const& name : _roster)
         {
             if (std::find(placed.begin(), placed.end(), name) != placed.end())
                 continue;
             placed.push_back(name);
-            auto const it = funnel.find(name);
-            if (it == funnel.end())
+            auto const it = _funnel.find(name);
+            if (it == _funnel.end())
                 s.funnel.push_back({name, 0, 0});
             else
                 s.funnel.push_back({name, it->second.killed, it->second.wiped});
@@ -199,86 +220,102 @@ namespace DcTestPlanSummary
         // mean kill position; wipe-only entries have no position at all, so they
         // sort last (and alphabetically among themselves, via the map order).
         std::vector<std::pair<double, std::string>> ordered;
-        for (auto const& [name, acc] : funnel)
+        for (auto const& [name, f] : _funnel)
         {
             if (std::find(placed.begin(), placed.end(), name) != placed.end())
                 continue;
-            double const pos = acc.killed ? static_cast<double>(acc.posSum) / acc.killed
-                                          : std::numeric_limits<double>::max();
+            double const pos = f.killed ? static_cast<double>(f.posSum) / f.killed
+                                        : std::numeric_limits<double>::max();
             ordered.emplace_back(pos, name);
         }
         std::stable_sort(ordered.begin(), ordered.end(),
                          [](auto const& a, auto const& b) { return a.first < b.first; });
         for (auto const& [pos, name] : ordered)
-            s.funnel.push_back({name, funnel[name].killed, funnel[name].wiped});
+        {
+            FunnelAcc const& f = _funnel.at(name);
+            s.funnel.push_back({name, f.killed, f.wiped});
+        }
 
         return s;
     }
 
-    std::string ToJsonl(Header const& h, Stats const& s)
+    namespace
     {
-        using DcTestRunRecord::EscapeJson;
+        std::string Str(std::string const& v)
+        {
+            return "\"" + DcTestRunRecord::EscapeJson(v) + "\"";
+        }
 
-        auto str = [](std::string const& v) { return "\"" + EscapeJson(v) + "\""; };
+        // `"runs":{…},"verdicts":{…},…,"unattributedWipes":N` — shared by the
+        // plan line and each pool entry's own object.
+        void WriteStatsBody(std::ostringstream& o, Stats const& s)
+        {
+            o << "\"runs\":{\"launched\":" << s.launched
+              << ",\"succeeded\":" << s.succeeded
+              << ",\"failed\":" << s.failed
+              << "},\"verdicts\":{";
+            for (std::size_t i = 0; i < s.verdicts.size(); ++i)
+            {
+                if (i)
+                    o << ',';
+                o << Str(s.verdicts[i].key) << ':' << s.verdicts[i].count;
+            }
+            o << "},\"failReasons\":[";
+            for (std::size_t i = 0; i < s.failReasons.size(); ++i)
+            {
+                if (i)
+                    o << ',';
+                o << "{\"reason\":" << Str(s.failReasons[i].key)
+                  << ",\"count\":" << s.failReasons[i].count << '}';
+            }
+            o << "],\"duration\":{\"minS\":" << s.minS
+              << ",\"avgS\":" << s.avgS
+              << ",\"medianS\":" << s.medianS
+              << ",\"maxS\":" << s.maxS
+              << "},\"bossFunnel\":[";
+            for (std::size_t i = 0; i < s.funnel.size(); ++i)
+            {
+                if (i)
+                    o << ',';
+                o << "{\"name\":" << Str(s.funnel[i].name)
+                  << ",\"killed\":" << s.funnel[i].killed
+                  << ",\"wiped\":" << s.funnel[i].wiped << '}';
+            }
+            o << "],\"trashWipes\":[";
+            for (std::size_t i = 0; i < s.trashWipes.size(); ++i)
+            {
+                if (i)
+                    o << ',';
+                o << "{\"name\":" << Str(s.trashWipes[i].key)
+                  << ",\"count\":" << s.trashWipes[i].count << '}';
+            }
+            o << "],\"unattributedWipes\":" << s.unattributedWipes;
+        }
+    }
 
+    std::string ToJsonl(Header const& h, Stats const& s, std::vector<PoolEntryStats> const& pool)
+    {
         std::ostringstream o;
         o << "{\"schema\":" << h.schema
-          << ",\"planId\":" << str(h.planId)
-          << ",\"dungeon\":" << str(h.dungeon)
-          << ",\"dungeonName\":" << str(h.dungeonName)
+          << ",\"planId\":" << Str(h.planId)
+          << ",\"dungeon\":" << Str(h.dungeon)
+          << ",\"dungeonName\":" << Str(h.dungeonName)
           << ",\"requested\":{\"total\":" << h.total
           << ",\"concurrent\":" << h.concurrent
           << ",\"level\":" << h.level
           << ",\"heroic\":" << (h.heroic ? "true" : "false")
           << ",\"seedBase\":" << h.seedBase
+          << ",\"size\":" << h.size
           << ",\"gearIlvl\":" << h.gearIlvl
           << ",\"gearQuality\":" << h.gearQuality
           << "},\"startedAtMs\":" << h.startedAtMs
           << ",\"endedAtMs\":" << h.endedAtMs
           << ",\"durationS\":" << h.durationS
-          << ",\"result\":" << str(h.result)
-          << ",\"abortReason\":" << str(h.abortReason)
-          << ",\"runs\":{\"launched\":" << s.launched
-          << ",\"succeeded\":" << s.succeeded
-          << ",\"failed\":" << s.failed
-          << "},\"verdicts\":{";
-        for (std::size_t i = 0; i < s.verdicts.size(); ++i)
-        {
-            if (i)
-                o << ',';
-            o << str(s.verdicts[i].key) << ':' << s.verdicts[i].count;
-        }
-        o << "},\"failReasons\":[";
-        for (std::size_t i = 0; i < s.failReasons.size(); ++i)
-        {
-            if (i)
-                o << ',';
-            o << "{\"reason\":" << str(s.failReasons[i].key)
-              << ",\"count\":" << s.failReasons[i].count << '}';
-        }
-        o << "],\"duration\":{\"minS\":" << s.minS
-          << ",\"avgS\":" << s.avgS
-          << ",\"medianS\":" << s.medianS
-          << ",\"maxS\":" << s.maxS
-          << "},\"bossFunnel\":[";
-        for (std::size_t i = 0; i < s.funnel.size(); ++i)
-        {
-            if (i)
-                o << ',';
-            o << "{\"name\":" << str(s.funnel[i].name)
-              << ",\"killed\":" << s.funnel[i].killed
-              << ",\"wiped\":" << s.funnel[i].wiped << '}';
-        }
-        o << "],\"trashWipes\":[";
-        for (std::size_t i = 0; i < s.trashWipes.size(); ++i)
-        {
-            if (i)
-                o << ',';
-            o << "{\"name\":" << str(s.trashWipes[i].key)
-              << ",\"count\":" << s.trashWipes[i].count << '}';
-        }
-        o << "],\"unattributedWipes\":" << s.unattributedWipes
-          << ",\"pulls\":{\"count\":" << s.pulls.pulls
+          << ",\"result\":" << Str(h.result)
+          << ",\"abortReason\":" << Str(h.abortReason)
+          << ',';
+        WriteStatsBody(o, s);
+        o << ",\"pulls\":{\"count\":" << s.pulls.pulls
           << ",\"advanced\":" << s.pulls.advanced
           << ",\"underestimated\":" << s.pulls.underestimated
           << ",\"observedP50\":" << s.pulls.observedP50
@@ -293,9 +330,29 @@ namespace DcTestPlanSummary
         {
             if (i)
                 o << ',';
-            o << str(s.runIds[i]);
+            o << Str(s.runIds[i]);
         }
-        o << "]}";
+        o << "],\"runIdsRecent\":" << (s.runIdsRecent ? "true" : "false")
+          << ",\"endless\":" << (h.endless ? "true" : "false")
+          << ",\"checkpoint\":" << (h.checkpoint ? "true" : "false");
+        if (!pool.empty())
+        {
+            o << ",\"pick\":" << Str(h.pick) << ",\"pool\":[";
+            for (std::size_t i = 0; i < pool.size(); ++i)
+            {
+                PoolEntryStats const& e = pool[i];
+                if (i)
+                    o << ',';
+                o << "{\"token\":" << Str(e.token)
+                  << ",\"heroic\":" << (e.heroic ? "true" : "false")
+                  << ",\"size\":" << e.size
+                  << ",\"inPool\":" << (e.inPool ? "true" : "false") << ',';
+                WriteStatsBody(o, e.stats);
+                o << '}';
+            }
+            o << ']';
+        }
+        o << '}';
         return o.str();
     }
 
@@ -307,7 +364,7 @@ namespace DcTestPlanSummary
         return "dc_testplans.jsonl";
     }
 
-    void Append(Header const& h, Stats const& s)
+    void Append(Header const& h, Stats const& s, std::vector<PoolEntryStats> const& pool)
     {
         static std::mutex mtx;
         static std::ofstream file;
@@ -322,7 +379,7 @@ namespace DcTestPlanSummary
         if (!file.is_open())
             return;
 
-        file << ToJsonl(h, s) << '\n';
+        file << ToJsonl(h, s, pool) << '\n';
         file.flush();
     }
 }

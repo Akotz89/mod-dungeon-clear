@@ -1,0 +1,44 @@
+{
+  "about": "UNVERIFIED (no run on file shows it): a pack behind a closed door that has aggroed the party. Every target/engage veto now runs through ClosedDoorBetween (GameObject-only LOS against the door's real mesh), and the corridor trash scan truncates at the first closed door (memory dc-door-engage-priority, dc-door-los-oracle). Those gates were built to stop the tank fighting through a door it cannot open. Nothing exempts a mob that is already ON the party, so the tank may never engage what holds it. The scenario stages the Scarlet Champion pack inside the SM Chapel (40004/40005, from tr-20260922-193118-33#20, where the door was open) and starts the tank at that pull's real position outside. It shuts the Chapel Door (GO 11875, entry 104591), drops a locked portcullis (18972, not openable by a bot) in the same doorway, and aggroes the pack onto the tank through it.",
+  "schema": 1,
+  "source": { "snapshot": "tr-20260922-193118-33#20" },
+  "geometry": {
+    "map": 189,
+    "dungeon": "sm-cath",
+    "heroic": false,
+    "region": { "center": [1080.0, 1397.0, 30.4], "radius": 60.0 },
+    "objective": 3976,
+    "objectiveName": "Scarlet Commander Mograine"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [40004, 40005]
+      }
+    }
+  },
+  "party": {
+    "comp": "warrior-prot,priest-holy,mage-frost,rogue-combat,hunter-mm",
+    "level": 40,
+    "start": [1061.6, 1400.3, 29.3, -0.218],
+    "react": "fast",
+    "seedTarget": false
+  },
+  "settings": {
+    "PullSetting": 2
+  },
+  "injections": [
+    { "when": { "atMs": 0 }, "do": { "door": 11875, "state": "close" } },
+    // The Chapel Door is key-exempt (BotCanOpenDoorLikePlayer -> IsKeyExempt), so
+    // the tank simply opened it ~1s in (lb-20261003-155828-1, both runs) and the
+    // hypothesis was never tested. A locked, not-selectable Sorcerer's Gate in the
+    // same doorway is a closed door the bot is NOT entitled to open.
+    { "when": { "atMs": 0 }, "do": { "spawnLosBlocker": [1069.95, 1399.14, 30.8, 3.14159] } },
+    { "when": { "atMs": 2500 }, "do": { "aggro": "pack:target", "on": "tank" }, "sweep": true }
+  ],
+  "goal": { "kill": "pack:target", "timeoutS": 90 },
+  "expect": {
+    "oracles": { "O1": "fail", "O6": "fail", "O10": "fail" },
+    "knownFailure": "open:dc-door-engage-priority (ClosedDoorBetween veto has no exemption for a mob already on the party; unconfirmed)"
+  }
+}

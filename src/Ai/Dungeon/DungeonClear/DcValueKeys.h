@@ -38,6 +38,12 @@ namespace DcKey
     inline constexpr char const* ClearedAnchors          = "dungeon clear cleared anchors";
     inline constexpr char const* SeenBosses              = "dungeon clear seen bosses";
     inline constexpr char const* SeenDueEvents           = "dungeon clear seen due events";
+    // The empty raid-icon name, and the only reason it exists: RtiTargetValue reads
+    // its icon out of a NAMED string value, so a DPS picker constructed against a
+    // value that always reads "" resolves icon index -1 and skips the raid-mark
+    // short-circuit entirely. That is how DungeonClearDpsTargetValue reruns the
+    // stock pick with the icon disarmed — see its header.
+    inline constexpr char const* NoRti                   = "dungeon clear no rti";
     inline constexpr char const* StickyBoss              = "dungeon clear sticky boss";
     inline constexpr char const* RunInstance             = "dungeon clear run instance";
     inline constexpr char const* StallReason             = "dungeon clear stall reason";
@@ -47,8 +53,26 @@ namespace DcKey
     inline constexpr char const* PartyTank               = "dungeon clear party tank";
     inline constexpr char const* LongPath                = "dungeon clear long path";
     inline constexpr char const* CurrentHop              = "dungeon clear current hop";
+    // Endpoint of the last escort glide DC itself issued (DcMovement::SplinePath),
+    // so the stop helpers can tell DC's glide from anyone else's ESCORT generator.
+    // See DcMovement::DcGlideRecord.
+    inline constexpr char const* GlideRecord             = "dungeon clear glide record";
+    // Diagnostic heartbeat, 0 == never. Written only by DcTickHeartbeat, read
+    // only by the teardown snapshot; nothing steers off it. See DcTickMemo.h.
+    inline constexpr char const* LastTickMs              = "dungeon clear last tick ms";
     inline constexpr char const* FarTargets              = "dungeon clear far targets";
     inline constexpr char const* Hazards                 = "dungeon clear hazards";
+    // Ground pools (persistent-area-aura DynamicObjects) near the bot. A SEPARATE
+    // key from Hazards because the guids resolve through a different accessor —
+    // ObjectAccessor::GetDynamicObject, not GetUnit — and a DynamicObject guid
+    // fed to the unit resolver is a silent nullptr, i.e. a hazard that reads as
+    // clean ground. See DungeonClearGroundHazardsValue.
+    inline constexpr char const* GroundHazards           = "dungeon clear ground hazards";
+    // Ground TRAPS (GameObjects) near the bot — the Shattered Halls Blaze. A
+    // third key for the third resolver: a GameObject guid is neither a Unit nor a
+    // DynamicObject, so both of the accessors above return nullptr on it and the
+    // fire reads as clean ground. See DungeonClearTrapHazardsValue.
+    inline constexpr char const* TrapHazards             = "dungeon clear trap hazards";
     inline constexpr char const* RoomTrashRemaining      = "dungeon clear room trash remaining";
     inline constexpr char const* BlockingDoor            = "dungeon clear blocking door";
     inline constexpr char const* EngageTrashTarget       = "dungeon clear engage trash target";
@@ -78,6 +102,8 @@ namespace DcKey
         inline constexpr char const* CurrentTarget     = "current target";
         inline constexpr char const* PossibleTargets   = "possible targets";
         inline constexpr char const* Attackers         = "attackers";
+        inline constexpr char const* DpsTarget         = "dps target";
+        inline constexpr char const* DpsAoeTarget      = "dps aoe target";
         inline constexpr char const* LootTarget        = "loot target";
         inline constexpr char const* AvailableLoot     = "available loot";
         inline constexpr char const* HasAvailableLoot  = "has available loot";

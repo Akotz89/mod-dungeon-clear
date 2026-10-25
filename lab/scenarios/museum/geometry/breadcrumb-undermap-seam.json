@@ -1,0 +1,35 @@
+{
+  "about": "UNVERIFIED geometry (the original report named no dungeon): advanced-pull camps picked across a vertical breadcrumb seam. The trail's 12yd discontinuity guards measured in 2D, so a drop-down seam that is short in plan view but a long vertical jump stayed contiguous. A camp picked across it landed on the wrong floor, and stock MoveTo fell back to a straight spline, which is the 'tank/party runs under the map' symptom. Fixed in 0ee8deb5: 3D trail measures, and every committed camp is PathGenerator-probed for PATHFIND_NORMAL. Staged on LBRS's Bloodaxe platform (z57, at a Bloodaxe Worg spawn) over the spider ledge (z30) toward Vosh'gajin. That is the 2D-short, 27yd drop that DcNavPenaltyRegistry boxes off as navmesh shortcut #1, so the route and trail can cross a vertical seam right before a forced advanced pull on the Spire Spider pair.",
+  "schema": 1,
+  "geometry": {
+    "map": 229,
+    "dungeon": "lbrs",
+    "heroic": false,
+    "region": { "center": [-124.0, -390.0, 40.0], "radius": 60.0 },
+    "objective": 9236,
+    "objectiveName": "Shadow Hunter Vosh'gajin"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [44376, 44377]
+      }
+    }
+  },
+  "party": {
+    "comp": "warrior-prot,priest-holy,mage-frost,rogue-combat,hunter-mm",
+    "level": 58,
+    "start": [-127.3, -371.1, 57.4, -1.358],
+    "react": "fast",
+    "seedTarget": true
+  },
+  "settings": {
+    "PullSetting": 1,
+    "PullForceAdvanced": 1
+  },
+  "goal": { "kill": "pack:target", "timeoutS": 120 },
+  "expect": {
+    "oracles": { "O5": "pass", "O6": "pass", "O10": "pass" },
+    "knownFailure": "fixed:0ee8deb5"
+  }
+}

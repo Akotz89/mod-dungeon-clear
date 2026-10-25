@@ -7,11 +7,13 @@
 #define _PLAYERBOT_DCTESTPLANMANAGER_H
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
 #include "ObjectGuid.h"
 #include "TestRun/DcTestPlan.h"
+#include "TestRun/DcTestPlanSummary.h"
 #include "TestRun/DcTestRunLiveJson.h"
 
 class Player;
@@ -20,6 +22,12 @@ class Player;
 // runs through DcTestRunManager (at most one per world tick per plan, so the
 // shared provisioning budget is never mobbed), tracks their outcomes, and on
 // completion appends one summary line to dc_testplans.jsonl.
+//
+// A pool plan (`pool=`) draws each launch from a set of dungeons; with
+// total=0 it runs until stopped (the Test Deck's Continuous mode). Those fold
+// outcomes into bounded aggregates instead of keeping every one, write a
+// checkpoint summary line every TestRun.Plan.CheckpointMin, and skip heroic /
+// raid entries around the global instance reset (TestRun.Plan.ResetGuardMin).
 //
 // Threading: everything here runs on the world thread — Start/Stop from the
 // command handler, Tick from the module's world-update hook, OnRunFinished
@@ -46,6 +54,15 @@ public:
     // (the caller then aborts all runs, plan children included).
     void StopAll(std::string const& reason);
 
+    // `.dc test plan edit`: change a live plan's pool and/or concurrency in
+    // place. A lower concurrency only stops launching until below it — live
+    // runs are never aborted. Editing the pool restarts the pick bag.
+    bool Edit(DcTestPlan::EditSpec const& edit, std::string* msg);
+
+    // `.dc test plan pause|resume [planId]`: stop / restart launching; live
+    // runs play out either way.
+    bool SetPaused(std::string const& selector, bool paused, std::string* msg);
+
     std::string StatusText() const;
     bool HasActivePlans() const { return !_plans.empty(); }
 
@@ -63,6 +80,24 @@ public:
 private:
     DcTestPlanManager() = default;
 
+    // Per pool entry (keyed by PoolEntry::Key): launches so far plus the
+    // finished runs' aggregate. Kept for entries an edit removed from the pool,
+    // so their runs still show in the summary.
+    struct EntryStats
+    {
+        std::string token;
+        bool heroic = false;
+        uint32 size = 0;
+        uint32 launched = 0;
+        DcTestPlanSummary::Accumulator acc;
+    };
+
+    struct ActiveRun
+    {
+        std::string runId;
+        std::string entryKey;
+    };
+
     struct Plan
     {
         DcTestPlan::Spec spec;
@@ -73,16 +108,28 @@ private:
         uint32 transientStreak = 0;   // consecutive rejections with 0 active
         uint64 driverWaitSinceMs = 0; // 0 = not waiting on the driver login
         bool stopping = false;        // no more launches; drain then summarize
+        bool paused = false;          // no launches until resumed
+        std::string pauseReason;      // "" = paused by hand
+        uint32 refusalStreak = 0;     // consecutive hard Start refusals (pool plans)
+        std::string lastRefusal;
         std::string result;           // final disposition once stopping/complete
         std::string abortReason;
-        std::vector<DcTestPlan::RunOutcome> outcomes;
-        std::vector<std::string> activeRunIds;
+        DcTestPlanSummary::Accumulator acc;
+        std::map<std::string, EntryStats> entries;
+        std::vector<ActiveRun> activeRuns;
+        DcTestPlan::PickState picker;
+        uint64 lastCheckpointMs = 0;
+        uint64 resetGuardUntilS = 0;  // guard active until (0 = not active)
+        bool holdingForReset = false; // guard active AND nothing else eligible
     };
 
     void TickPlan(Plan& plan, uint32 diff);
     void Finalize(Plan& plan);
+    void WriteSummary(Plan const& plan, bool checkpoint, uint64 nowMs);
     void AbortPlan(Plan& plan, std::string const& reason);
+    std::vector<Plan*> Select(std::string const& selector, std::string* msg);
     static std::string StatusLine(Plan const& plan);
+    static std::string PlanLabel(Plan const& plan);
 
     std::vector<Plan> _plans;  // world-thread only
 };

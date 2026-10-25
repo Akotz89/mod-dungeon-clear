@@ -57,6 +57,17 @@ namespace DcTestRunLive
         std::string name;
     };
 
+    // One pool entry of a pool plan, with its own tallies so far.
+    struct PlanPoolEntry
+    {
+        std::string token;
+        bool heroic = false;
+        std::uint32_t size = 0;
+        std::uint32_t launched = 0;
+        std::uint32_t succeeded = 0;
+        std::uint32_t failed = 0;
+    };
+
     // One active `.dc test plan` campaign, for the dashboard's plan progress
     // bars (DcTestPlanManager gathers these alongside the run snapshots).
     struct PlanSnapshot
@@ -71,8 +82,16 @@ namespace DcTestRunLive
         std::uint32_t concurrent = 0;
         bool heroic = false;
         std::string state;             // "running" | "backoff" | "draining"
-                                       // | "waiting for test driver"
+                                       // | "waiting for test driver" | "paused"
+                                       // | "holding for instance reset"
         std::uint32_t elapsedS = 0;
+
+        // Pool plans (`pool=`). `pool` empty = a single-dungeon plan.
+        std::vector<PlanPoolEntry> pool;
+        bool endless = false;          // total=0: runs until stopped
+        bool paused = false;
+        std::string nextPick;          // "uk:heroic"; "" when unknown
+        std::uint64_t resetHoldUntil = 0;  // unix s the reset guard lifts; 0 = inactive
     };
 
     struct RunSnapshot

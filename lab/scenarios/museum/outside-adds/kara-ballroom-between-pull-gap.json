@@ -1,0 +1,51 @@
+{
+  "about": "Outside adds between pulls (tr-20260927-003140-1, DcPullPlanner.cpp comment at ShouldAdvanceUnclassifiedAggro): after a planned ballroom pull Dynamic dropped to mode off. The route rejoin put the tank 20yd beside the residual Phantom Guest cluster around 135201 (corridor band 18yd, Guest aggro reach 22yd). First contact with camp none became an engage-trash walk-in, and the north formations (135212-135229) and the Skeletal Waiters followed: 3 deaths. Fixed by ee6a971f: an unclassified aggro on a sweep map is answered ADVANCED with a fresh-camp drag-back. Live: tr-20261001-155033-49 logs 'unplanned aggro while scouting -> fresh camp' at this ramp. Party starts at that run's real camp (-11013.5,-1972.4,66.9); the injection lands the 22yd first contact whether or not DC planned the cluster. Attendants/Retainer/Servant 10-12yd east are bonded to the cluster through assistance at T=0, so up to 6 outside joiners are tolerated. Memory: dc-kara-ballroom-between-pull-gap.",
+  "schema": 1,
+  "geometry": {
+    "map": 532,
+    "dungeon": "kara",
+    "heroic": false,
+    "region": { "center": [-10975.0, -1950.0, 80.1], "radius": 70.0 },
+    "objective": 15687,
+    "objectiveName": "Moroes"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [135195, 135196, 135197, 135198, 135199, 135200, 135201, 135202],
+        "attendants": [135134, 135135, 135136, 135137, 135286, 135163],
+        "north-formation": [135212, 135213, 135214, 135215, 135216, 135217, 135218, 135219, 135220,
+                            135221, 135222, 135223, 135224, 135225, 135226, 135228, 135229],
+        "waiters": [135308, 135310, 135311]
+      }
+    }
+  },
+  "party": {
+    // Comp of tr-20260927-003140-1.
+    "comp": "druid-bear,paladin-prot,priest-disc,shaman-resto,warlock-affli,mage-fire,warrior-arms,rogue-as,hunter-surv,warlock-destro",
+    "level": 70,
+    "start": [-11013.5, -1972.4, 66.9, 0.078],
+    "react": "fast",
+    "seedTarget": false
+  },
+  "settings": {
+    "PullSetting": 2
+  },
+  "injections": [
+    {
+      "label": "first contact at the Guest cluster's 22yd reach",
+      "when": { "predicate": "tankDistToPack < 22" },
+      "do": { "aggro": "spawn:135201", "on": "tank" }
+    }
+  ],
+  "goal": { "kill": "pack:target", "timeoutS": 120 },
+  "expect": {
+    "oracles": {
+      "O1": "pass",
+      "O6": "pass",
+      "O7": { "outsideMax": 6, "joinersMax": 6, "expect": "pass" },
+      "O10": { "noDeaths": false, "expect": "pass" }
+    },
+    "knownFailure": "fixed:ee6a971f"
+  }
+}

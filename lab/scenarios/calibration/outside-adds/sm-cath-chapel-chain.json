@@ -1,0 +1,151 @@
+{
+  "about": "Outside adds: Scarlet Monastery Cathedral chapel pull that chained 13 mobs off a predicted single \u2014 the worst real over-pull in the snapshot set. Calibration: sm-cath pull #11 of tr-20260922-185153-3 \u2014 predicted 1, observed 13 (over, outside); target 4295#39982. The observed count spans a 123s snapshot window of several pulls; the Lab does not reproduce a chain.",
+  "schema": 1,
+  "source": {
+    "snapshot": "tr-20260922-185153-3#11",
+    "joined": [
+      39993,
+      39994,
+      39991,
+      39996,
+      39997,
+      40004,
+      40007,
+      40013,
+      40005,
+      40006,
+      40011,
+      40017,
+      40027,
+      40015,
+      40012,
+      40009,
+      40000,
+      40001,
+      40019,
+      40003,
+      39986,
+      39978,
+      40010,
+      40008
+    ],
+    "outsideJoined": [
+      39978,
+      39986,
+      39991,
+      39993,
+      39994,
+      39996,
+      39997,
+      40000,
+      40001,
+      40003,
+      40004,
+      40005,
+      40006,
+      40007,
+      40008,
+      40009,
+      40010,
+      40011,
+      40012,
+      40013,
+      40015,
+      40017,
+      40019,
+      40027
+    ],
+    "predicted": 1,
+    "observed": 13
+  },
+  "geometry": {
+    "map": 189,
+    "dungeon": "sm-cath",
+    "heroic": false,
+    "region": {
+      "center": [
+        1027.8,
+        1399.2,
+        27.4
+      ],
+      "radius": 60.0
+    },
+    "objective": 3976,
+    "objectiveName": "Scarlet Commander Mograine"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [
+          39982
+        ],
+        "near": [
+          39975,
+          39978,
+          39979,
+          39986,
+          39989,
+          39990,
+          39991,
+          39992,
+          39993,
+          39994,
+          39995,
+          39996,
+          39997,
+          39998,
+          39999,
+          40000,
+          40001,
+          40002,
+          40003,
+          40004,
+          40005,
+          40006,
+          40007,
+          40008,
+          40009,
+          40010,
+          40011,
+          40012,
+          40013,
+          40015,
+          40017,
+          40019,
+          40027
+        ]
+      }
+    }
+  },
+  "party": {
+    "comp": "druid-bear,priest-disc,shaman-ele,warlock-destro,mage-frost",
+    "level": 40,
+    "start": [
+      1028.1,
+      1376.7,
+      27.3,
+      1.584
+    ],
+    "react": "fast",
+    "seedTarget": false
+  },
+  "settings": {
+    "PullSetting": 2
+  },
+  "goal": {
+    "kill": "pack:target",
+    "timeoutS": 90
+  },
+  "expect": {
+    "oracles": {
+      // The snapshot's "observed 13" spans a 123s window (durationS 123) that
+      // lumps several later pulls. In the Lab the target pull engages 2 (run -5),
+      // and 90s of continued clearing (run -6) pulled the near mobs 1-2 at a
+      // time with no chain. Kept as a must-pass calibration.
+      "O7": {
+        "joinersMax": 1,
+        "expect": "pass"
+      }
+    }
+  }
+}

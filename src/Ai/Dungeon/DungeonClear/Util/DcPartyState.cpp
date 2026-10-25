@@ -52,6 +52,7 @@
 #include "Chat.h"
 #include "ServerFacade.h"
 #include "Timer.h"
+#include "Util/DcPlayerbotsConfig.h"
 #include "World.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Ai/Dungeon/DungeonClear/Data/ScriptedPullRegistry.h"
@@ -61,6 +62,7 @@
 #include "Ai/Dungeon/DungeonClear/Util/DcCombatFlag.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcLeaderSignal.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRezRecovery.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcSmartRest.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
 #include "Ai/Dungeon/DungeonClear/Util/NavmeshSnap.h"
@@ -77,9 +79,9 @@ float DcPartyState::RestMinHpPct(Player* bot)
         return static_cast<float>(target);
 
     // 90% is our "topped up enough to pull" ceiling. Clamp it to the level bots
-    // actually eat back up to (AiPlayerbot.AlmostFullHealth, default 85) so the
+    // actually eat back up to (Playerbots.AlmostFullHealth, default 85) so the
     // gate never waits on HP a bot won't restore on its own.
-    return std::min(90.0f, static_cast<float>(sPlayerbotAIConfig.almostFullHealth));
+    return std::min(90.0f, static_cast<float>(DC_PB_CONFIG(AlmostFullHealth, almostFullHealth)));
 }
 float DcPartyState::RestMinMpPct(Player* bot)
 {
@@ -89,9 +91,9 @@ float DcPartyState::RestMinMpPct(Player* bot)
         return static_cast<float>(target);
 
     // 75% ceiling, clamped to the level bots actually drink back up to
-    // (AiPlayerbot.HighMana, default 65). Bots stop drinking at HighMana, so a
+    // (Playerbots.HighMana, default 65). Bots stop drinking at HighMana, so a
     // higher gate would strand the tank waiting on slow natural mana regen.
-    return std::min(75.0f, static_cast<float>(sPlayerbotAIConfig.highMana));
+    return std::min(75.0f, static_cast<float>(DC_PB_CONFIG(HighMana, highMana)));
 }
 bool DcPartyState::IsPartyReady(Player* bot, float minHpPct, float minMpPct, float maxSpread,
     Position const* spreadAnchor, float maxTankGap)
@@ -102,21 +104,10 @@ bool DcPartyState::IsPartyReady(Player* bot, float minHpPct, float minMpPct, flo
     if (!group)
         return true;  // Solo tank — always "ready."
 
-    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+    // One member's readiness against the bars. Factored so the strict 5-man
+    // walk and the raid quorum walk below judge a member identically.
+    auto const memberMeetsBars = [&](Player* member)
     {
-        Player* member = ref->GetSource();
-        if (!member)
-            continue;
-        if (member->GetMapId() != bot->GetMapId() || member->GetInstanceId() != bot->GetInstanceId())
-            continue;
-        if (member->isDead())
-            continue;  // Dead members hold the run via DcRezRecovery::IsPending
-                       // (or, with PostCombatRez off / recovery unviable, the
-                       // party-died bailout) — never via these readiness floors.
-                       // The moment one is rezzed they re-enter this walk as a
-                       // living-but-low member and the floors hold the tank
-                       // while they eat/drink back up.
-
         if (member != bot)
         {
             float const spread = spreadAnchor ? member->GetDistance(*spreadAnchor)
@@ -141,8 +132,63 @@ bool DcPartyState::IsPartyReady(Player* bot, float minHpPct, float minMpPct, flo
                     return false;
             }
         }
+        return true;
+    };
+
+    // RAID QUORUM form: with 10-40 members, all-or-nothing readiness pins the
+    // whole run on any one straggler forever. Ready when every TANK and HEALER
+    // meets the bars (the roles a pull genuinely cannot start without) AND at
+    // least RaidReadyQuorumPct of living same-map members meet them AND no
+    // failing member is still visibly walking in (isMoving — someone closing
+    // will pass in a moment; releasing under them wastes the wait). A wedged
+    // straggler (failing, stationary) is quorum-tolerated and left to the
+    // stranded-recovery ladder. Dungeons keep the strict every-member walk.
+    // Boss musters stay strict on top of this via the Plan C muster gate.
+    bool const raid = bot->GetMap() && bot->GetMap()->IsRaid();
+    uint32 living = 0;
+    uint32 meeting = 0;
+
+    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+    {
+        Player* member = ref->GetSource();
+        if (!member)
+            continue;
+        if (member->GetMapId() != bot->GetMapId())
+            continue;
+        if (member->isDead())
+            continue;  // Dead members hold the run via DcRezRecovery::IsPending
+                       // (or, with PostCombatRez off / recovery unviable, the
+                       // party-died bailout) — never via these readiness floors.
+                       // The moment one is rezzed they re-enter this walk as a
+                       // living-but-low member and the floors hold the tank
+                       // while they eat/drink back up.
+
+        bool const ok = memberMeetsBars(member);
+        if (!raid)
+        {
+            if (!ok)
+                return false;
+            continue;
+        }
+
+        ++living;
+        if (ok)
+        {
+            ++meeting;
+            continue;
+        }
+        if (member == bot || PlayerbotAI::IsTank(member) || PlayerbotAI::IsHeal(member))
+            return false;
+        if (member->isMoving())
+            return false;
     }
-    return true;
+
+    if (!raid)
+        return true;
+    if (!living)
+        return false;
+    uint32 const quorumPct = DcSettings::GetUInt(bot, "RaidReadyQuorumPct");
+    return meeting * 100 >= living * quorumPct;
 }
 DcPartyState::SpreadGate DcPartyState::GetSpreadGate(Player* bot, AiObjectContext* context)
 {
@@ -152,6 +198,24 @@ DcPartyState::SpreadGate DcPartyState::GetSpreadGate(Player* bot, AiObjectContex
     SpreadGate gate{ DcSettings::GetFloat(bot, "PartyMaxSpread"), nullptr };
     if (!context)
         return gate;
+
+    // A PARTY WITH A RIDER IN IT IS NOT MEASURED BY SPREAD. Distances between a
+    // drake and a member on foot — or between two drakes on their lanes — say
+    // nothing about readiness, and the driver that put them there owns cohesion
+    // until they are all on foot again (The Oculus's flight driver; Trial of the
+    // Champion's joust driver, which holds the tank off the ladder anyway).
+    if (Group* const group = bot->GetGroup())
+    {
+        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+        {
+            Player* const m = ref->GetSource();
+            if (m && m->GetMapId() == bot->GetMapId() && m->IsAlive() && m->GetVehicle())
+            {
+                gate.maxSpread = 100000.0f;
+                return gate;
+            }
+        }
+    }
 
     DcPullContext const& pull =
         context->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
@@ -232,9 +296,41 @@ DcPartyState::SpreadGate DcPartyState::GetSpreadGate(Player* bot, AiObjectContex
         float const setback = DcSettings::GetFloat(bot, "PullSetback");
         float const maxDrag = DcSettings::GetFloat(bot, "PullMaxDrag");
         gate.maxTankGap = gate.maxSpread + std::max(setback, maxDrag);
+
+        // A CAMP THE TANK HAS LEFT BEHIND IS NO ANCHOR. Past maxTankGap a member
+        // standing AT the camp fails the backstop, and one standing with the tank
+        // fails the camp spread — no position passes both, so the gate is closed
+        // for good. Measure against the tank instead: the party is with it, and the
+        // next pull stamps a fresh camp. Live (tr-20261018-230400-6): the camp stayed
+        // at the throne-room door while the fight carried everyone 105yd south to the
+        // Emperor's standoff; every member's recall latched RAN AWAY, and the tank
+        // held "Waiting on Yidama, Zesh, Moge (out of range)" with all three within
+        // 23yd of it for sixteen minutes. Stranded recovery measures to the tank, so
+        // it never saw them.
+        if (DungeonClearMath::CampAnchorIsStale(bot->GetExactDist2d(&pull.camp),
+                                                gate.maxTankGap))
+        {
+            gate.anchor = nullptr;
+            gate.maxTankGap = 0.0f;
+        }
     }
     return gate;
 }
+DcPartyState::SpreadGate DcPartyState::LeaderGate(Player* bot)
+{
+    SpreadGate own;
+    if (!bot)
+        return own;
+    own.maxSpread = DcSettings::GetFloat(bot, "PartyMaxSpread");
+    Player* leader = DcLeaderSignal::FindLeaderTank(bot);
+    if (!leader)
+        return own;
+    PlayerbotAI* leaderAI = GET_PLAYERBOT_AI(leader);
+    if (!leaderAI)
+        return own;   // a real-player leader runs no DC gate to be inside of
+    return GetSpreadGate(leader, leaderAI->GetAiObjectContext());
+}
+
 float DcPartyState::LeaderEffectiveMaxSpread(Player* bot)
 {
     if (!bot)
@@ -262,6 +358,34 @@ DcPartyState::RestGate DcPartyState::GetRestGate(Player* bot, AiObjectContext* c
     // HP/mana is a deadlock. See the header.
     if (DcCombatFlag::IsPhantomFlag(bot, context))
         return gate;
+
+    // THE RAID MUSTER'S OWN OVERRIDE MUST NOT FEED THIS GATE.
+    //
+    // Plan C's pre-boss muster pushes RestHealthPct/RestManaPct to 100 for the
+    // run so bots actually eat and drink all the way to the bars. That is a REST
+    // DRIVE, not a readiness bar, and reading it back here closes a loop the
+    // muster cannot get out of:
+    //
+    //   IsBetweenPullsReady is the LAST gate in DungeonClearAtBossTrigger; the
+    //   muster's phase machine lives in DungeonClearEngageBossAction, i.e.
+    //   BEHIND that trigger. With the floors at 100/100 the gate is effectively
+    //   unsatisfiable in a raid — IsPartyReady is strict on every tank and
+    //   healer, and one priest single-target buffing thirty-nine people is a
+    //   healer who is never at full mana. So the trigger stays down, the engage
+    //   action never runs, the muster's clocks are never SAMPLED, and every one
+    //   of its budgets (rest / rebuff / whole-muster) silently cannot fire.
+    //
+    // Live at Vaelastrasz, 2026-08-28, five concurrent 40-mans on a 60s ceiling:
+    // the kernel was evaluated three times in 126s (13:28:40, 13:29:32,
+    // 13:30:46) and released 66s late; the other four ran 77s, 89s, 116s and
+    // 218s. Nothing was wrong with DcRaidMusterDecision — it was never asked.
+    //
+    // The top-off is not lost by waiving the floors here: the muster's own
+    // staged/topped snapshot still enforces it, and unlike this gate it is
+    // timeout-bounded.
+    if (DcRun::Of(context).musterRestOverride)
+        return gate;
+
     gate.minHp = RestMinHpPct(bot);
     gate.minMp = RestMinMpPct(bot);
     return gate;

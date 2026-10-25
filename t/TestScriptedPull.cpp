@@ -789,6 +789,28 @@ TEST(DcScriptedPullTest, LosingGroundIsARatchetNotATickDelta)
     EXPECT_LT(DC_SCRIPTED_PULL_LOSE_GROUND, DC_SCRIPTED_PULL_LEASH * 0.5f);
 }
 
+TEST(DcScriptedPullTest, AFollowerRecallThatRunsAwayIsCaught)
+{
+    // tr-20260927-184653-9: a healer's recall to a slot 5.3yd away was carried
+    // outward, the ratchet re-basing on every loss — 7.9, 10.4, 13.7, 17.2, 20.1,
+    // then 47 and on to 85yd, down a floor into the Servants' Quarters.
+
+    // No recall measured yet -> never fires.
+    EXPECT_FALSE(CampRecallRanAway(0.0f, 500.0f));
+
+    // Closing, or a doorway arc a few yards wide, is not a runaway.
+    EXPECT_FALSE(CampRecallRanAway(5.3f, 5.3f));
+    EXPECT_FALSE(CampRecallRanAway(5.3f, 13.7f));
+    EXPECT_FALSE(CampRecallRanAway(5.3f, 5.3f + DC_CAMP_RECALL_RUNAWAY));
+
+    // The live sequence is caught at 20.1yd, not 85.
+    EXPECT_TRUE(CampRecallRanAway(5.3f, 20.1f));
+
+    // It must sit well past the ratchet, so a stolen leg the ratchet can take back
+    // is re-issued several times before the recall is given up on.
+    EXPECT_GE(DC_CAMP_RECALL_RUNAWAY, DC_SCRIPTED_PULL_LOSE_GROUND * 4.0f);
+}
+
 TEST(DcScriptedPullTest, ABodyPullFromTheStandSpotWakesTheCentrePair)
 {
     // A tank with NO opener (a level-70 warrior whose ranged slot is empty or holds

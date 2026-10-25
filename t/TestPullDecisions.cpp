@@ -254,3 +254,156 @@ TEST(DcPullSafetyRelease, NextManeuverClearsAStandingRelease)
     pull.Transition(DcPullPhase::Forming, 4000u);
     EXPECT_FALSE(pull.partyReleased);
 }
+
+// ---------------------------------------------------------------------------
+// DcPullContext::ClearDynamicVerdict — the stand-down teardown.
+//
+// Regression net for tr-20260817-100413-43/44/45 (Shattered Halls). The Dynamic
+// governor (DcPullPlanner::UpdateDynamicPullMode) is the ONLY writer of these
+// fields, so anything that stops it from running freezes the verdict instead of
+// clearing it. DungeonClearPullModeCurrentValue stands the pull system down while
+// a persistent anchored event drives — and it used to `return false` while leaving
+// `decision == PatrolHold` latched. The pull trigger keeps its rung live on that
+// code by design, and DcRel::Pull (35) outranks DcRel::AtObjective (30), so the
+// event could never drive another step: three runs stalled 913s in the assassin
+// hallway. Every field the governor latches has to go, not just `decision`.
+// ---------------------------------------------------------------------------
+
+TEST(DcPullStandDown, ClearDynamicVerdictDropsAPatrolHold)
+{
+    DcPullContext pull;
+    pull.decision = DcPullDecisionCode::PatrolHold;
+    pull.decisionTarget = ObjectGuid(uint64(0xF130004123456789ull));
+    pull.decisionSince = 5000u;
+    pull.patrolWaitSince = 4000u;
+
+    pull.ClearDynamicVerdict();
+
+    // The code the pull trigger reads to keep its rung live must be gone.
+    EXPECT_EQ(pull.decision, DcPullDecisionCode::None);
+    // ...and so must the per-pack latches, or the governor's own same-target
+    // branch would resume mid-throttle against a pack it never re-classified.
+    EXPECT_TRUE(pull.decisionTarget.IsEmpty());
+    EXPECT_EQ(pull.decisionSince, 0u);
+    EXPECT_EQ(pull.patrolWaitSince, 0u);
+}
+
+TEST(DcPullStandDown, ClearDynamicVerdictDropsAStandingAdvanced)
+{
+    DcPullContext pull;
+    pull.decision = DcPullDecisionCode::Advanced;
+    pull.decisionTarget = ObjectGuid(uint64(0xF130004123456789ull));
+    pull.targetLostSince = 7000u;
+
+    pull.ClearDynamicVerdict();
+
+    EXPECT_EQ(pull.decision, DcPullDecisionCode::None);
+    EXPECT_TRUE(pull.decisionTarget.IsEmpty());
+    // The no-target grace latch too: a stand-down that ends with the pack gone
+    // must not hand the governor a countdown that started before the event.
+    EXPECT_EQ(pull.targetLostSince, 0u);
+}
+
+TEST(DcPullStandDown, ClearDynamicVerdictIsIdempotentAndLeavesTheManeuverAlone)
+{
+    DcPullContext pull;
+    pull.Transition(DcPullPhase::Returning, 1000u);
+    pull.pullTarget = ObjectGuid(uint64(0xF130004123456789ull));
+    pull.decision = DcPullDecisionCode::PatrolHold;
+
+    // Called on every tick the stand-down holds, so it must be cheap to repeat.
+    pull.ClearDynamicVerdict();
+    pull.ClearDynamicVerdict();
+    EXPECT_EQ(pull.decision, DcPullDecisionCode::None);
+
+    // It clears the VERDICT, not the maneuver: an in-flight drag and its per-pull
+    // latches belong to the pull FSM, which stands down through its own phases.
+    EXPECT_EQ(pull.phase, DcPullPhase::Returning);
+    EXPECT_FALSE(pull.pullTarget.IsEmpty());
+}
+
+// ---------------------------------------------------------------------------
+// DcPullContext::ScoutAggroHolding — an unplanned aggro while scouting holds the
+// party passive from the combat flag, not from the maneuver's first combat tick
+// (tr-20260923-171623-1: casters opened on the aggressor at its spawn in the gap).
+// ---------------------------------------------------------------------------
+
+TEST(DcPullScoutAggro, NeverStampedDoesNotHold)
+{
+    DcPullContext pull;
+    EXPECT_FALSE(pull.ScoutAggroHolding(5000u, 2000u));
+}
+
+TEST(DcPullScoutAggro, FreshStampInIdleHolds)
+{
+    DcPullContext pull;
+    pull.scoutAggroMs = 10000u;
+    EXPECT_TRUE(pull.ScoutAggroHolding(10000u, 2000u));
+    EXPECT_TRUE(pull.ScoutAggroHolding(11999u, 2000u));
+}
+
+TEST(DcPullScoutAggro, WindowExpiryReleases)
+{
+    // The maneuver declined to drag: the party must not stay passive for good.
+    DcPullContext pull;
+    pull.scoutAggroMs = 10000u;
+    EXPECT_FALSE(pull.ScoutAggroHolding(12000u, 2000u));
+}
+
+TEST(DcPullScoutAggro, OnlyIdleHolds)
+{
+    // Once the drag-back takes the pull, the holding-phase rule owns the party;
+    // a stale stamp surviving into the camp fight must not re-pin it.
+    DcPullContext pull;
+    pull.scoutAggroMs = 10000u;
+    pull.Transition(DcPullPhase::Returning, 10100u);
+    EXPECT_FALSE(pull.ScoutAggroHolding(10200u, 2000u));
+    pull.Transition(DcPullPhase::Engage, 10300u);
+    EXPECT_FALSE(pull.ScoutAggroHolding(10400u, 2000u));
+}
+
+TEST(DcPullScoutAggro, SurvivesClockWrap)
+{
+    DcPullContext pull;
+    pull.scoutAggroMs = 0xFFFFFF00u;
+    EXPECT_TRUE(pull.ScoutAggroHolding(0x00000100u, 2000u));   // 512ms later
+    EXPECT_FALSE(pull.ScoutAggroHolding(0x00001000u, 2000u));  // ~4.3s later
+}
+
+TEST(DcPullScoutAggro, ResetClearsStamp)
+{
+    DcPullContext pull;
+    pull.scoutAggroMs = 10000u;
+    pull.Reset();
+    EXPECT_FALSE(pull.ScoutAggroHolding(10001u, 2000u));
+}
+
+// DcPullContext::AnchoredCampFight — which camp fights keep the camp leashes.
+TEST(DcPullAnchoredCampFight, OrdinaryPullIsNotAnchored)
+{
+    DcPullContext pull;
+    EXPECT_FALSE(pull.AnchoredCampFight());
+}
+
+TEST(DcPullAnchoredCampFight, ScriptedStageOrBoxedRoomClearIsAnchored)
+{
+    DcPullContext pull;
+    pull.scriptedStage = 0;
+    EXPECT_TRUE(pull.AnchoredCampFight());
+
+    DcPullContext room;
+    room.roomCampFight = true;
+    EXPECT_TRUE(room.AnchoredCampFight());
+}
+
+TEST(DcPullAnchoredCampFight, ResetDropsTheRoomLatchAndRefusals)
+{
+    DcPullContext pull;
+    pull.roomCampFight = true;
+    pull.laneRefused.push_back(ObjectGuid::Empty);
+    pull.laneRefusedLive = 24;
+    pull.Reset();
+    EXPECT_FALSE(pull.roomCampFight);
+    EXPECT_TRUE(pull.laneRefused.empty());
+    EXPECT_EQ(pull.laneRefusedLive, 0u);
+}

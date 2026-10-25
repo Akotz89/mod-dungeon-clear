@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "G3D/Vector3.h"
 
@@ -48,6 +49,13 @@ namespace DcNavHarness
         float routeLength2d  = 0.0f;   // summed 2D segment length of the polyline
         float maxStepZ       = 0.0f;   // largest |dz| between consecutive points
         std::string failureReason;
+        // The raw corridor polyline, WoW-space, start point first. Carried out
+        // of the harness because AUTHORING a route needs the geometry itself,
+        // not a summary of it: the suppression-rooms hints (map 469) were
+        // derived by routing the leg here and decimating this polyline, and the
+        // probe test re-prints it so a future mmaps regen can be re-authored the
+        // same way instead of by hand.
+        std::vector<G3D::Vector3> points;
     };
 
     // Run BuildCoreFromMesh from (sx,sy,sz) to (tx,ty,tz) against `mesh` and
@@ -58,14 +66,22 @@ namespace DcNavHarness
                       float tx, float ty, float tz);
 
     // Snap a WoW-space point to the nearest navmesh poly, using the same
-    // {y,z,x} Detour coordinate order as BuildCoreFromMesh and a permissive
-    // include filter. `out` receives the snapped WoW-space stand position.
-    // Returns false if no poly lies within (hExtent, vExtent, hExtent) of the
-    // point — i.e. the coordinate is off the navmesh. Used to validate/correct
-    // authored anchor + teleport coordinates against the real mesh.
+    // {y,z,x} Detour coordinate order as BuildCoreFromMesh. `out` receives the
+    // snapped WoW-space stand position. Returns false if no poly lies within
+    // (hExtent, vExtent, hExtent) of the point — i.e. the coordinate is off the
+    // navmesh. Used to validate/correct authored anchor + teleport coordinates
+    // against the real mesh.
+    //
+    // `includeFlags` is the Detour include mask, default "any navigable poly".
+    // Passing NAV_GROUND alone turns this into a LIQUID TEST: the mmap generator
+    // meshes water at the liquid SURFACE and stamps those polys NAV_WATER, so a
+    // point standing on water snaps to itself with 0xffff and jumps to the pool
+    // floor (or misses entirely) with NAV_GROUND. That is the check that catches
+    // a hand-authored route wading into a lake — see TestAzjolNerubRouteProbe.
     bool NearestPoint(dtNavMesh const* mesh,
                       float x, float y, float z,
-                      float hExtent, float vExtent, G3D::Vector3& out);
+                      float hExtent, float vExtent, G3D::Vector3& out,
+                      unsigned short includeFlags = 0xffff);
 }
 
 #endif  // _DC_NAV_HARNESS_H

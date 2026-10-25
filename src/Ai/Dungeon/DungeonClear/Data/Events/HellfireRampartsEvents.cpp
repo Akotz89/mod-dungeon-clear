@@ -79,16 +79,44 @@ namespace
     // encounterIndex 2 for both normal/heroic), so his kill flips bit 2 of the
     // completed-encounter mask — the authoritative "the finale is done" signal.
     constexpr uint32 HFR_VAZRUDEN_BIT = 2;
-    // How far to scan for the Sentries / Vazruden. They sit at the destination,
-    // so this only needs to reach the platform once the party arrives; it is the
-    // de-facto proximity gate that keeps the event off the long approach.
-    constexpr float HFR_PLATFORM_SCAN = 70.0f;
+    // How near the Sentries / Vazruden the bot must be, and how high it must be
+    // standing, for this event to be about the final platform at all.
+    //
+    // THE SCAN ALONE IS NOT A PROXIMITY GATE — IT USED TO BE 70yd AND THAT WAS A
+    // BUG. The final platform is not far from the zone-in platform; it is directly
+    // ACROSS THE CHASM from it, which is exactly why the zone-in room has a ledge.
+    // Measured against the map's mmtiles: 254 sq yd of walkable zone-in floor lies
+    // within 70yd of a Sentry, reaching 59.8yd at its closest — the south-west
+    // ledge at (-1352.00, 1663.00, 68.61), a mere 22yd from where players land. So
+    // a party that started the run standing near that ledge fired this event on the
+    // FIRST tick, and its MoveTo sent the tank off on a 729yd trek round the whole
+    // instance to the final-encounter trigger. It killed Vazruden first and then
+    // walked back for Gargolmar — the reported "tank runs off the ledge and the run
+    // goes backwards". (Standing at the zone-in point itself is 77.5yd out, which
+    // is why it only reproduced when the player stood by the ledge.)
+    //
+    // The two levels separate cleanly, so the gate uses both separations:
+    //   radial — nearest zone-in floor is 59.8yd from a Sentry; 45 leaves 14.8yd
+    //            of margin, and still leaves 4038 sq yd of the upper level inside
+    //            the gate (it reaches to within 0.4yd of a Sentry), so the event
+    //            fires in plenty of time on a real approach.
+    //   height — zone-in floor is z 68.6..72.0, the upper level starts at z 79.9.
+    //            76 sits in that 7.9yd gap, so no amount of radius drift can make
+    //            this fire from the lower platform again.
+    constexpr float HFR_PLATFORM_SCAN = DcHellfireRamparts::FINAL_APPROACH_SCAN;
+    constexpr float HFR_PLATFORM_MIN_Z = DcHellfireRamparts::FINAL_APPROACH_MIN_Z;
 
     bool HfrApproach(Player* bot, AiObjectContext* /*context*/)
     {
         // Done for good once Vazruden is killed — bit 2 is set.
         InstanceScript* inst = DcTargeting::GetInstanceScript(bot);
         if (inst && (inst->GetCompletedEncounterMask() & (1u << HFR_VAZRUDEN_BIT)))
+            return false;
+
+        // Never from the lower level. The final platform is across the chasm from
+        // the zone-in room, so "near a Sentry" on its own does not mean "on the
+        // approach" — see the constants above.
+        if (bot->GetPositionZ() < HFR_PLATFORM_MIN_Z)
             return false;
 
         // Fire only once the party has reached the platform: either a Hellfire

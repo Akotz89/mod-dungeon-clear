@@ -5,6 +5,8 @@
 
 #include "DungeonWingRegistry.h"
 
+#include <algorithm>
+#include <cctype>
 #include <unordered_map>
 
 #include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
@@ -22,8 +24,8 @@ namespace
     // event rows, roster patch, wings — in one file). This aggregator calls each
     // EXPLICITLY: same link-safety reason as the event/roster tables — a
     // self-registering initializer in a TU the program never references is
-    // stripped from the module static lib (Maraudon's file is wings-only, so the
-    // call here is what keeps it linked).
+    // stripped from the module static lib (Maraudon's file has no events, so the
+    // calls here and in BossRosterRegistry are what keep it linked).
     std::unordered_map<uint32, DungeonWingLayout> const& Store()
     {
         static std::unordered_map<uint32, DungeonWingLayout> const store = []
@@ -32,6 +34,8 @@ namespace
             RegisterDireMaulWings(s);
             RegisterScarletMonasteryWings(s);
             RegisterMaraudonWings(s);
+            RegisterBlackrockSpireWings(s);
+            RegisterBlackrockDepthsWings(s);
             return s;
         }();
         return store;
@@ -55,4 +59,50 @@ std::string DungeonWingRegistry::WingName(uint32 mapId, uint32 bossEntry)
             if (entry == bossEntry)
                 return wing.name;
     return "";
+}
+
+namespace
+{
+    bool EqualsNoCase(std::string const& a, std::string const& b)
+    {
+        return a.size() == b.size() &&
+               std::equal(a.begin(), a.end(), b.begin(), [](char x, char y)
+                          {
+                              return std::tolower(static_cast<unsigned char>(x)) ==
+                                     std::tolower(static_cast<unsigned char>(y));
+                          });
+    }
+}
+
+DungeonWing const* DungeonWingRegistry::FindWing(DungeonWingLayout const& layout, std::string const& key)
+{
+    if (key.empty())
+        return nullptr;
+    for (DungeonWing const& wing : layout.wings)
+        if ((!wing.token.empty() && EqualsNoCase(wing.token, key)) || EqualsNoCase(wing.name, key))
+            return &wing;
+    return nullptr;
+}
+
+DungeonWing const* DungeonWingRegistry::WingForLfgDungeon(uint32 mapId, uint32 lfgDungeonId)
+{
+    DungeonWingLayout const* layout = Get(mapId);
+    if (!layout || !lfgDungeonId)
+        return nullptr;
+    for (DungeonWing const& wing : layout->wings)
+        if (wing.lfgDungeonId == lfgDungeonId)
+            return &wing;
+    return nullptr;
+}
+
+DungeonWing const* DungeonWingRegistry::WingOf(uint32 mapId, uint32 bossEntry)
+{
+    DungeonWingLayout const* layout = Get(mapId);
+    if (!layout)
+        return nullptr;
+    for (DungeonWing const& wing : layout->wings)
+        if (std::find(wing.bossEntries.begin(), wing.bossEntries.end(), bossEntry) !=
+            wing.bossEntries.end())
+            return &wing;
+    return nullptr;
 }

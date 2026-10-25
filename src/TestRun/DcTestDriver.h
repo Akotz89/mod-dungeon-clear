@@ -44,7 +44,7 @@ class Player;
 // level-1 character is a harness nobody can use out of the box. Set the
 // account to "" to opt out and provide the character yourself.
 //
-// The driver's account must NOT be in AiPlayerbot.RandomBotAccounts (the
+// The driver's account must NOT be in Playerbots.RandomBotAccounts (the
 // random-bot rotation would manage/log it out) and must not be an addclass
 // pool account (pool chars get claimed as party slots) — a random-bot account
 // is refused rather than used.

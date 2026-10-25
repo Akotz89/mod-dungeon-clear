@@ -16,7 +16,6 @@
 #include "Player.h"
 
 #include "Playerbots.h"
-#include "PlayerbotAIConfig.h"
 #include "PlayerbotMgr.h"
 
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
@@ -47,7 +46,8 @@ DcTestRunManager& DcTestRunManager::Instance()
 bool DcTestRunManager::Start(Player* gm, std::string const& dungeonToken,
                              uint32 levelOverride, uint32 seed, bool heroic,
                              DcTestGearTiers::Spec const& gear, std::string* msg,
-                             std::string const& planId, StartErr* errOut, std::string* runIdOut)
+                             std::string const& planId, StartErr* errOut, std::string* runIdOut,
+                             uint32 size)
 {
     if (errOut)
         *errOut = StartErr::None;
@@ -66,12 +66,20 @@ bool DcTestRunManager::Start(Player* gm, std::string const& dungeonToken,
         return fail(StartErr::UnknownDungeon,
                     "unknown dungeon '" + dungeonToken + "' — see .dc test list");
 
-    // heroicLevel 0 = heroic not offered: classic dungeons have no heroic mode,
-    // and WotLK rows are deliberately 0 until their heroic content pass (the
-    // registry column is the TBC-only scope gate).
+    // heroicLevel 0 = heroic not offered: only classic dungeons, which have no
+    // heroic difficulty at all (TBC rows run at 70, WotLK at 80).
     if (heroic && row->heroicLevel == 0)
         return fail(StartErr::UnknownDungeon,
-                    "'" + std::string(row->token) + "' has no heroic mode (TBC heroics only for now)");
+                    "'" + std::string(row->token) + "' has no heroic mode (classic dungeons have none)");
+
+    // The instance's own player cap (Karazhan 10, Gruul 25): the core refuses
+    // entry past it, so an oversized run would strand the overflow at the door.
+    uint32 const runSize = size ? size : static_cast<uint32>(DcTestComp::kPartySize);
+    if (uint32 const cap = DcTestDungeonRegistry::MaxPlayers(*row);
+        !DcTestDungeonRegistry::SizeFits(runSize, cap))
+        return fail(StartErr::UnknownDungeon,
+                    "'" + std::string(row->token) + "' admits at most " + std::to_string(cap) +
+                    " players (size=" + std::to_string(runSize) + ")");
 
     if (!gm || !GET_PLAYERBOT_MGR(gm))
         return fail(StartErr::NoMgr, "no playerbot manager on this account");
@@ -83,23 +91,16 @@ bool DcTestRunManager::Start(Player* gm, std::string const& dungeonToken,
                     "max concurrent test runs reached (" + std::to_string(maxConcurrent) +
                     ") — .dc test stop <run> first");
 
-    // MaxAddedBots pre-check: the core enforces this silently inside
-    // AddPlayerBot, so without the pre-check a party over the cap surfaces only
-    // as a 60s spawn timeout. Name the knob instead.
-    uint32 const currentBots = GET_PLAYERBOT_MGR(gm)->GetPlayerbotsCount();
-    if (sPlayerbotAIConfig.maxAddedBots > 0 &&
-        currentBots + DcTestComp::kPartySize > static_cast<uint32>(sPlayerbotAIConfig.maxAddedBots))
-        return fail(StartErr::BotBudget,
-                    "would exceed AiPlayerbot.MaxAddedBots (" +
-                    std::to_string(sPlayerbotAIConfig.maxAddedBots) + "; " +
-                    std::to_string(currentBots) + " bots already added, this run needs " +
-                    std::to_string(DcTestComp::kPartySize) + ") — raise it or stop a run");
+    // No Playerbots.MaxAddedBots check: the harness's own adds are exempt
+    // from it (see DcTestRunJob::Create), so it no longer bounds how many runs
+    // can be in flight.
 
     // Create picks slot guids skipping _reservedGuids (all synchronous on the
     // world thread — no TOCTOU with other runs).
     std::string err;
     std::unique_ptr<DcTestRunJob> job =
-        DcTestRunJob::Create(gm, *row, levelOverride, seed, heroic, gear, _reservedGuids, planId, &err);
+        DcTestRunJob::Create(gm, *row, levelOverride, seed, size, heroic, gear, _reservedGuids,
+                             planId, &err);
     if (!job)
         return fail(StartErr::PoolExhausted, err);
 
@@ -112,6 +113,59 @@ bool DcTestRunManager::Start(Player* gm, std::string const& dungeonToken,
         _reservedGuids.insert(g);
 
     std::string const started = "Test run started: " + job->StatusLine();
+    {
+        std::lock_guard<std::mutex> lock(_runsMutex);
+        _runs.push_back(std::move(job));
+    }
+    if (msg)
+        *msg = started;
+    return true;
+}
+
+bool DcTestRunManager::StartLab(Player* gm, std::string const& dungeonToken, uint32 levelOverride, uint32 seed,
+                                bool heroic, DcTestGearTiers::Spec const& gear,
+                                std::vector<DcTestComp::Slot> const& comp,
+                                std::shared_ptr<DcTestRunJob::LabDriver> driver, std::string* msg,
+                                StartErr* errOut, std::string* runIdOut)
+{
+    if (errOut)
+        *errOut = StartErr::None;
+    auto fail = [&](StartErr kind, std::string const& why) -> bool
+    {
+        if (msg)
+            *msg = "Lab party not started: " + why;
+        if (errOut)
+            *errOut = kind;
+        return false;
+    };
+
+    DcTestDungeonRegistry::Row const* row = DcTestDungeonRegistry::Find(dungeonToken);
+    if (!row)
+        return fail(StartErr::UnknownDungeon, "unknown dungeon '" + dungeonToken + "' — see .dc test list");
+    if (heroic && row->heroicLevel == 0)
+        return fail(StartErr::UnknownDungeon, "'" + std::string(row->token) + "' has no heroic mode");
+    if (uint32 const cap = DcTestDungeonRegistry::MaxPlayers(*row);
+        !DcTestDungeonRegistry::SizeFits(static_cast<uint32>(comp.size()), cap))
+        return fail(StartErr::UnknownDungeon, "'" + std::string(row->token) + "' admits at most " +
+                                                  std::to_string(cap) + " players");
+    if (!gm || !GET_PLAYERBOT_MGR(gm))
+        return fail(StartErr::NoMgr, "no playerbot manager on this account");
+    uint32 const maxConcurrent = DcSettings::GetUInt(ObjectGuid::Empty, "TestRun.MaxConcurrent");
+    if (maxConcurrent != 0 && _runs.size() >= maxConcurrent)
+        return fail(StartErr::CapHit, "max concurrent test runs reached (" + std::to_string(maxConcurrent) + ")");
+
+    uint32 const level = levelOverride ? std::min<uint32>(levelOverride, 80u)
+                                       : (heroic ? row->heroicLevel : row->recommendedLevel);
+    std::string err;
+    std::unique_ptr<DcTestRunJob> job =
+        DcTestRunJob::CreateLab(gm, *row, level, seed, heroic, gear, comp, std::move(driver), _reservedGuids, &err);
+    if (!job)
+        return fail(StartErr::PoolExhausted, err);
+    if (runIdOut)
+        *runIdOut = job->RunId();
+    for (ObjectGuid const& g : job->BotGuids())
+        _reservedGuids.insert(g);
+    std::string const started = "Lab party started: " + job->StatusLine();
     {
         std::lock_guard<std::mutex> lock(_runsMutex);
         _runs.push_back(std::move(job));
@@ -145,7 +199,7 @@ bool DcTestRunManager::StartRoster(Player* gm, std::string const& dungeonToken,
 
     if (heroic && row->heroicLevel == 0)
         return fail(StartErr::UnknownDungeon,
-                    "'" + std::string(row->token) + "' has no heroic mode (TBC heroics only for now)");
+                    "'" + std::string(row->token) + "' has no heroic mode (classic dungeons have none)");
 
     if (!gm || !GET_PLAYERBOT_MGR(gm))
         return fail(StartErr::NoMgr, "no playerbot manager on this account");
@@ -156,13 +210,18 @@ bool DcTestRunManager::StartRoster(Player* gm, std::string const& dungeonToken,
                     "max concurrent test runs reached (" + std::to_string(maxConcurrent) +
                     ") — .dc test stop <run> first");
 
-    // No MaxAddedBots pre-check here: roster members log in masterless
-    // (AddPlayerBot with masterAccountId 0), and that cap is only applied to bots
-    // added against a master's account.
+    // Roster members log in masterless (AddPlayerBot with masterAccountId 0),
+    // which Playerbots.MaxAddedBots never applied to in the first place.
 
     DcTestRoster::Result const parsed = DcTestRoster::Parse(partySpec);
     if (parsed.kind != DcTestRoster::Kind::Ok)
         return fail(StartErr::BadRoster, parsed.detail);
+
+    if (uint32 const cap = DcTestDungeonRegistry::MaxPlayers(*row);
+        !DcTestDungeonRegistry::SizeFits(parsed.members.size(), cap))
+        return fail(StartErr::BadRoster,
+                    "'" + std::string(row->token) + "' admits at most " + std::to_string(cap) +
+                    " players (the roster names " + std::to_string(parsed.members.size()) + ")");
 
     std::vector<DcTestRunJob::RosterEntry> roster;
     roster.reserve(parsed.members.size());
@@ -362,7 +421,7 @@ bool DcTestRunManager::Stop(std::string const& selector, std::string* msg)
         DcTestRunJob* job = _runs[idx].get();
         if (job->Done())
             continue;  // already torn down this tick, awaiting erase
-        if (job->IsMonitoring())
+        if (job->IsMonitoring() || job->InLabStage())
             job->RequestAbort("aborted by .dc test stop");
         else
             job->AbortSetup("aborted by .dc test stop");  // synchronous FailSetup -> Teardown
@@ -385,6 +444,17 @@ std::string DcTestRunManager::ListActiveRuns() const
         out += "  " + job->StatusLine();
     }
     return out;
+}
+
+bool DcTestRunManager::EnableTrace(std::string const& runId)
+{
+    for (std::unique_ptr<DcTestRunJob> const& job : _runs)
+        if (job->RunId() == runId)
+        {
+            job->EnableTrace();
+            return true;
+        }
+    return false;
 }
 
 std::string DcTestRunManager::StatusText() const
@@ -431,12 +501,12 @@ void DcTestRunManager::Tick(uint32 diff)
 
     if (!_runs.empty())
     {
-        // One factory-provision roll per world tick across ALL runs; the
-        // rotating offset gives each run a fair first crack at the budget.
+        // One factory-provision roll per world tick realm-wide
+        // (DcProvisionBudget, re-armed once per tick by the module's global
+        // hook); the rotating offset gives each run a fair first crack at it.
         std::size_t const n = _runs.size();
-        bool provisionBudget = true;
         for (std::size_t k = 0; k < n; ++k)
-            _runs[(_provisionRR + k) % n]->Tick(diff, provisionBudget);
+            _runs[(_provisionRR + k) % n]->Tick(diff);
         _provisionRR = (_provisionRR + 1) % n;
 
         // Erase finished jobs, releasing their reserved guids first and handing

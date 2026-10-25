@@ -14,6 +14,13 @@ dependencies = [
 dynamic = ["version"]
 
 [project.optional-dependencies]
+# Only `python3 -m testdeck mappack` needs these, and only when you want the
+# Live page's dungeon map. Serving an already-built pack is pure stdlib, so a
+# deck that never generates one must not be made to carry an image library.
+maps = [
+    "pillow>=9,<14",
+    "mpyq>=0.2,<1.0",
+]
 dev = [
     "pytest>=7",
     "httpx>=0.24",          # fastapi TestClient transport

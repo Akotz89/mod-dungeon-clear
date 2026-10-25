@@ -3,7 +3,8 @@ import { api } from "../api/client";
 import { usePoll } from "../api/hooks";
 import type { Status } from "../api/types";
 import { useSession } from "../auth/SessionContext";
-import { createContext, useContext } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
+import { SOAK_SEEN_KEY } from "../pages/ContinuousPage";
 
 const StatusCtx = createContext<Status | null>(null);
 export function useStatus() {
@@ -13,6 +14,7 @@ export function useStatus() {
 const NAV = [
   { to: "/", label: "Launch", icon: "🚀" },
   { to: "/live", label: "Live", icon: "📡" },
+  { to: "/continuous", label: "Continuous", icon: "♾️" },
   { to: "/roster", label: "Roster", icon: "🛡️" },
   { to: "/history", label: "History", icon: "📜" },
   { to: "/logs", label: "Logs", icon: "🧾" },
@@ -45,7 +47,39 @@ function RealmOrb({ status }: { status: Status | null }) {
   );
 }
 
-function NavItems({ live }: { live: number }) {
+/* Failures of the running continuous session this browser has not looked at
+   yet: "(3✗) DC Test Deck" in the tab title, so a soak left running in a
+   background tab still says when something broke. */
+function useSoakBadge(status: Status | null): number {
+  const [seenTick, setSeenTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setSeenTick((n) => n + 1);
+    window.addEventListener("testdeck-soak-seen", bump);
+    window.addEventListener("storage", bump);
+    return () => {
+      window.removeEventListener("testdeck-soak-seen", bump);
+      window.removeEventListener("storage", bump);
+    };
+  }, []);
+  const soak = status?.soak;
+  let unseen = 0;
+  if (soak) {
+    let seen = 0;
+    try {
+      const v = JSON.parse(localStorage.getItem(SOAK_SEEN_KEY) ?? "null");
+      if (v?.soakId === soak.soakId) seen = Number(v.fail) || 0;
+    } catch {
+      /* no storage: count them all */
+    }
+    unseen = Math.max(0, soak.fail - seen);
+  }
+  useEffect(() => {
+    document.title = unseen > 0 ? `(${unseen}✗) DC Test Deck` : "DC Test Deck";
+  }, [unseen, seenTick]);
+  return unseen;
+}
+
+function NavItems({ live, soak, unseen }: { live: number; soak: boolean; unseen: number }) {
   return (
     <>
       {NAV.map((n) => (
@@ -67,6 +101,16 @@ function NavItems({ live }: { live: number }) {
               {live}
             </span>
           )}
+          {n.to === "/continuous" && soak && (
+            <span
+              className={`ml-auto rounded-full px-2 text-xs ${
+                unseen ? "bg-red-500/20 text-red-300" : "bg-emerald-500/20 text-emerald-300"
+              }`}
+              title={unseen ? `${unseen} new failure(s)` : "a continuous session is running"}
+            >
+              {unseen ? `${unseen}✗` : "on"}
+            </span>
+          )}
         </NavLink>
       ))}
     </>
@@ -80,6 +124,7 @@ export default function AppShell() {
     5000,
   );
   const live = (status?.liveRuns ?? 0) + (status?.livePlans ?? 0);
+  const unseen = useSoakBadge(status);
   const problems = status?.health?.problems ?? [];
 
   return (
@@ -95,7 +140,7 @@ export default function AppShell() {
             </div>
           </div>
           <nav className="flex flex-col gap-1">
-            <NavItems live={live} />
+            <NavItems live={live} soak={!!status?.soak} unseen={unseen} />
           </nav>
           <div className="mt-auto space-y-3 px-2 pt-6 text-sm">
             <RealmOrb status={status} />
@@ -120,7 +165,7 @@ export default function AppShell() {
         </aside>
 
         {/* Main column */}
-        <div className="flex min-h-dvh flex-1 flex-col">
+        <div className="flex min-h-dvh min-w-0 flex-1 flex-col">
           {/* Top bar (mobile) */}
           <header className="flex items-center justify-between border-b border-ink-800/70 bg-ink-900/40 px-4 py-3 lg:hidden">
             <div className="flex items-center gap-2 font-semibold">

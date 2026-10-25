@@ -15,6 +15,7 @@
 #include "gtest/gtest.h"
 #include "NavHarness.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -215,47 +216,60 @@ TEST(MechanarGauntletProbe, SnapAndRoute)
 
     // Authored gauntlet coords from MechanarEvents.cpp.
     constexpr float SEP_X = 326.52f, SEP_Y = 13.20f, SEP_Z = 27.92f;
-    constexpr float ENTRY_X = 138.0f, ENTRY_Y = 45.0f, ENTRY_Z = 25.4f;
-    constexpr float NEAR_X = 138.0f, NEAR_Y = 48.0f, NEAR_Z = 25.4f;
-    constexpr float ADV_X = 138.0f, ADV_Y = 90.0f, ADV_Z = 26.4f;
-    constexpr float FAR_X = 138.0f, FAR_Y = 106.0f, FAR_Z = 26.4f;
+    constexpr float CAMP_X = 138.0f, CAMP_Y = 45.0f, CAMP_Z = 25.4f;
     constexpr float PATH_X = 139.54f, PATH_Y = 149.32f, PATH_Z = 25.66f;
+    // Wave spawn points (creature guids 138819/138864/138869 in the world DB) —
+    // printed as references so a coord drift in the camp is obvious against them.
+    constexpr float W1_X = 138.0f, W1_Y = 37.3f, W1_Z = 25.0f;    // Astromage, the OOC-LOS trip
+    constexpr float W2_X = 137.8f, W2_Y = 53.2f, W2_Z = 25.0f;    // Tempest-Forge Destroyer
+    constexpr float W3_X = 141.4f, W3_Y = 102.8f, W3_Z = 26.5f;   // Sunseeker Netherbinder
 
     std::printf("=== Mechanar (554) gauntlet probe ===\n");
-    std::printf("-- bridge spawn refs --\n");
-    Snap(mesh.get(), "near mob (Destroyer)", 137.8f, 53.2f, 25.0f);
-    Snap(mesh.get(), "far mob (Netherbinder)", 141.4f, 102.8f, 26.5f);
-    std::printf("-- authored gauntlet anchors --\n");
-    Snap(mesh.get(), "bridge ENTRY", ENTRY_X, ENTRY_Y, ENTRY_Z);
-    Snap(mesh.get(), "near zone", NEAR_X, NEAR_Y, NEAR_Z);
-    Snap(mesh.get(), "advance", ADV_X, ADV_Y, ADV_Z);
-    Snap(mesh.get(), "far zone", FAR_X, FAR_Y, FAR_Z);
+    std::printf("-- wave spawn refs --\n");
+    Snap(mesh.get(), "wave 1 (Astromage)", W1_X, W1_Y, W1_Z);
+    Snap(mesh.get(), "wave 2 (Destroyer)", W2_X, W2_Y, W2_Z);
+    Snap(mesh.get(), "wave 3 (Netherbinder)", W3_X, W3_Y, W3_Z);
+    std::printf("-- authored anchors --\n");
+    Snap(mesh.get(), "bridge CAMP", CAMP_X, CAMP_Y, CAMP_Z);
+    Snap(mesh.get(), "camp, west edge", 131.0f, CAMP_Y, CAMP_Z);
+    Snap(mesh.get(), "camp, east edge", 145.0f, CAMP_Y, CAMP_Z);
     Snap(mesh.get(), "Pathaleon", PATH_X, PATH_Y, PATH_Z);
 
     std::printf("-- reachability --\n");
-    RouteLog(mesh.get(), "Sepethrea -> bridge ENTRY", SEP_X, SEP_Y, SEP_Z, ENTRY_X, ENTRY_Y, ENTRY_Z);
-    RouteLog(mesh.get(), "ENTRY -> advance", ENTRY_X, ENTRY_Y, ENTRY_Z, ADV_X, ADV_Y, ADV_Z);
-    RouteLog(mesh.get(), "advance -> far zone", ADV_X, ADV_Y, ADV_Z, FAR_X, FAR_Y, FAR_Z);
-    DcNavHarness::RouteResult const entryToPath =
-        DcNavHarness::Route(mesh.get(), MAP_MECHANAR, ENTRY_X, ENTRY_Y, ENTRY_Z, PATH_X, PATH_Y, PATH_Z);
-    RouteLog(mesh.get(), "ENTRY -> Pathaleon", ENTRY_X, ENTRY_Y, ENTRY_Z, PATH_X, PATH_Y, PATH_Z);
-    DcNavHarness::RouteResult const sepToEntry =
-        DcNavHarness::Route(mesh.get(), MAP_MECHANAR, SEP_X, SEP_Y, SEP_Z, ENTRY_X, ENTRY_Y, ENTRY_Z);
+    DcNavHarness::RouteResult const sepToCamp =
+        DcNavHarness::Route(mesh.get(), MAP_MECHANAR, SEP_X, SEP_Y, SEP_Z, CAMP_X, CAMP_Y, CAMP_Z);
+    RouteLog(mesh.get(), "Sepethrea -> bridge CAMP", SEP_X, SEP_Y, SEP_Z, CAMP_X, CAMP_Y, CAMP_Z);
+    DcNavHarness::RouteResult const campToPath =
+        DcNavHarness::Route(mesh.get(), MAP_MECHANAR, CAMP_X, CAMP_Y, CAMP_Z, PATH_X, PATH_Y, PATH_Z);
+    RouteLog(mesh.get(), "CAMP -> Pathaleon", CAMP_X, CAMP_Y, CAMP_Z, PATH_X, PATH_Y, PATH_Z);
+    // The waves walk this in reverse under their own power; if it doesn't route,
+    // the camp would be waiting on a wave that can never arrive.
+    DcNavHarness::RouteResult const w3ToCamp =
+        DcNavHarness::Route(mesh.get(), MAP_MECHANAR, W3_X, W3_Y, W3_Z, CAMP_X, CAMP_Y, CAMP_Z);
+    RouteLog(mesh.get(), "wave 3 -> CAMP", W3_X, W3_Y, W3_Z, CAMP_X, CAMP_Y, CAMP_Z);
     std::printf("=====================================\n");
 
-    // Guardrails: every zone the ClearRadius fights from must be on the mesh, and
-    // the tank must be able to reach the bridge and traverse it to Pathaleon.
+    // Guardrails: the camp must be on the deck, every wave must be able to reach
+    // it, and the tank must be able to reach the camp and cross to Pathaleon.
     G3D::Vector3 tmp;
-    EXPECT_TRUE(DcNavHarness::NearestPoint(mesh.get(), ENTRY_X, ENTRY_Y, ENTRY_Z, 4.0f, 4.0f, tmp))
-        << "bridge entry off the navmesh";
-    EXPECT_TRUE(DcNavHarness::NearestPoint(mesh.get(), NEAR_X, NEAR_Y, NEAR_Z, 4.0f, 4.0f, tmp))
-        << "near zone off the navmesh";
-    EXPECT_TRUE(DcNavHarness::NearestPoint(mesh.get(), ADV_X, ADV_Y, ADV_Z, 4.0f, 4.0f, tmp))
-        << "advance point off the navmesh";
-    EXPECT_TRUE(DcNavHarness::NearestPoint(mesh.get(), FAR_X, FAR_Y, FAR_Z, 4.0f, 4.0f, tmp))
-        << "far zone off the navmesh";
-    EXPECT_TRUE(sepToEntry.reachable && sepToEntry.corridorComplete)
-        << "cannot path from Sepethrea to the bridge entry";
-    EXPECT_TRUE(entryToPath.reachable && entryToPath.corridorComplete)
-        << "cannot traverse the bridge from entry to Pathaleon";
+    EXPECT_TRUE(DcNavHarness::NearestPoint(mesh.get(), CAMP_X, CAMP_Y, CAMP_Z, 4.0f, 4.0f, tmp))
+        << "bridge camp off the navmesh";
+    EXPECT_TRUE(sepToCamp.reachable && sepToCamp.corridorComplete)
+        << "cannot path from Sepethrea to the bridge camp";
+    EXPECT_TRUE(campToPath.reachable && campToPath.corridorComplete)
+        << "cannot cross the bridge from the camp to Pathaleon";
+    EXPECT_TRUE(w3ToCamp.reachable && w3ToCamp.corridorComplete)
+        << "the far wave cannot reach the camp — it would never come to the party";
+
+    // The camp sits just PAST the wave-1 cluster and well SHORT of wave 3. Past
+    // wave 1 because an anchored event only drives out of combat and the gauntlet
+    // leaves no such gap once wave 1 is up — an anchor short of it is never reached.
+    // Short of wave 3 because the party must hold and let that wave come to it.
+    EXPECT_GT(CAMP_Y, W1_Y) << "camp is short of the wave-1 cluster — never arrived at";
+    EXPECT_LT(CAMP_Y, W3_Y - 40.0f) << "camp is too far up the bridge toward wave 3";
+    // Arriving must aggro the wave-1 Engineer/Physician (their own aggro is what
+    // activates them, and their deaths are what start wave 2).
+    float const dx = CAMP_X - W1_X, dy = CAMP_Y - W1_Y, dz = CAMP_Z - W1_Z;
+    EXPECT_LT(std::sqrt(dx * dx + dy * dy + dz * dz), 15.0f)
+        << "camp is too far from the wave-1 cluster to activate it on arrival";
 }

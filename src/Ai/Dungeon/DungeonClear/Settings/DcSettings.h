@@ -4,16 +4,22 @@
  * Accessor for DungeonClear tunables. Resolution order on every read:
  *
  *     per-run override
- *       ->  conf "DungeonClear.<Key>.Heroic"   |  heroic runs only
+ *       ->  conf "DungeonClear.<Key>.Raid"     |  raid maps only
+ *       ->  registry raidVal                   |
+ *       ->  conf "DungeonClear.<Key>.Heroic"   |  heroic-tier maps only
  *       ->  registry heroicVal                 |
  *       ->  conf "DungeonClear.<Key>"
  *       ->  registry default
  *
- * The two heroic steps apply only while the reading bot's map is a dungeon at
- * DUNGEON_DIFFICULTY_HEROIC, and only for rows that opt in (a "<Key>.Heroic"
- * conf line, or a non-sentinel `heroicVal` in the registry). A row that opts out
+ * The two heroic steps apply only while the reading bot's map is heroic-tier
+ * (Map::IsHeroic — never a raw difficulty compare, which collides with 25-man
+ * normal), and only for rows that opt in (a "<Key>.Heroic" conf line, or a
+ * non-sentinel `heroicVal` in the registry). The two raid steps sit above them
+ * and apply on any raid map, for rows with a "<Key>.Raid" line or a registry
+ * `raidVal` — the raid profile is the handful of numbers that must scale with
+ * 10-40 members (spread, recovery budgets). A row that opts out of both layers
  * — nearly all of them — resolves through the identical code path it did before
- * the layer existed, on BOTH difficulties. Heroic trash is a different game from
+ * the layers existed, everywhere. Heroic trash is a different game from
  * normal trash (every mob elite, packs that end a run), and the pull safety
  * profile has to change with it; everything else stays one value.
  *

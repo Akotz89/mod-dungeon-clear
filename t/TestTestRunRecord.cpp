@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "Ai/Dungeon/DungeonClear/DcRunState.h"
 #include "TestRun/DcTestRunRecord.h"
 
 using DcTestRunRecord::CompEntry;
@@ -176,9 +177,61 @@ TEST(DcTestRunRecordTest, BossRosterSerializesInProgressionOrder)
               std::string::npos);
 }
 
-TEST(DcTestRunRecordTest, SchemaIsTen)
+TEST(DcTestRunRecordTest, SchemaIsThirteen)
 {
-    EXPECT_NE(ToJsonl(SampleRecord()).find("\"schema\":10"), std::string::npos);
+    // 12: added combatHolders[].trigger, and with it a change of meaning in the
+    // sibling `legitimate` field — a trigger creature now sinks the verdict.
+    // 13: added the scenario block (scenario/scenarioOf/focus/successBy/
+    // tailPending/extras).
+    EXPECT_NE(ToJsonl(SampleRecord()).find("\"schema\":13"), std::string::npos);
+    EXPECT_NE(ToJsonl(SampleRecord()).find("\"size\":"), std::string::npos);
+}
+
+// A full-dungeon run still carries the scenario block, empty — readers key on
+// the schema, never on a field's presence.
+TEST(DcTestRunRecordTest, PlainRunHasAnEmptyScenarioBlock)
+{
+    std::string const line = ToJsonl(SampleRecord());
+    EXPECT_NE(line.find("\"scenario\":\"\",\"scenarioOf\":\"\",\"focus\":[],"
+                        "\"successPredicate\":\"\",\"successBy\":\"\","
+                        "\"tailPending\":false,\"extras\":{}"),
+              std::string::npos)
+        << line;
+}
+
+TEST(DcTestRunRecordTest, ScenarioBlockAndExtrasSerialize)
+{
+    Record r = SampleRecord();
+    r.dungeon = "kara-chess";
+    r.scenario = "kara-chess";
+    r.scenarioOf = "kara";
+    r.focus = {22520};
+    r.successPredicate = "instanceData(9)==3";
+    r.successBy = "grace";
+    r.tailPending = true;
+    r.extras.push_back({"attempts", "2", true});
+    r.extras.push_back({"material", "12v9", false});
+    r.extras.push_back({"looted", "yes \"maybe\"", false});
+    // A producer that flagged garbage as numeric degrades to a string.
+    r.extras.push_back({"bogus", "12abc", true});
+
+    std::string const line = ToJsonl(r);
+    EXPECT_NE(line.find("\"scenario\":\"kara-chess\",\"scenarioOf\":\"kara\","
+                        "\"focus\":[22520],\"successPredicate\":\"instanceData(9)==3\","
+                        "\"successBy\":\"grace\",\"tailPending\":true,"
+                        "\"extras\":{\"attempts\":2,\"material\":\"12v9\","
+                        "\"looted\":\"yes \\\"maybe\\\"\",\"bogus\":\"12abc\"}"),
+              std::string::npos)
+        << line;
+}
+
+TEST(DcTestRunRecordTest, JsonNumberGrammar)
+{
+    using DcTestRunRecord::IsJsonNumber;
+    for (char const* ok : {"0", "12", "-3", "1.5", "-0.25", "1e9", "2.5E-3"})
+        EXPECT_TRUE(IsJsonNumber(ok)) << ok;
+    for (char const* bad : {"", "-", "01", "1.", ".5", "1e", "nan", "inf", "12abc", "+1"})
+        EXPECT_FALSE(IsJsonNumber(bad)) << bad;
 }
 
 // The gear ceiling a run was rolled to. Two runs of the same dungeon are only
@@ -323,4 +376,48 @@ TEST(DcTestRunRecordTest, DefaultCapturePath)
     // The env override is exercised operationally; here just pin the default.
     if (!std::getenv("DC_TESTRUNS_FILE"))
         EXPECT_EQ(DcTestRunRecord::CapturePath(), "dc_testruns.jsonl");
+}
+
+// ---- the event -> harness telemetry seam on DcRunState (schema 13) ---------------
+
+TEST(DcRunStateTelemetryTest, ExtrasOverwriteInPlaceAndFormatNumbers)
+{
+    DcRunState rs;
+    rs.SetTestExtraNum("attempts", 1);
+    rs.SetTestExtra("material", "16v16");
+    rs.SetTestExtraNum("gameTimeS", 93.5);
+    rs.SetTestExtraNum("attempts", 2);   // overwrite keeps the slot
+    rs.AddTestExtra("losses");           // absent counter starts at 0
+    rs.AddTestExtra("losses");
+
+    ASSERT_EQ(rs.testExtras.size(), 4u);
+    EXPECT_EQ(rs.testExtras[0].key, "attempts");
+    EXPECT_EQ(rs.testExtras[0].value, "2");
+    EXPECT_TRUE(rs.testExtras[0].numeric);
+    EXPECT_EQ(rs.testExtras[1].value, "16v16");
+    EXPECT_FALSE(rs.testExtras[1].numeric);
+    EXPECT_EQ(rs.testExtras[2].value, "93.5");
+    EXPECT_EQ(rs.testExtras[3].key, "losses");
+    EXPECT_EQ(rs.testExtras[3].value, "2");
+}
+
+TEST(DcRunStateTelemetryTest, TelemetrySurvivesResetUntilExplicitlyCleared)
+{
+    // The run's own success path (DisableDungeonClear) Resets the struct in
+    // the same tick the event finished; the harness samples at 1 Hz and must
+    // still see the final values.
+    DcRunState rs;
+    rs.enabled = true;
+    rs.BumpEventProgress();
+    rs.BumpEventProgress();
+    rs.SetTestExtra("looted", "true");
+    rs.Reset();
+    EXPECT_FALSE(rs.enabled);
+    EXPECT_EQ(rs.eventProgressSeq, 2u);
+    ASSERT_EQ(rs.testExtras.size(), 1u);
+    EXPECT_EQ(rs.testExtras[0].key, "looted");
+
+    rs.ClearTestTelemetry();
+    EXPECT_EQ(rs.eventProgressSeq, 0u);
+    EXPECT_TRUE(rs.testExtras.empty());
 }

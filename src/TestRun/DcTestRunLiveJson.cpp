@@ -46,7 +46,25 @@ namespace DcTestRunLive
               << ",\"concurrent\":" << plan.concurrent
               << ",\"heroic\":" << (plan.heroic ? "true" : "false")
               << ",\"state\":\"" << EscapeJson(plan.state) << '"'
-              << ",\"elapsedS\":" << plan.elapsedS << '}';
+              << ",\"elapsedS\":" << plan.elapsedS
+              << ",\"endless\":" << (plan.endless ? "true" : "false")
+              << ",\"paused\":" << (plan.paused ? "true" : "false")
+              << ",\"nextPick\":\"" << EscapeJson(plan.nextPick) << '"'
+              << ",\"resetHoldUntil\":" << plan.resetHoldUntil
+              << ",\"pool\":[";
+            for (std::size_t e = 0; e < plan.pool.size(); ++e)
+            {
+                PlanPoolEntry const& entry = plan.pool[e];
+                if (e)
+                    s << ',';
+                s << "{\"token\":\"" << EscapeJson(entry.token) << '"'
+                  << ",\"heroic\":" << (entry.heroic ? "true" : "false")
+                  << ",\"size\":" << entry.size
+                  << ",\"launched\":" << entry.launched
+                  << ",\"ok\":" << entry.succeeded
+                  << ",\"fail\":" << entry.failed << '}';
+            }
+            s << "]}";
         }
         s << "],\"runs\":[";
         for (std::size_t r = 0; r < runs.size(); ++r)

@@ -36,7 +36,7 @@ namespace DcTestRoster
     {
         Ok,
         Empty,       // nothing but separators/whitespace
-        WrongCount,  // not exactly kPartySize names
+        WrongCount,  // outside the kMinPartySize..kMaxPartySize bounds
         Duplicate    // the same character named twice
     };
 

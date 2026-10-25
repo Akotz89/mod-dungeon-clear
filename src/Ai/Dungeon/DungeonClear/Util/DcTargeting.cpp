@@ -28,7 +28,9 @@
 #include <vector>
 #include "AttackersValue.h"
 #include "CellImpl.h"
+#include "CombatManager.h"
 #include "Creature.h"
+#include "TemporarySummon.h"
 #include "CreatureGroups.h"
 #include "GameObject.h"
 #include "GridNotifiers.h"
@@ -53,8 +55,11 @@
 #include "Chat.h"
 #include "ServerFacade.h"
 #include "Timer.h"
+#include "Util/DcPlayerbotsConfig.h"
 #include "World.h"
 #include "Ai/Dungeon/DungeonClear/Data/BossPullbackRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/DcNeverTargetRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/DcTargetExclusionRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonEventRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/RoomAggroRegistry.h"
@@ -204,6 +209,10 @@ namespace
         minX -= broadWidth; maxX += broadWidth;
         minY -= broadWidth; maxY += broadWidth;
 
+        // One map-keyed gate for the whole scan; free on every map with no rows.
+        uint32 const mapId = bot->GetMapId();
+        bool const excluded = DcTargetExclusionRegistry::HasRowsFor(mapId);
+
         Unit* best = nullptr;
         float bestDistFromBot = std::numeric_limits<float>::max();
         // Scan-cost telemetry for the heroic band widening (plan §C.4): how many
@@ -223,6 +232,32 @@ namespace
             // fights, so walking over to melee it is pure detour. See
             // DcEngageGeometry::IsDisplayedDead.
             if (DcEngageGeometry::IsDisplayedDead(u))
+                continue;
+            // A scripted never-dies mob is not a blocker either: pulling it is a
+            // fight that can never end in a kill, and the corridor scan would
+            // re-pick it every tick. The FarTargets set already drops these, but
+            // this scan falls back to the stock `possible targets` value when
+            // FarTargets is empty, so the check is repeated here.
+            if (DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), u->GetEntry(),
+                                                     u->GetPositionX(), u->GetPositionY()))
+                continue;
+            // Nor is an add a live boss summoned for his own encounter (Moroes'
+            // dinner guests on the dais): it comes with the boss, and pulling it
+            // pulls him (tr-20260926-174359-2 picked Baron Rafe Dreuger).
+            if (DcTargeting::IsBossSummon(u))
+                continue;
+            // Nor is a creature the run is currently BARRED from engaging. The
+            // exclusion registry reached the stock combat engine's target pickers
+            // (DungeonClearCombatStrategy::AppendTargetExclusions) but not this
+            // scan, so on map 469 the bar stopped the raid SHOOTING Firemaw while
+            // this scan still nominated him as the corridor blocker and the pull
+            // pipeline walked the tank into his aggro — which is the whole harm
+            // the row exists to prevent (tp-20260828-132333-1). Asked as a TANK
+            // pick because that is what this scan decides: whether to walk over
+            // there. Only rows carrying `alsoTank` — the "do not go there" ones —
+            // answer yes, so Razorgore's hold-him carve-out is untouched.
+            if (excluded && DcTargetExclusionRegistry::IsExcluded(bot, mapId, u->GetEntry(),
+                                                                 /*forTank*/ true))
                 continue;
 
             float const ux = u->GetPositionX();
@@ -293,6 +328,24 @@ namespace
     // the reason FindBlockingTrashOnPath documents at length: the mesh is baked
     // without doors, so the corridor otherwise runs straight through them.
     //
+    // FROM THE FOLLOWER CURSOR, not from segment 0. On a route the pathfinder
+    // built from the bot's own position the two are the same thing, which is why
+    // reading from index 0 went unnoticed for so long. On an AUTHORED ANCHOR
+    // route they are not: segment 0 is a fixed world point, hundreds of yards
+    // behind a raid deep into the route. Starting there synthesises a leg from
+    // the bot BACK to the route start and scans it as if it were the way
+    // forward.
+    //
+    // On map 469, whose route folds back over itself, that phantom leg runs from
+    // the upper suppression room down to Vaelastrasz's chamber and passes ~10yd
+    // from Firemaw, well inside DC_CORRIDOR_Z_BAND of it. So the scan named
+    // FIREMAW as the corridor blocker, the pull pipeline committed him, and the
+    // tank walked at a boss it had no navmesh route to — straight up through the
+    // ceiling (tp-20260828-132333-1, runs 2 and 5). Same defect the at-boss
+    // trigger carried on map 601; see the note in AzjolNerubEvents.cpp.
+    // DungeonPathFollower::SeedCursor is the other half of the same fix: it
+    // keeps the cursor itself off segment 0 after a rebuild.
+    //
     // CRITICAL: chain each segment's `polyline` points, NOT the segment endpoints
     // (`seg.ex/ey`). The primary producer (LongRangePathfinder) emits the ENTIRE
     // winding route as ONE PathSegment whose ex/ey is only the final endpoint, so
@@ -306,10 +359,16 @@ namespace
     // cost a whole point of geometry.
     std::vector<G3D::Vector3> BuildRouteWindow(Player* bot,
                                                std::vector<PathSegment> const& segments,
-                                               float maxLookAhead)
+                                               float maxLookAhead,
+                                               DungeonFollowerState const& cursor)
     {
         std::vector<G3D::Vector3> window;
         if (!bot || segments.empty())
+            return window;
+
+        // A cursor past the end means the route is finished; there is no forward
+        // corridor left to scan.
+        if (cursor.segmentIdx >= segments.size())
             return window;
 
         auto const doors =
@@ -321,8 +380,9 @@ namespace
 
         float accumulated = 0.0f;
         bool stop = false;
-        for (PathSegment const& seg : segments)
+        for (size_t segIdx = cursor.segmentIdx; segIdx < segments.size(); ++segIdx)
         {
+            PathSegment const& seg = segments[segIdx];
             // Anchored segments collapse to a single polyline point; non-anchored
             // segments carry the full smoothed corridor. Fall back to the endpoint
             // only if a segment somehow has no polyline at all — built lazily so
@@ -332,8 +392,14 @@ namespace
                 fallback.emplace_back(seg.ex, seg.ey, seg.ez);
             std::vector<G3D::Vector3> const& pts = seg.polyline.empty() ? fallback : seg.polyline;
 
-            for (G3D::Vector3 const& pt : pts)
+            // Only the cursor's OWN segment starts partway in; every later one is
+            // walked whole.
+            size_t const firstPt = (segIdx == cursor.segmentIdx && !seg.polyline.empty())
+                                       ? std::min<size_t>(cursor.pointIdx, pts.size())
+                                       : 0;
+            for (size_t p = firstPt; p < pts.size(); ++p)
             {
+                G3D::Vector3 const& pt = pts[p];
                 // By VALUE: push_back below reallocates, and a reference into
                 // the vector would dangle the moment it does.
                 G3D::Vector3 const prev = window.back();
@@ -504,28 +570,32 @@ Unit* DcTargeting::FindBlockingTrashOnPath(Player* bot,
                                                 std::vector<PathSegment> const& segments,
                                                 float maxLookAhead,
                                                 float corridorWidth,
-                                                GuidVector const& candidates)
+                                                GuidVector const& candidates,
+                                                DungeonFollowerState const& cursor)
 {
     if (!bot || segments.empty() || candidates.empty())
         return nullptr;
 
-    // The scanned corridor is the first `maxLookAhead` yards of the smoothed
-    // route, truncated at the first closed door — see BuildRouteWindow for why
-    // both of those matter and why it chains polyline points rather than
-    // segment endpoints.
-    return PickBlockingTrash(bot, WindowSegments(BuildRouteWindow(bot, segments, maxLookAhead)),
+    // The scanned corridor is the next `maxLookAhead` yards of the smoothed
+    // route FROM THE CURSOR, truncated at the first closed door — see
+    // BuildRouteWindow for why each of those matters and why it chains polyline
+    // points rather than segment endpoints.
+    return PickBlockingTrash(bot,
+                             WindowSegments(BuildRouteWindow(bot, segments, maxLookAhead, cursor)),
                              corridorWidth, candidates);
 }
 Unit* DcTargeting::FindEnRouteAggroPack(Player* bot, AiObjectContext* ctx,
                                         std::vector<PathSegment> const& segments,
-                                        float maxLookAhead)
+                                        float maxLookAhead,
+                                        DungeonFollowerState const& cursor)
 {
     if (!bot || !ctx || segments.empty())
         return nullptr;
     if (!DcEngageGeometry::EnRouteSweepApplies(bot))
         return nullptr;
 
-    std::vector<G3D::Vector3> const window = BuildRouteWindow(bot, segments, maxLookAhead);
+    std::vector<G3D::Vector3> const window =
+        BuildRouteWindow(bot, segments, maxLookAhead, cursor);
     if (window.size() < 2)
         return nullptr;
 
@@ -572,7 +642,11 @@ Unit* DcTargeting::FindEnRouteAggroPack(Player* bot, AiObjectContext* ctx,
                                          return true;
                                      if (!AttackersValue::IsPossibleTarget(u, bot))
                                          return true;
-                                     if (IsDungeonBossEntry(ctx, u->GetEntry()))
+                                     if (DcNeverTargetRegistry::IsNeverTarget(mapId, u->GetEntry(),
+                                                                              u->GetPositionX(), u->GetPositionY()))
+                                         return true;
+                                     if (IsDungeonBossEntry(ctx, u->GetEntry()) ||
+                                         IsBossSummon(u))
                                          return true;
                                      return RoomAggroRegistry::Find(mapId, u->GetEntry()) != nullptr;
                                  }),
@@ -693,9 +767,11 @@ Unit* DcTargeting::FindPullTarget(PlayerbotAI* botAI, DungeonBossInfo const& nex
     Unit* trash = nullptr;
     ChunkedPathfinder::Result const& path =
         context->GetValue<ChunkedPathfinder::Result&>(DcKey::LongPath)->Get();
+    DungeonFollowerState const& cursor =
+        context->GetValue<DungeonFollowerState&>(DcKey::FollowerState)->Get();
     if (path.reachable && !path.segments.empty())
     {
-        trash = FindBlockingTrashOnPath(bot, path.segments, kLookAhead, kWidth, candidates);
+        trash = FindBlockingTrashOnPath(bot, path.segments, kLookAhead, kWidth, candidates, cursor);
         // En-route sweep: prefer the pack the route's aggro reaches FIRST over the
         // one merely standing on the centre line. Returns null in heroics, so
         // this is the historical pick unless swept.
@@ -707,7 +783,8 @@ Unit* DcTargeting::FindPullTarget(PlayerbotAI* botAI, DungeonBossInfo const& nex
         // (its aggro is spent — nothing to avoid). Letting a fresh sweep pick
         // outrank it would walk the tank off toward a quiet room while a follower
         // is being clawed behind it.
-        if (Unit* const swept = FindEnRouteAggroPack(bot, context, path.segments, kLookAhead))
+        if (Unit* const swept =
+                FindEnRouteAggroPack(bot, context, path.segments, kLookAhead, cursor))
             if (!trash || !trash->IsInCombat())
                 trash = swept;
     }
@@ -733,10 +810,10 @@ Unit* DcTargeting::FindPullTarget(PlayerbotAI* botAI, DungeonBossInfo const& nex
     // collection). Deliberately NOT applied to the FindBlockingTrash* scans:
     // in plain mode, walking in on a boss in the corridor band degenerates to
     // a normal engage, which is acceptable — only the camp-drag is wrong.
-    if (IsDungeonBossEntry(context, trash->GetEntry()))
+    if (IsDungeonBossEntry(context, trash->GetEntry()) || IsBossSummon(trash))
     {
-        DC_PULL_DEBUG("[DC:{}] pull target vetoed — {} ({}) is a dungeon boss, "
-                      "at-boss path owns it",
+        DC_PULL_DEBUG("[DC:{}] pull target vetoed — {} ({}) is a dungeon boss or "
+                      "his summoned add, at-boss path owns it",
                       bot->GetName(), trash->GetName(), trash->GetGUID().ToString());
         return nullptr;
     }
@@ -767,6 +844,19 @@ bool DcTargeting::IsDungeonBossEntry(AiObjectContext* ctx, uint32 entry)
         if (boss.entry == entry)
             return true;
     return false;
+}
+bool DcTargeting::IsBossSummon(Unit const* u)
+{
+    Creature const* c = u ? u->ToCreature() : nullptr;
+    if (!c || !c->IsSummon())
+        return false;
+    Unit* const summoner = c->ToTempSummon()->GetSummonerUnit();
+    Creature const* boss = summoner ? summoner->ToCreature() : nullptr;
+    if (!boss || !boss->IsAlive())
+        return false;
+    CreatureTemplate const* info = boss->GetCreatureTemplate();
+    return boss->IsDungeonBoss() || boss->isWorldBoss() ||
+           (info && info->rank == CREATURE_ELITE_WORLDBOSS);
 }
 Unit* DcTargeting::GetPullTarget(PlayerbotAI* botAI)
 {
@@ -811,7 +901,7 @@ bool DcTargeting::IsStickyPullTargetValid(Player* bot, AiObjectContext* ctx, Uni
     // Mirror the fresh scan's boss veto. The governor can only latch what the
     // scan returned, so a boss should never be sticky — but the invariant
     // (a boss is NEVER a pull target) is cheap to keep airtight locally.
-    if (IsDungeonBossEntry(ctx, u->GetEntry()))
+    if (IsDungeonBossEntry(ctx, u->GetEntry()) || IsBossSummon(u))
         return false;
 
     // A pack a prior pull gave up on is handed to the normal walk-in engage;
@@ -820,6 +910,11 @@ bool DcTargeting::IsStickyPullTargetValid(Player* bot, AiObjectContext* ctx, Uni
     DcPullContext const& pull =
         ctx->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
     if (!pull.abortTarget.IsEmpty() && u->GetGUID() == pull.abortTarget)
+        return false;
+
+    // Same for a room-trash pack with no clean lane while a cleaner one is left:
+    // it is pulled last (see NearestRoomTrash), so the latch must let go of it.
+    if (IsRoomLaneRefused(bot, ctx, u->GetGUID()) && HasUnrefusedRoomTrash(bot, ctx, u))
         return false;
 
     if (bot->GetExactDist2d(u) > kPullLookAhead + kPullStickySlack)
@@ -845,7 +940,7 @@ Unit* DcTargeting::FindNearestReachableHostile(Player* bot)
 
     // Match the cap PullRequestAction enforces — anything past this gets
     // silently rejected by the pull pipeline, so don't even consider it.
-    float const maxPullDistance = sPlayerbotAIConfig.reactDistance * 3.0f;
+    float const maxPullDistance = DC_PB_CONFIG(ReactDistance, reactDistance) * 3.0f;
 
     // Collect candidate hostiles from every loaded creature on the map, sort
     // by distance, then take the first one we can actually path to AND that
@@ -870,6 +965,11 @@ Unit* DcTargeting::FindNearestReachableHostile(Player* bot)
         // downstream and the tank would just stand there.
         if (!AttackersValue::IsPossibleTarget(c, bot))
             continue;
+        // A scripted never-dies mob would be picked here forever (see
+        // DcNeverTargetRegistry) — this scan builds its own candidate list from
+        // the creature store, so the FarTargets filter never sees it.
+        if (DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), c->GetEntry(), c->GetPositionX(), c->GetPositionY()))
+            continue;
         candidates.emplace_back(dist, c);
     }
     std::sort(candidates.begin(), candidates.end(),
@@ -884,41 +984,76 @@ Unit* DcTargeting::FindNearestReachableHostile(Player* bot)
     return nullptr;
 }
 
-Unit* DcTargeting::LeaderFightAnchor(Player* bot, Player* leader, Position& anchorPos)
+void DcTargeting::CollectCombatHolders(Unit* member, std::vector<Unit*>& out)
+{
+    if (!member)
+        return;
+
+    std::unordered_set<uint64> seen;
+    for (Unit* const u : out)
+        if (u)
+            seen.insert(u->GetGUID().GetRawValue());
+
+    auto const collect = [&out, &seen](Unit* u)
+    {
+        if (u && seen.insert(u->GetGUID().GetRawValue()).second)
+            out.push_back(u);
+    };
+
+    for (auto const& kv : member->GetCombatManager().GetPvECombatRefs())
+        if (CombatReference* const ref = kv.second)
+            collect(ref->GetOther(member));
+    for (Unit* const attacker : member->getAttackers())
+        collect(attacker);
+    collect(member->GetVictim());
+}
+
+Unit* DcTargeting::LeaderFightAnchor(Player* bot, AiObjectContext* ctx, Player* leader,
+                                     Position& anchorPos)
 {
     if (!bot || !leader)
         return nullptr;
 
-    // Nearest live unit the leader is meleeing — the pack it is holding. LOS-blind
-    // on purpose (the reconnect exists precisely for a fight the bot can't see yet).
-    // getAttackers() covers the melee pack; the leader's victim is the fallback for
-    // an all-ranged grab. Mirrors DungeonClearAssistCampActionBase's anchor scan.
+    // Nearest live unit holding the leader in combat — the pack it is fighting.
+    // LOS-blind on purpose (the reconnect exists precisely for a fight the bot
+    // can't see yet). CollectCombatHolders covers the melee pack, the leader's
+    // victim for an all-ranged grab, AND the standoff tagger that appears in
+    // neither. Mirrors DungeonClearAssistCampActionBase's anchor scan.
+    std::vector<Unit*> holders;
+    DcTargeting::CollectCombatHolders(leader, holders);
+
     Unit* target = nullptr;
     float bestDist = 0.0f;
-    for (Unit* a : leader->getAttackers())
+    for (Unit* a : holders)
     {
         if (!a || !a->IsAlive() || a->GetMapId() != bot->GetMapId())
             continue;
         if (!bot->IsValidAttackTarget(a))
             continue;
         float const d = bot->GetExactDist2d(a);
-        if (!target || d < bestDist)
-        {
-            target = a;
-            bestDist = d;
-        }
-    }
-    if (!target)
-    {
-        Unit* const victim = leader->GetVictim();
-        if (victim && victim->IsAlive() && victim->GetMapId() == bot->GetMapId() &&
-            bot->IsValidAttackTarget(victim))
-            target = victim;
+        if (target && d >= bestDist)
+            continue;
+        // Cheapest last: only a candidate that would win the rank pays for the
+        // level probe (same-level answers without touching Detour).
+        if (!DungeonClearMath::IsRegroupAnchorCandidate(
+                bot->GetExactDist(a), DC_ENGAGEMENT_RADIUS,
+                DcTickMemoAccess::LevelReachable(bot, ctx, a)))
+            continue;
+        target = a;
+        bestDist = d;
     }
 
     anchorPos = target ? target->GetPosition() : leader->GetPosition();
     return target;
 }
+// Radius of the grid fallback below. Every caller of the two scans asks about a
+// boss the party is approaching or standing on, and the widest of those gates is
+// Advance's DC_BOSS_GRID_LOADED_RANGE (150yd) — the range inside which "not in
+// the store" is allowed to mean "not spawned". A little headroom past it keeps
+// the fallback authoritative wherever the store scan is trusted, without turning
+// either helper into a whole-map query.
+constexpr float DC_SUMMON_SCAN_RANGE = 200.0f;
+
 Creature* DcTargeting::FindLiveCreatureOnMap(Player* bot, uint32 entry)
 {
     if (!bot)
@@ -933,7 +1068,25 @@ Creature* DcTargeting::FindLiveCreatureOnMap(Player* bot, uint32 entry)
         if (c && c->GetEntry() == entry && c->IsAlive())
             return c;
     }
-    return nullptr;
+    // TempSummons are invisible to the store walked above: Creature::AddToWorld
+    // only inserts into _creatureBySpawnIdStore when m_spawnId is set, and a
+    // script summon has m_spawnId == 0. So a boss the instance script conjures
+    // rather than spawns from the `creature` table reads as "not on this map"
+    // forever, no matter how close the party stands to it.
+    //
+    // Molten Core's finale is entirely this shape and neither half has a
+    // `creature` row: instance_molten_core's SummonMajordomoExecutus() conjures
+    // Majordomo (12018) the moment bosses 0-7 are DONE, and Majordomo's own
+    // gossip conjures Ragnaros (11502). Blackrock Depths' Nefarian (11583) is
+    // the same. Run tr-20260827-145857-1 died on it: the party stood 76yd from a
+    // Majordomo that had been summoned 3 minutes earlier while Advance repeated
+    // "not in creature store at 76yd (<=150, grid loaded) -> stalling: genuinely
+    // not spawned".
+    //
+    // A grid search DOES see a summon, so fall back to one. It runs only when
+    // the store scan missed — which for a spawned boss means the run was about
+    // to stall anyway — so the steady state pays nothing.
+    return bot->FindNearestCreature(entry, DC_SUMMON_SCAN_RANGE, /*alive*/ true);
 }
 Creature* DcTargeting::GetLiveBoss(Player* bot, AiObjectContext* ctx, uint32 entry)
 {
@@ -971,7 +1124,17 @@ bool DcTargeting::IsCreaturePresentOnMap(Player* bot, uint32 entry)
         if (c && c->GetEntry() == entry)
             return true;
     }
-    return false;
+    // Same TempSummon blind spot as FindLiveCreatureOnMap — see the note there.
+    // This is the scan Advance's not-spawned stall consults, so without the
+    // fallback a script-summoned boss hard-stalls the run standing next to it.
+    //
+    // Two queries, because this helper's job is to tell "missing" from "killed"
+    // and NearestCreatureEntryWithLiveStateInObjectRangeCheck matches the alive
+    // flag EXACTLY (`u->IsAlive() == i_alive`) rather than treating it as a
+    // floor — so a single alive=false call would find corpses and miss the live
+    // boss. Live first: that is the case every caller is really asking about.
+    return bot->FindNearestCreature(entry, DC_SUMMON_SCAN_RANGE, /*alive*/ true) != nullptr ||
+           bot->FindNearestCreature(entry, DC_SUMMON_SCAN_RANGE, /*alive*/ false) != nullptr;
 }
 bool DcTargeting::HasPendingSummonEvent(Player* bot, AiObjectContext* ctx, uint32 bossEntry)
 {
@@ -983,7 +1146,7 @@ bool DcTargeting::HasPendingSummonEvent(Player* bot, AiObjectContext* ctx, uint3
 
     auto const& cleared =
         ctx->GetValue<std::unordered_set<uint32>&>(DcKey::ClearedAnchors)->Get();
-    for (DungeonEvent const* ev : DungeonEventRegistry::Conditional(map->GetId(), map->GetDifficulty()))
+    for (DungeonEvent const* ev : DungeonEventRegistry::Conditional(map->GetId(), DcDifficulty::Of(map)))
     {
         if (ev->panelGatesBossEntry != bossEntry)
             continue;
@@ -1156,29 +1319,182 @@ float DcTargeting::ActiveRoomSkirt(Player* bot, AiObjectContext* ctx)
 
     return IsRoomClearActive(bot, ctx) ? skirt : 0.0f;
 }
+RoomAggroBoss const* DcTargeting::ActiveRoomCampBox(Player* bot, AiObjectContext* ctx)
+{
+    if (!bot || !ctx)
+        return nullptr;
+
+    // Same cheap-gates-first order as ActiveRoomSkirt.
+    std::optional<DungeonBossInfo> next =
+        ctx->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)->Get();
+    if (!next.has_value())
+        return nullptr;
+    RoomAggroBoss const* room = RoomAggroRegistry::Find(bot->GetMapId(), next->entry);
+    if (!room || !room->hasCampBox)
+        return nullptr;
+
+    return IsRoomClearActive(bot, ctx) ? room : nullptr;
+}
+namespace
+{
+    // The live units of "dungeon clear room trash remaining", in list order.
+    std::vector<Unit*> LiveRoomTrash(Player* bot, AiObjectContext* ctx)
+    {
+        std::vector<Unit*> live;
+        for (ObjectGuid const guid :
+             ctx->GetValue<GuidVector>(DcKey::RoomTrashRemaining)->Get())
+        {
+            Unit* u = ObjectAccessor::GetUnit(*bot, guid);
+            if (u && u->IsAlive())
+                live.push_back(u);
+        }
+        return live;
+    }
+
+    // The refusal list was measured against the room as it stood; drop it once a
+    // kill has changed that room (DungeonClearMath::ShouldDropLaneRefusals).
+    DcPullContext& PrunedLaneRefusals(AiObjectContext* ctx, std::size_t liveNow)
+    {
+        DcPullContext& pull = ctx->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+        if (!pull.laneRefused.empty() &&
+            DungeonClearMath::ShouldDropLaneRefusals(static_cast<uint32>(liveNow),
+                                                     pull.laneRefusedLive))
+        {
+            pull.laneRefused.clear();
+            pull.laneRefusedLive = 0;
+        }
+        return pull;
+    }
+
+    bool InLaneRefused(DcPullContext const& pull, ObjectGuid guid)
+    {
+        return std::find(pull.laneRefused.begin(), pull.laneRefused.end(), guid) !=
+               pull.laneRefused.end();
+    }
+
+    // The room's ordering rules for the next boss: off-level packs last
+    // (RoomAggroBoss::detourReachable) and the boss-side ring last of all
+    // (bossSideLastRadius, `boss` set only when there is a ring and a live boss).
+    struct RoomPickOrder
+    {
+        bool offLevelLast = false;
+        float bossSideLast = 0.0f;
+        Creature* boss = nullptr;
+
+        bool InRing(Unit const* u) const
+        {
+            return boss && boss->GetExactDist2d(u) < bossSideLast;
+        }
+    };
+
+    RoomPickOrder RoomPickOrderFor(Player* bot, AiObjectContext* ctx)
+    {
+        RoomPickOrder order;
+        if (std::optional<DungeonBossInfo> const next =
+                ctx->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)->Get())
+            if (RoomAggroBoss const* const room = RoomAggroRegistry::Find(bot->GetMapId(), next->entry))
+            {
+                order.offLevelLast = room->detourReachable;
+                order.bossSideLast = room->bossSideLastRadius;
+                if (order.bossSideLast > 0.0f)
+                    order.boss = DcTargeting::GetLiveBoss(bot, ctx, next->entry);
+            }
+        return order;
+    }
+}
+
 Unit* DcTargeting::NearestRoomTrash(Player* bot, AiObjectContext* ctx)
 {
     if (!bot || !ctx)
         return nullptr;
 
-    GuidVector const& remaining =
-        ctx->GetValue<GuidVector>(DcKey::RoomTrashRemaining)->Get();
+    std::vector<Unit*> const live = LiveRoomTrash(bot, ctx);
+    DcPullContext const& pull = PrunedLaneRefusals(ctx, live.size());
 
-    Unit* best = nullptr;
-    float bestDist = std::numeric_limits<float>::max();
-    for (ObjectGuid const guid : remaining)
+    // A room whose off-level packs count however long their route is
+    // (RoomAggroBoss::detourReachable) pulls them last: a balcony straight
+    // overhead is "nearest" on the 2D line and a ramp walk away.
+    // A boss-side ring (RoomAggroBoss::bossSideLastRadius) pulls the packs flanking
+    // the boss after everything else, refused packs included (PickRoomTrashIndex).
+    RoomPickOrder const order = RoomPickOrderFor(bot, ctx);
+
+    std::vector<float> dist;
+    std::vector<bool> refused;
+    std::vector<bool> ring;
+    dist.reserve(live.size());
+    refused.reserve(live.size());
+    ring.reserve(live.size());
+    for (Unit* u : live)
     {
-        Unit* u = ObjectAccessor::GetUnit(*bot, guid);
-        if (!u || !u->IsAlive())
-            continue;
-        float const d = bot->GetExactDist2d(u);
-        if (d < bestDist)
-        {
-            best = u;
-            bestDist = d;
-        }
+        dist.push_back(DungeonClearMath::RoomTrashPickDistance(
+            bot->GetExactDist2d(u), u->GetPositionZ() - bot->GetPositionZ(),
+            DC_Z_LEVEL_TOLERANCE, order.offLevelLast,
+            order.boss ? order.boss->GetExactDist2d(u) : -1.0f, order.bossSideLast));
+        refused.push_back(InLaneRefused(pull, u->GetGUID()));
+        ring.push_back(order.InRing(u));
     }
-    return best;
+    int const idx = DungeonClearMath::PickRoomTrashIndex(dist, refused, ring);
+    return idx >= 0 ? live[static_cast<std::size_t>(idx)] : nullptr;
+}
+
+void DcTargeting::RefuseRoomLane(Player* bot, AiObjectContext* ctx, Unit* trash,
+                                 float packRadius)
+{
+    if (!bot || !ctx || !trash)
+        return;
+
+    std::vector<Unit*> const live = LiveRoomTrash(bot, ctx);
+    DcPullContext& pull = PrunedLaneRefusals(ctx, live.size());
+    auto refuse = [&](Unit* u)
+    {
+        if (!InLaneRefused(pull, u->GetGUID()))
+            pull.laneRefused.push_back(u->GetGUID());
+    };
+    refuse(trash);
+    for (Unit* u : live)
+        if (u->GetExactDist2d(trash) <= packRadius &&
+            std::fabs(u->GetPositionZ() - trash->GetPositionZ()) <= DC_Z_LEVEL_TOLERANCE)
+            refuse(u);
+    pull.laneRefusedLive = static_cast<uint32>(live.size());
+}
+
+bool DcTargeting::HasUnrefusedRoomTrash(Player* bot, AiObjectContext* ctx, Unit* except)
+{
+    if (!bot || !ctx)
+        return false;
+
+    std::vector<Unit*> const live = LiveRoomTrash(bot, ctx);
+    DcPullContext const& pull = PrunedLaneRefusals(ctx, live.size());
+    // The boss-side ring is no clean alternative while anything outside it lives:
+    // PickRoomTrashIndex takes it only after the rest, refused or not. Counting it
+    // here would refuse an outside pack, hand it straight back as the pick, and
+    // refuse it again — never letting it go as the last resort.
+    RoomPickOrder const order = RoomPickOrderFor(bot, ctx);
+    bool outsideRingLeft = false;
+    if (order.boss)
+        for (Unit* u : live)
+            if (!order.InRing(u))
+            {
+                outsideRingLeft = true;
+                break;
+            }
+    for (Unit* u : live)
+        if (u != except && !InLaneRefused(pull, u->GetGUID()) &&
+            !(outsideRingLeft && order.InRing(u)))
+            return true;
+    return false;
+}
+
+bool DcTargeting::IsRoomLaneRefused(Player* bot, AiObjectContext* ctx, ObjectGuid guid)
+{
+    if (!bot || !ctx)
+        return false;
+
+    // Cheap common case first: nothing refused, no list walk.
+    if (ctx->GetValue<DcPullContext&>(DcKey::PullContext)->Get().laneRefused.empty())
+        return false;
+    DcPullContext const& pull = PrunedLaneRefusals(ctx, LiveRoomTrash(bot, ctx).size());
+    return InLaneRefused(pull, guid);
 }
 
 Unit* DcTargeting::NearestHostileNearPoint(Player* bot, AiObjectContext* ctx,
@@ -1220,9 +1536,11 @@ Unit* DcTargeting::NearestHostileNearPoint(Player* bot, AiObjectContext* ctx,
             continue;
         if (!AttackersValue::IsPossibleTarget(u, bot))
             continue;
+        if (DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), u->GetEntry(), u->GetPositionX(), u->GetPositionY()))
+            continue;
         // Never treat an encounter boss or a room-aggro boss/partner as clearable
         // area trash — those belong to the dedicated boss/at-boss paths.
-        if (IsDungeonBossEntry(ctx, u->GetEntry()))
+        if (IsDungeonBossEntry(ctx, u->GetEntry()) || IsBossSummon(u))
             continue;
         if (RoomAggroRegistry::Find(bot->GetMapId(), u->GetEntry()))
             continue;

@@ -139,6 +139,7 @@ namespace DcNavHarness
         out.startFarFromPoly = raw.startFarFromPoly;
         out.failureReason = raw.failureReason;
         out.pointCount = static_cast<uint32_t>(raw.rawPts.size());
+        out.points = raw.rawPts;
 
         for (std::size_t i = 1; i < raw.rawPts.size(); ++i)
         {
@@ -154,7 +155,8 @@ namespace DcNavHarness
 
     bool NearestPoint(dtNavMesh const* mesh,
                       float x, float y, float z,
-                      float hExtent, float vExtent, G3D::Vector3& out)
+                      float hExtent, float vExtent, G3D::Vector3& out,
+                      unsigned short includeFlags)
     {
         if (!mesh)
             return false;
@@ -167,7 +169,7 @@ namespace DcNavHarness
         if (dtStatusSucceed(query->init(mesh, 4096)))
         {
             dtQueryFilter filter;
-            filter.setIncludeFlags(0xffff);  // any navigable poly (ground/water/magma)
+            filter.setIncludeFlags(includeFlags);  // default: any navigable poly
             filter.setExcludeFlags(0);
 
             // Detour coordinate order is {y, z, x} (see BuildCoreFromMesh).

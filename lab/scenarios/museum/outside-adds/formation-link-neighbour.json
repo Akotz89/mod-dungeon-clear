@@ -1,0 +1,40 @@
+{
+  "about": "Outside adds through a creature_formations link: Utgarde Keep formation 126032 (groupAI 5, members assist leader and each other) is split into two clusters 33-35yd apart: Dragonflayer Strategist 126032 + 23960 126041 in the west hall (221,200), and 23960 126042 + 23961 126046 at (197-208,226-231). Tagging either half engages the whole formation from its spawn spots (CreatureGroup::MemberEngagingTarget), so the far half always joins. The formation-aware classify (427e0f7d) predicts it: tr-20260922-192744-29#9, tr-20260922-194518-38#13 and three sibling snapshots show pred 4-5 / obs 4-5 with 126042/126046 joining from outside the target cluster. O7 attributes the far half as outside joiners for the report (outsideMax -1); the pass/fail check is engaged vs predicted. A formation-blind classifier predicts 2 against 4 engaged and fails it. Start = the real tank position of tr-20260922-192744-29#9, 53yd from 126032. History: this entry used Shattered Halls formation 151019 until lb-20261003-155828-1; those five spawns carry guid SAI 'On Respawn - Disable' (actionlist 10: invisible + IMMUNE_TO_PC/NPC) that only a gauntlet counter re-enables, so after Lab staging they could never be pulled (0/2 killed, timeout, both runs). Every split formation on map 540 is gated the same way. Memory: ac-formation-assist-links-packs.",
+  "schema": 1,
+  "source": { "snapshot": "tr-20260922-192744-29#9" },
+  "geometry": {
+    "map": 574,
+    "dungeon": "uk",
+    "heroic": false,
+    "region": { "center": [221.2, 210.0, 40.9], "radius": 60.0 },
+    "objective": 24201,
+    "objectiveName": "Skarvold & Dalronn"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [126032, 126041],
+        "formation": [126042, 126046]
+      }
+    }
+  },
+  "party": {
+    // Comp and start of tr-20260922-192744-29#9.
+    "comp": "druid-bear,paladin-holy,hunter-mm,warlock-affli,shaman-enh",
+    "level": 70,
+    "start": [264.3, 231.0, 42.9, -2.527],
+    "react": "fast",
+    "seedTarget": true
+  },
+  "settings": {
+    "PullSetting": 2
+  },
+  "goal": { "kill": "pack:target", "timeoutS": 90 },
+  "expect": {
+    "oracles": {
+      "O7": { "joinersMax": 1, "outsideMax": -1, "expect": "pass" },
+      "O10": "pass"
+    },
+    "knownFailure": "fixed:427e0f7d"
+  }
+}

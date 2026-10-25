@@ -25,7 +25,7 @@ from ..context import ctx
 from ..mysql import (bot_account_prefix, mysql_query, parse_db_creds, sql_ident,
                      sql_in, sql_int, sql_str)
 from ..util import conf_int
-from .plans import catalogue_rows, check_dungeon
+from .plans import catalogue_rows, check_dungeon, resolve_alias
 from .runs import audit
 
 router = APIRouter()
@@ -409,13 +409,15 @@ def save_rosters(data):
 
 class RosterSaveRequest(BaseModel):
     name: str
-    members: list   # exactly 5, ordered tank, heal, dps, dps, dps
+    members: list   # 2..40, ordered tank, heal, dps... (positional roles)
 
 
 def validate_member_names(members):
-    if len(members) != 5:
-        raise HTTPException(400, "a roster is exactly 5 characters "
-                                 "(tank, heal, dps, dps, dps)")
+    # 2..40 (raid-support Plan D): roles stay positional — first is the tank,
+    # second the healer, the rest DPS. Mirrors the module's own roster bounds.
+    if not 2 <= len(members) <= 40:
+        raise HTTPException(400, "a roster is 2-40 characters "
+                                 "(ordered tank, heal, dps, ...)")
     seen = set()
     for n in members:
         if not NAME_RE.fullmatch(n or ""):
@@ -503,7 +505,8 @@ async def api_testruns_start_roster(req: RosterStartRequest, request: Request):
     start` is typeable by hand)."""
     validate_member_names(req.members)
 
-    _cat, rows = await catalogue_rows()
+    cat, rows = await catalogue_rows()
+    req.dungeon = resolve_alias(cat, req.dungeon)
     check_dungeon(rows, req.dungeon, req.heroic)
 
     auth_db = auth_db_ident()

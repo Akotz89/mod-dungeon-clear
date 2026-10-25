@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, auth, bridge as bridge_mod, context
+from . import __version__, auth, bridge as bridge_mod, context, soak as soak_mod
 
 # Host values that are always answered for, whatever the config says: a
 # loopback browser is how the operator's own machine reaches the deck.
@@ -26,6 +26,7 @@ LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]", "::1"})
 #
 # frame-ancestors 'none' is the one that matters most for a tool like this:
 # it stops a page a tester has open from framing the deck and driving it.
+# [server] allowed_frame_ancestors relaxes it for named origins only.
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
         "default-src 'self'; script-src 'self'; style-src 'self'; "
@@ -39,6 +40,27 @@ SECURITY_HEADERS = {
     "Cross-Origin-Opener-Policy": "same-origin",
     "Cross-Origin-Resource-Policy": "same-origin",
 }
+
+
+def security_headers_for(frame_ancestors):
+    """SECURITY_HEADERS with framing opened to exactly these origins.
+
+    No origins returns the default untouched. Otherwise CSP frame-ancestors
+    names them, and X-Frame-Options is dropped: DENY would still refuse the
+    frame in every browser that honours it, and ALLOW-FROM is obsolete and
+    ignored. Every other header and directive stays as it is.
+
+    The origins come from config.parse_frame_origin, which has already
+    refused anything that is not a bare scheme://host[:port]."""
+    if not frame_ancestors:
+        return SECURITY_HEADERS
+    headers = dict(SECURITY_HEADERS)
+    headers["Content-Security-Policy"] = SECURITY_HEADERS[
+        "Content-Security-Policy"].replace(
+            "frame-ancestors 'none'",
+            "frame-ancestors " + " ".join(frame_ancestors))
+    del headers["X-Frame-Options"]
+    return headers
 
 
 def split_host(header):
@@ -79,18 +101,22 @@ def host_allowed(cfg, header):
 
 
 def create_app(cfg, start_collectors=True):
-    from .routes import logs, plans, roster, runs, status
+    from .routes import logs, mappack, plans, roster, runs, soak, status
 
     timelines = runs.TimelineStore()
     throttle = auth.LoginThrottle(cfg.login_max_attempts, cfg.login_window_s)
     bridge = bridge_mod.make_bridge(cfg)
-    context.init(cfg, bridge=bridge, timelines=timelines, throttle=throttle)
+    supervisor = soak_mod.SoakSupervisor(cfg, lambda: context.ctx.bridge,
+                                         lambda: context.ctx.timelines)
+    context.init(cfg, bridge=bridge, timelines=timelines, throttle=throttle,
+                 soak=supervisor)
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
         tasks = []
         if start_collectors:
-            tasks = [asyncio.create_task(runs.loop_timeline())]
+            tasks = [asyncio.create_task(runs.loop_timeline()),
+                     asyncio.create_task(soak_mod.loop_soak(lambda: context.ctx.soak))]
         try:
             yield
         finally:
@@ -98,6 +124,7 @@ def create_app(cfg, start_collectors=True):
                 t.cancel()
 
     app = FastAPI(title="DC Test Deck", version=__version__, lifespan=lifespan)
+    headers = security_headers_for(cfg.allowed_frame_ancestors)
 
     # Middleware order: Starlette wraps each newly added layer AROUND the
     # previous ones, so the last registered runs first. Registering auth here
@@ -142,12 +169,12 @@ def create_app(cfg, start_collectors=True):
         response — including the 403s the two filters below return, which
         never reach an inner layer at all."""
         resp = await call_next(request)
-        for k, v in SECURITY_HEADERS.items():
+        for k, v in headers.items():
             resp.headers.setdefault(k, v)
         return resp
 
     for r in (auth.router, status.router, runs.router, plans.router,
-              roster.router, logs.router):
+              roster.router, logs.router, mappack.router, soak.router):
         app.include_router(r)
 
     # Vite emits content-hashed filenames under assets/, safe to cache

@@ -1,0 +1,38 @@
+{
+  "about": "Advanced-pull camp through a closed door. On Shadowfang Keep's doubling-back entrance, the crowded zone-in keeps resetting the breadcrumb trail. ComputeSafeCamp's starved-trail fallback projected the camp straight away from the pack, which pointed FORWARD onto or past the shut Courtyard Door (GO 20835 at -242.6,2159,90.6) while the tank was still fighting toward Rethilgore (memory dc-pull-camp-forward-door). The door guard 059f7b0f missed it, because the door sits at the top of a ramp out of the chord's Z band. Fixed in 328dc5d5: the fallback walks back along the travelled escort polyline (PointBehind). The scenario starts the party at a real zone-in position (tr-20260925-175048-2) with the trail empty and forces an advanced pull on the Rethilgore-room pack. The door is closed at t=0. Rethilgore is the objective, so he is always kept, and he stands 7.5yd from the Bleak Worg: he joins every pull of this pack (both runs of lb-20261003-155828-1), hence O7 outsideMax 1.",
+  "schema": 1,
+  "geometry": {
+    "map": 33,
+    "dungeon": "sfk",
+    "heroic": false,
+    "region": { "center": [-235.0, 2130.0, 82.0], "radius": 60.0 },
+    "objective": 3914,
+    "objectiveName": "Rethilgore"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [3480, 13352]
+      }
+    }
+  },
+  "party": {
+    "comp": "warrior-prot,priest-holy,mage-frost,rogue-combat,hunter-mm",
+    "level": 24,
+    "start": [-214.9, 2107.8, 76.9, 2.41],
+    "react": "fast",
+    "seedTarget": true
+  },
+  "settings": {
+    "PullSetting": 1,
+    "PullForceAdvanced": 1
+  },
+  "injections": [
+    { "when": { "atMs": 0 }, "do": { "door": 20835, "state": "close" } }
+  ],
+  "goal": { "kill": "pack:target", "timeoutS": 90 },
+  "expect": {
+    "oracles": { "O1": "pass", "O6": "pass", "O7": { "outsideMax": 1 }, "O10": "pass" },
+    "knownFailure": "fixed:328dc5d5"
+  }
+}

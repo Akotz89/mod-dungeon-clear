@@ -197,6 +197,19 @@ def _check_driver_character(cfg):
     return out
 
 
+def _print_mappack(cfg):
+    """One line on the Live page's dungeon map. Never a problem — the map is a
+    nicety, and a deck with no pack works exactly as it did before."""
+    from . import mappack as mp
+    pack = mp.load(cfg.mappack_dir)
+    if pack:
+        print(f"  mappack   {cfg.mappack_dir}  "
+              f"({len(pack['maps'])} maps, built {pack.get('generated', '?')})")
+    else:
+        print(f"  mappack   {cfg.mappack_dir}  (none — the Live page's "
+              f"dungeon map is off; build with `python3 -m testdeck mappack`)")
+
+
 def cmd_check(cfg, _args):
     print(f"testdeck {__version__}")
     print(f"  config    {cfg.source or '(none found — using derived defaults)'}")
@@ -205,6 +218,7 @@ def cmd_check(cfg, _args):
     print(f"  server    {cfg.server_root}  (worldserver working directory)")
     print(f"  log_dir   {cfg.log_dir}")
     print(f"  data_dir  {cfg.data_dir}")
+    _print_mappack(cfg)
     # The one line that answers "why is the Live view empty?" — it names the
     # file rather than the directory it was looked for in, and says outright
     # when nothing has been found yet.
@@ -234,6 +248,64 @@ def cmd_check(cfg, _args):
     for level, key, message in findings:
         print(f"  {level:5} {key + ':':10} {message}")
     return 1 if any(level == "error" for level, _, _ in findings) else 0
+
+
+def cmd_mappack(cfg, args):
+    """Generate the dungeon map pack this host will draw bot positions on.
+
+    The art is Blizzard's and comes off the operator's own client; the Classic
+    and TBC dungeons the 3.3.5a client has no maps for come from the WDM-patch
+    release, downloaded once. Nothing is redistributed with the Test Deck.
+    """
+    from . import mappack as mp
+
+    lack = mp.missing_build_deps()
+    if lack:
+        print(f"testdeck: building a map pack needs {' and '.join(lack)}.\n"
+              f"  pip install {' '.join(lack)}\n"
+              f"(the server itself never needs them — it only reads the pack)",
+              file=sys.stderr)
+        return 2
+
+    client = Path(args.client).expanduser() if args.client else cfg.client_dir
+    if client and not client.is_dir():
+        print(f"testdeck: no WoW client at {client}", file=sys.stderr)
+        return 2
+    if not client:
+        print("note: no client_dir set — the WotLK dungeons will be missing.\n"
+              "      Set [paths] client_dir, or pass --client.\n")
+
+    maps = None
+    if args.maps:
+        try:
+            maps = [int(m) for m in args.maps.replace(",", " ").split()]
+        except ValueError:
+            print("testdeck: --maps takes map ids, e.g. --maps 389,574",
+                  file=sys.stderr)
+            return 2
+
+    out = Path(args.out).expanduser() if args.out else cfg.mappack_dir
+    out.mkdir(parents=True, exist_ok=True)
+    print(f"building map pack in {out}")
+    try:
+        made, gaps = mp.build(out, cfg.dbc_dir, client_dir=client,
+                              wdm_dir=args.wdm, cache_dir=cfg.data_dir / "cache",
+                              maps=maps, fmt=args.format, offline=args.offline,
+                              log=lambda m: print(m, flush=True))
+    except (RuntimeError, OSError) as e:
+        print(f"testdeck: {e}", file=sys.stderr)
+        return 1
+
+    pack = mp.load(out) or {"maps": {}}
+    print(f"\n{len(pack['maps'])} maps, {made} floor images -> {out}")
+    if gaps:
+        # Gaps are normal — battlegrounds and continents have no dungeon art,
+        # and a deck with no client cannot draw the WotLK half. Naming them
+        # beats a silent partial pack.
+        print(f"\n{len(gaps)} gap(s):")
+        for map_id, why in gaps:
+            print(f"  {map_id:<5} {why}")
+    return 0
 
 
 def cmd_check_auth(cfg, args):
@@ -310,6 +382,21 @@ def main(argv=None):
 
     sub.add_parser("check", help="validate the config and report problems")
 
+    mpk = sub.add_parser("mappack",
+                         help="generate the Live page's dungeon map art")
+    mpk.add_argument("--client", metavar="DIR",
+                     help="WoW client root (default: [paths] client_dir)")
+    mpk.add_argument("--out", metavar="DIR",
+                     help="output directory (default: <data_dir>/mappack)")
+    mpk.add_argument("--maps", metavar="IDS",
+                     help="only these map ids, e.g. 389,574 (default: all)")
+    mpk.add_argument("--wdm", metavar="DIR",
+                     help="a WDM-patch checkout instead of its release MPQ")
+    mpk.add_argument("--format", default="webp", choices=("webp", "png", "jpeg"),
+                     help="webp is ~7x smaller than png for this art")
+    mpk.add_argument("--offline", action="store_true",
+                     help="never download; client art only")
+
     ca = sub.add_parser("check-auth", help="verify a GM account login end to end")
     ca.add_argument("username", help="game account name")
 
@@ -363,6 +450,8 @@ def main(argv=None):
         return cmd_serve(cfg, args)
     if args.cmd == "check-auth":
         return cmd_check_auth(cfg, args)
+    if args.cmd == "mappack":
+        return cmd_mappack(cfg, args)
     return cmd_check(cfg, args)
 
 

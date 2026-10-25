@@ -18,6 +18,7 @@
 #include "Ai/Dungeon/DungeonClear/DcApproachState.h"
 #include "Ai/Dungeon/DungeonClear/DcPullContext.h"
 #include "Ai/Dungeon/DungeonClear/DcRunState.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcMovement.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTickMemo.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonEventExecutor.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
@@ -50,6 +51,21 @@ public:
 
 private:
     DcRunState data;
+};
+
+// Endpoint of the last escort glide DC itself issued — see DcMovement::DcGlideRecord.
+class DungeonClearGlideRecordValue : public ManualSetValue<DcMovement::DcGlideRecord&>
+{
+public:
+    DungeonClearGlideRecordValue(PlayerbotAI* botAI)
+        : ManualSetValue<DcMovement::DcGlideRecord&>(botAI, data, DcKey::GlideRecord)
+    {
+    }
+
+    void Reset() override { data = {}; }
+
+private:
+    DcMovement::DcGlideRecord data;
 };
 
 class DungeonClearSkippedValue : public ManualSetValue<std::unordered_set<uint32>&>
@@ -277,6 +293,19 @@ class DungeonClearCurrentHopValue : public ManualSetValue<uint32>
 public:
     DungeonClearCurrentHopValue(PlayerbotAI* botAI)
         : ManualSetValue<uint32>(botAI, 0u, DcKey::CurrentHop)
+    {
+    }
+};
+
+// Per-bot heartbeat stamp (see DcTickHeartbeat). Deliberately NOT a field on
+// DcApproachState: that struct is wholesale wiped by Reset() on dc on/off, death
+// and every pull interrupt, and a heartbeat a run-state reset can zero would
+// report "never ticked" for a bot that is ticking perfectly well.
+class DungeonClearLastTickMsValue : public ManualSetValue<uint32>
+{
+public:
+    DungeonClearLastTickMsValue(PlayerbotAI* botAI)
+        : ManualSetValue<uint32>(botAI, 0u, DcKey::LastTickMs)
     {
     }
 };

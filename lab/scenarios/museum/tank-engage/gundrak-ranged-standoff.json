@@ -1,0 +1,42 @@
+{
+  "about": "Gundrak ranged standoff on the Gal'darah causeway. Three Drakkari Raiders (29982) dismount from the stampede rhino (127207) and hold every party member combat-flagged from 16-26yd without ever closing. In tr-20260830-195435-2 and -6 the tank ping-ponged 27-47yd from Gal'darah for 29 minutes. The assist pickers read only getAttackers()/GetVictim(), so the leader-assist groupmate fallback claimed the tick and nobody engaged. The raiders have NO creature row (they are rhino vehicle accessories that SmartAI ejects at waypoint 3 of path 1272070), so they are staged as synthetics at that ejection point (summoned at the 1s injection, not at staging: in lr-20261003-155828-1-60 the staging-time summons went into combat during the settle, chased off the causeway to z 108.7 and never re-engaged), 25yd behind the bridge-teleport landing where the party starts. They are aggroed onto the party and rooted to model the parked holders. The rhinos are not kept. Fixed in d7689d58 (S2149): CollectCombatHolders unions PvE combat refs, so the tank is handed the raiders.",
+  "schema": 1,
+  "geometry": {
+    "map": 604,
+    "dungeon": "gundrak",
+    "heroic": false,
+    "region": { "center": [1790.0, 743.6, 119.8], "radius": 60.0 },
+    "objective": 29306,
+    "objectiveName": "Gal'darah"
+  },
+  "actors": {
+    "synthetic": [
+      { "tag": "raider1", "entry": 29982, "pos": [1777.3, 743.7, 119.9, 0.0], "spawn": "onInject", "pack": "target" },
+      { "tag": "raider2", "entry": 29982, "pos": [1777.3, 743.7, 119.9, 0.0], "spawn": "onInject", "pack": "target" },
+      { "tag": "raider3", "entry": 29982, "pos": [1777.3, 743.7, 119.9, 0.0], "spawn": "onInject", "pack": "target" }
+    ]
+  },
+  "party": {
+    "comp": "warrior-prot,druid-resto,hunter-mm,warlock-destro,rogue-as",
+    "level": 77,
+    "start": [1802.0, 743.5, 119.6, 3.134],
+    "react": "fast",
+    "seedTarget": false
+  },
+  "settings": {
+    "PullSetting": 2
+  },
+  "injections": [
+    { "when": { "atMs": 1000 }, "do": { "spawn": "raider1", "aggro": "tank" } },
+    { "when": { "atMs": 1000 }, "do": { "spawn": "raider2", "aggro": "heal" } },
+    { "when": { "atMs": 1000 }, "do": { "spawn": "raider3", "aggro": "dps" } },
+    { "when": { "atMs": 1200 }, "do": { "root": "raider1", "durationMs": 180000 } },
+    { "when": { "atMs": 1200 }, "do": { "root": "raider2", "durationMs": 180000 } },
+    { "when": { "atMs": 1200 }, "do": { "root": "raider3", "durationMs": 180000 } }
+  ],
+  "goal": { "kill": "pack:target", "timeoutS": 120 },
+  "expect": {
+    "oracles": { "O1": "pass", "O5": "pass", "O6": "pass", "O10": "pass" },
+    "knownFailure": "fixed:d7689d58"
+  }
+}

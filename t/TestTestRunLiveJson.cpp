@@ -103,9 +103,32 @@ TEST(DcTestRunLiveJsonTest, PlansArrayCarriesProgressAndKeepsFileActive)
     EXPECT_NE(json.find("\"plans\":[{\"planId\":\"tp-9\",\"dungeon\":\"old-hillsbrad\""
                         ",\"total\":20,\"launched\":9,\"succeeded\":6,\"failed\":1"
                         ",\"active\":2,\"concurrent\":5,\"heroic\":false"
-                        ",\"state\":\"running\",\"elapsedS\":900}]"),
+                        ",\"state\":\"running\",\"elapsedS\":900,\"endless\":false"
+                        ",\"paused\":false,\"nextPick\":\"\",\"resetHoldUntil\":0,\"pool\":[]}]"),
               std::string::npos);
     EXPECT_NE(json.find("\"runs\":[]"), std::string::npos);
+}
+
+TEST(DcTestRunLiveJsonTest, PoolPlanCarriesEntriesAndSoakState)
+{
+    PlanSnapshot p;
+    p.planId = "tp-7";
+    p.dungeon = "pool";
+    p.endless = true;
+    p.paused = true;
+    p.nextPick = "uk:heroic";
+    p.resetHoldUntil = 1700003600ull;
+    p.state = "paused";
+    p.pool.push_back({"rfc", false, 0, 4, 3, 1});
+    p.pool.push_back({"uk", true, 0, 2, 0, 2});
+
+    std::string const json = Build(1700000000ull, {}, {p});
+    EXPECT_NE(json.find("\"endless\":true,\"paused\":true,\"nextPick\":\"uk:heroic\""
+                        ",\"resetHoldUntil\":1700003600,\"pool\":["
+                        "{\"token\":\"rfc\",\"heroic\":false,\"size\":0,\"launched\":4,\"ok\":3,\"fail\":1},"
+                        "{\"token\":\"uk\",\"heroic\":true,\"size\":0,\"launched\":2,\"ok\":0,\"fail\":2}]}"),
+              std::string::npos)
+        << json;
 }
 
 TEST(DcTestRunLiveJsonTest, HeroicFlagsSerializeTrue)

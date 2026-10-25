@@ -1,0 +1,35 @@
+{
+  "about": "Pack on a ledge below the route. Target selection matched a bottom-of-ledge mob to an early top leg of the route in 2D, and IsLevelReachable accepted any PATHFIND_NORMAL path however long. The tank on the ledge picked mobs whose real walk was a long ramp detour, or had no path at all. Fixed in e4d002da: corridor legs carry Z (DC_CORRIDOR_Z_BAND) and a detour-ratio gate (DC_TRASH_DETOUR_RATIO/SLACK) applies. Staged from a real Stratholme pull taken from 10.5yd above the pack at 37yd (tr-20260922-192701-27#24, with the same layout in -190510-14#23 and -200558-45#25). The patrolling Crimson Gallant that joined that pull is left out, so only the ledge decides.",
+  "schema": 1,
+  "source": { "snapshot": "tr-20260922-192701-27#24" },
+  "geometry": {
+    "map": 329,
+    "dungeon": "strat",
+    "heroic": false,
+    "region": { "center": [3542.6, -3020.9, 125.1], "radius": 60.0 },
+    "objective": 10997,
+    "objectiveName": "Cannon Master Willey"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [54166, 54167, 54179]
+      }
+    }
+  },
+  "party": {
+    "comp": "warrior-prot,priest-holy,mage-frost,rogue-combat,hunter-mm",
+    "level": 60,
+    "start": [3566.7, -3049.3, 135.6, 2.274],
+    "react": "fast",
+    "seedTarget": false
+  },
+  "settings": {
+    "PullSetting": 2
+  },
+  "goal": { "kill": "pack:target", "timeoutS": 120 },
+  "expect": {
+    "oracles": { "O1": "pass", "O6": "pass", "O10": "pass" },
+    "knownFailure": "fixed:e4d002da"
+  }
+}

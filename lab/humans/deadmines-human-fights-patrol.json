@@ -1,0 +1,9 @@
+{
+  "about": "Issue #21 reporter: stays with the tank, then melees the Overseer/Wizard/Evoker patrol as it walks into the party in the tunnel after Gilnid, while the bots stay out of combat. Auto-attack only, so the human 'takes them down slowly'.",
+  "steps": [
+    { "when": { "atMs": 0 }, "do": { "follow": "tank", "dist": 4 } },
+    { "when": { "predicate": "tankDistToPack < 30" }, "do": { "attack": "pack:target" } },
+    { "when": { "predicate": "elapsedS > 40" }, "do": { "attack": "nearest" } },
+    { "when": { "predicate": "elapsedS > 70" }, "do": { "attack": "nearest" } }
+  ]
+}

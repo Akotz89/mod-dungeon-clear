@@ -227,6 +227,23 @@ namespace
     constexpr float BM_P3_X = -1887.70f, BM_P3_Y = 7106.56f, BM_P3_Z = 22.05f;
     constexpr float BM_P4_X = -1930.91f, BM_P4_Y = 7183.60f, BM_P4_Z = 23.01f;
 
+    // The ford between P4 and P2: the two banks of the shallow channel that
+    // cuts the arena east-west, from DC's own corridor (LongRangePathfinder).
+    //
+    // P4 -> P2 can NOT be one MoveTo hop. The step's HopTo is a core MovePoint,
+    // and core prices water at 20x for a bot (PathGenerator::CreateFilter), so
+    // across this 157yd leg its A* exhausts the 1024-node query pool before it
+    // finds the ford and returns a partial corridor west around the channel.
+    // StopBot(Hold) then re-plans that from wherever the tank stands, every
+    // tick, and at (-1988, 7154) the smoothed path opens with an in-place
+    // zig-zag — the tank ping-pongs a yard for good. Soak sk-20261003-174711:
+    // 6 of 15 runs, all frozen at that spot. Short legs through the ford keep
+    // every re-plan inside the node budget; t/TestBlackMorassRouteProbe.cpp
+    // replays the per-tick loop against the live mesh for every hop.
+    constexpr float BM_FORD_N_X = -1951.77f, BM_FORD_N_Y = 7114.77f, BM_FORD_N_Z = 19.27f;
+    constexpr float BM_FORD_S_X = -1954.31f, BM_FORD_S_Y = 7082.87f, BM_FORD_S_Z = 19.68f;
+    constexpr float BM_FORD_RADIUS = 5.0f;
+
     // Each site's pre-clear radius. The rift's own summons appear <=10yd from
     // it; 35 clears the ambient beasts whose wander could add into that.
     constexpr float BM_PORTAL_CLEAR_RADIUS = 35.0f;
@@ -340,6 +357,11 @@ void RegisterBlackMorassEvents(std::vector<DungeonEvent>& out)
                 .Timeout(BM_HOP_TIMEOUT_MS)
             .ClearRadius(BM_P4_X, BM_P4_Y, BM_P4_Z, BM_PORTAL_CLEAR_RADIUS)
                 .Timeout(BM_CLEAR_TIMEOUT_MS)
+            // P4 -> P2 via the ford (see BM_FORD_N_X).
+            .MoveTo(BM_FORD_N_X, BM_FORD_N_Y, BM_FORD_N_Z, BM_FORD_RADIUS)
+                .Timeout(BM_HOP_TIMEOUT_MS)
+            .MoveTo(BM_FORD_S_X, BM_FORD_S_Y, BM_FORD_S_Z, BM_FORD_RADIUS)
+                .Timeout(BM_HOP_TIMEOUT_MS)
             .MoveTo(BM_P2_X, BM_P2_Y, BM_P2_Z, /*radius*/ 8.0f)
                 .Timeout(BM_HOP_TIMEOUT_MS)
             .ClearRadius(BM_P2_X, BM_P2_Y, BM_P2_Z, BM_PORTAL_CLEAR_RADIUS)

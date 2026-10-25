@@ -265,3 +265,192 @@ TEST(DcTestRunVerdictTest, EveryTerminalVerdictHasAStableName)
     EXPECT_STREQ(VerdictName(Verdict::FailAborted), "aborted");
     EXPECT_STREQ(VerdictName(Verdict::Continue), "continue");
 }
+
+// ---- scenarios: predicate + grace (Karazhan chess plan, T1) ------------------------
+
+using DcTestRun::ProgressClock;
+using DcTestRun::ScenarioGrace;
+using DcTestRun::SuccessBy;
+
+TEST(DcTestRunVerdictTest, ScenarioPredicateInsideGraceContinues)
+{
+    Observation o = Healthy();
+    o.scenarioSuccess = true;
+    o.graceExpired = false;
+    EXPECT_EQ(Classify(o, DefaultLimits()), Verdict::Continue);
+}
+
+TEST(DcTestRunVerdictTest, ScenarioGraceExpiryIsSuccess)
+{
+    Observation o = Healthy();
+    o.scenarioSuccess = true;
+    o.graceExpired = true;
+    Verdict const v = Classify(o, DefaultLimits());
+    EXPECT_EQ(v, Verdict::Success);
+    EXPECT_STREQ(SuccessBy(o, v), "grace");
+}
+
+TEST(DcTestRunVerdictTest, AllClearedBeatsTheGraceOnTheSameTick)
+{
+    Observation o = Healthy();
+    o.disableFired = true;
+    o.disableAllCleared = true;
+    o.scenarioSuccess = true;
+    o.graceExpired = true;
+    Verdict const v = Classify(o, DefaultLimits());
+    EXPECT_EQ(v, Verdict::Success);
+    EXPECT_STREQ(SuccessBy(o, v), "allCleared");
+}
+
+TEST(DcTestRunVerdictTest, AllClearedInsideTheGraceIsAllCleared)
+{
+    Observation o = Healthy();
+    o.disableFired = true;
+    o.disableAllCleared = true;
+    o.scenarioSuccess = true;
+    Verdict const v = Classify(o, DefaultLimits());
+    EXPECT_EQ(v, Verdict::Success);
+    EXPECT_STREQ(SuccessBy(o, v), "allCleared");
+}
+
+TEST(DcTestRunVerdictTest, DisableAfterThePredicateHeldIsStillSuccess)
+{
+    // A death during the chest loot (or a dc off) disables the run with a
+    // non-all-cleared reason — the objective was already met.
+    Observation o = Healthy();
+    o.disableFired = true;
+    o.scenarioSuccess = true;
+    Verdict const v = Classify(o, DefaultLimits());
+    EXPECT_EQ(v, Verdict::Success);
+    EXPECT_STREQ(SuccessBy(o, v), "predicate");
+}
+
+TEST(DcTestRunVerdictTest, WatchdogsInsideTheGraceResolveToSuccess)
+{
+    Observation o = Healthy();
+    o.scenarioSuccess = true;
+    o.partyWiped = true;
+    o.wipedForMs = 10'000'000;
+    o.sinceProgressMs = 10'000'000;
+    o.elapsedMs = 10'000'000;
+    Verdict const v = Classify(o, DefaultLimits());
+    EXPECT_EQ(v, Verdict::Success);
+    EXPECT_STREQ(SuccessBy(o, v), "predicate");
+}
+
+TEST(DcTestRunVerdictTest, AbortIsNotBentByThePredicate)
+{
+    Observation o = Healthy();
+    o.scenarioSuccess = true;
+    o.abortRequested = true;
+    EXPECT_EQ(Classify(o, DefaultLimits()), Verdict::FailAborted);
+}
+
+TEST(DcTestRunVerdictTest, GraceExpiredWithoutThePredicateMeansNothing)
+{
+    // graceExpired is only meaningful with scenarioSuccess; a stray flag on a
+    // full-dungeon run must not manufacture a success.
+    Observation o = Healthy();
+    o.graceExpired = true;
+    EXPECT_EQ(Classify(o, DefaultLimits()), Verdict::Continue);
+}
+
+TEST(DcTestRunVerdictTest, PlainSuccessIsAllCleared)
+{
+    Observation o = Healthy();
+    o.disableFired = true;
+    o.disableAllCleared = true;
+    EXPECT_STREQ(SuccessBy(o, Classify(o, DefaultLimits())), "allCleared");
+    EXPECT_STREQ(SuccessBy(o, Verdict::FailNoProgress), "");
+}
+
+TEST(DcTestRunVerdictTest, ScenarioGraceLatchesAndCounts)
+{
+    ScenarioGrace g;
+    g.Step(false, 1000, 5000);
+    EXPECT_FALSE(g.held);
+    EXPECT_FALSE(g.Expired(60'000));
+
+    g.Step(true, 1000, 6000);  // first held: clock starts at 0
+    EXPECT_TRUE(g.held);
+    EXPECT_EQ(g.heldAtMs, 6000u);
+    EXPECT_FALSE(g.Expired(60'000));
+
+    // The latch holds even if the predicate reads false afterwards.
+    for (int i = 0; i < 59; ++i)
+        g.Step(false, 1000, 7000 + i * 1000);
+    EXPECT_TRUE(g.held);
+    EXPECT_FALSE(g.Expired(60'000));
+    g.Step(false, 1000, 66'000);
+    EXPECT_TRUE(g.Expired(60'000));
+}
+
+TEST(DcTestRunVerdictTest, ZeroGraceExpiresOnTheFirstHold)
+{
+    ScenarioGrace g;
+    g.Step(true, 1000, 1000);
+    EXPECT_TRUE(g.Expired(0));
+}
+
+// ---- no-progress clock with the event progress sequence --------------------------
+
+TEST(DcTestRunVerdictTest, EventSequenceChangeResetsNoProgress)
+{
+    ProgressClock c;
+    EXPECT_FALSE(c.Step(1000, false, 0));
+    EXPECT_FALSE(c.Step(1000, false, 0));
+    EXPECT_EQ(c.sinceMs, 2000u);
+
+    // A chess move: no kill, no anchor, no combat change — still progress.
+    EXPECT_TRUE(c.Step(1000, false, 1));
+    EXPECT_EQ(c.sinceMs, 0u);
+
+    // Same value next tick: the change was consumed.
+    EXPECT_FALSE(c.Step(1000, false, 1));
+    EXPECT_EQ(c.sinceMs, 1000u);
+}
+
+TEST(DcTestRunVerdictTest, EventSequenceFirstSampleOnlySeeds)
+{
+    // A counter already non-zero when monitoring opens is not progress.
+    ProgressClock c;
+    c.sinceMs = 5000;
+    EXPECT_FALSE(c.Step(1000, false, 42));
+    EXPECT_EQ(c.sinceMs, 6000u);
+}
+
+TEST(DcTestRunVerdictTest, EventSequenceWrapStillCounts)
+{
+    ProgressClock c;
+    c.Step(1000, false, 0xFFFFFFFFu);
+    EXPECT_TRUE(c.Step(1000, false, 0u));
+}
+
+TEST(DcTestRunVerdictTest, OtherProgressStillResetsWithoutTheSequence)
+{
+    ProgressClock c;
+    c.Step(1000, false, 7);
+    c.Step(1000, false, 7);
+    EXPECT_TRUE(c.Step(1000, true, 7));
+    EXPECT_EQ(c.sinceMs, 0u);
+}
+
+TEST(DcTestRunVerdictTest, LongEventWithSequenceBumpsNeverTripsNoProgress)
+{
+    // A 10-minute game: one move every 20s, nothing else moving. Fed through
+    // the clock and into the kernel at a 300s scenario budget, it never fails.
+    Limits l;
+    l.noProgressMs = 300 * 1000;
+    ProgressClock c;
+    std::uint32_t seq = 0;
+    for (std::uint32_t t = 1; t <= 600; ++t)
+    {
+        if (t % 20 == 0)
+            ++seq;
+        c.Step(1000, false, seq);
+        Observation o = Healthy();
+        o.sinceProgressMs = c.sinceMs;
+        o.elapsedMs = t * 1000;
+        ASSERT_EQ(Classify(o, l), Verdict::Continue) << "t=" << t;
+    }
+}

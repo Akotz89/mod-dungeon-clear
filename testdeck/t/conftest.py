@@ -28,7 +28,7 @@ CharacterDatabaseInfo = "127.0.0.1;3306;acore;pw;acore_characters"
 AccountInstancesPerHour = 7
 '''
 
-PLAYERBOTS_CONF = 'AiPlayerbot.RandomBotAccountPrefix = "testbot"\n'
+PLAYERBOTS_CONF = 'Playerbots.RandomBotAccountPrefix = "testbot"\n'
 
 DUNGEONCLEAR_CONF = 'DungeonClear.TestRun.DriverCharacter = "Dcdriver"\n'
 

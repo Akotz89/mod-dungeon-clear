@@ -1,0 +1,35 @@
+{
+  "about": "Engage-trash on a hop-capped ramp path. A pack at a ramp's foot sat inside the long-path corridor band, but DungeonClearEngageTrashAction approached it with stock MoveTo, a raw PathGenerator capped at about 74 hops. The walk down and around resolved PATHFIND_INCOMPLETE, the truncated prefix dead-ended, and the tank froze atop the ramp out of aggro range (memory dc-trash-engage-longpath-yield). The first fix (IsDirectlyReachable, 67dd0fd5) yields to Advance's uncapped long path. S1513 (96ca4211) bounded that yield and latched it per target, so a pack beside the route is not abandoned mid-tag. Staged from a real Utgarde Keep pull taken 10yd above the pack on the way to Ingvar (tr-20260922-185328-8#36, the same layout in -29#32, -38#37, -44#33). Bonecrusher, Spiritualist and the two Savage Worgs that always join are the target. PullSetting 0 routes it through the engage-trash rung rather than the pull FSM. UNVERIFIED geometry: the original hop-cap report did not name its ramp.",
+  "schema": 1,
+  "source": { "snapshot": "tr-20260922-185328-8#36" },
+  "geometry": {
+    "map": 574,
+    "dungeon": "uk",
+    "heroic": false,
+    "region": { "center": [162.2, -175.2, 180.6], "radius": 60.0 },
+    "objective": 23954,
+    "objectiveName": "Ingvar the Plunderer"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [125886, 126051, 125993, 125994]
+      }
+    }
+  },
+  "party": {
+    "comp": "warrior-prot,priest-holy,mage-frost,rogue-combat,hunter-mm",
+    "level": 70,
+    "start": [200.9, -163.7, 190.2, -2.853],
+    "react": "fast",
+    "seedTarget": false
+  },
+  "settings": {
+    "PullSetting": 0
+  },
+  "goal": { "kill": "pack:target", "timeoutS": 120 },
+  "expect": {
+    "oracles": { "O1": "pass", "O5": "pass", "O6": "pass", "O10": "pass" },
+    "knownFailure": "fixed:96ca4211"
+  }
+}

@@ -19,6 +19,7 @@
 
 #include "Creature.h"
 #include "DBCStores.h"
+#include "DisableMgr.h"
 #include "GameObject.h"
 #include "Group.h"
 #include "Log.h"
@@ -42,6 +43,7 @@
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonClearRouteRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonEventRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
 #include "Ai/Dungeon/DungeonClear/Overrides/ObjectiveHookRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonEventExecutor.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
@@ -89,6 +91,76 @@ namespace
     // displacement (chased forward past the cursor), which would otherwise
     // make NextHop target a point behind the tank and walk it backward.
     constexpr float DC_REANCHOR_DISTANCE = 12.0f;
+
+    // RELEASE threshold for the off-line rejoin rung — the low side of its
+    // hysteresis band (it ENGAGES at DungeonPathFollower::OFF_PATH_THRESHOLD,
+    // 6yd). A bare threshold released exactly where it engaged, so a tank parked
+    // in the band flickered rejoin / spline / rejoin tick by tick and the escort
+    // spline kept relaunching from off the line. Sized at half the engage
+    // distance: comfortably inside ordinary navmesh float and corridor width, so
+    // the latch clears as soon as the bot is genuinely back on the line, and far
+    // enough below 6 that noise cannot walk it back and forth.
+    constexpr float DC_OFF_LINE_RELEASE = 3.0f;
+
+    // How much the route deviation may GROW, while the off-line rung is refused,
+    // before the rung stops believing the in-flight move is a re-entry and halts
+    // it. Slack absorbs the legitimate case: a pathed re-entry rounding a corner
+    // can swing a couple of yards wider before it comes back. Beyond that the
+    // move in flight is taking the bot away from the corridor, which is the one
+    // thing this rung exists to prevent. See DcApproachState::rejoinBestDev.
+    constexpr float DC_REJOIN_DEV_SLACK = 3.0f;
+
+    // Consecutive REFUSED off-line rejoin ticks (nothing issued, no ground bought)
+    // before the rung stops believing a re-entry is in flight and escalates to the
+    // chunked re-entry below. Refusal is benign in the common case — DcMoveTo is
+    // refused while the previous tick's re-entry is still walking — so this has to
+    // be patient enough not to fire on a healthy rejoin. Sized like DC_STUCK_LIMIT
+    // for the same reason (dedup while real progress is being made), and cheap to
+    // reach: at a ~150ms bot tick this is ~1.2s of genuinely nothing happening.
+    constexpr uint32 DC_REJOIN_REFUSAL_LIMIT = 8;
+
+    // Least the rejoin gap must close, below its best this episode, for a tick to
+    // count as progress (and reset the refusal ladder). Above navmesh/position
+    // noise, well below a tick's walk (~1yd at run speed).
+    constexpr float DC_REJOIN_PROGRESS_EPS = 0.25f;
+
+    // Re-entry legs longer than this get the chunked builder instead of a single
+    // MoveTo. PathGenerator caps ONE call at 74 smoothed points at 4yd spacing
+    // (MAX_POINT_PATH_LENGTH / SMOOTH_PATH_STEP_SIZE, ~296yd of straight corridor
+    // and far less around bends); over the cap it returns PATHFIND_SHORT, which is
+    // not in pre-#2747 SearchForBestPath's accepted set, so modified_z stays INVALID_HEIGHT
+    // and MoveTo refuses — every tick, forever, with no diagnostic. That is not a
+    // transient refusal the rung can ride out; the leg is simply unrepresentable as
+    // one move. Set well under the theoretical cap because a winding corridor
+    // spends points far faster than 4yd of progress each: the leg that exposed this
+    // (tr-20260901-223655-10, entrance corridor back to Bjarngrim's hall) was
+    // 267yd of route but 80 points — over the 74 cap — and DC's own opening spline
+    // down it that same run logged "80 pts, 320.7yd".
+    constexpr float DC_REJOIN_CHUNKED_DISTANCE = 150.0f;
+
+    // Slack added to a long re-entry glide's own travel time before its latch
+    // expires: enough to absorb the launch tick and ordinary spline pacing, short
+    // enough that a glide which dies on the way still returns the bot to the
+    // normal ladder within a couple of seconds.
+    constexpr uint32 DC_REJOIN_GLIDE_SLACK_MS = 2000;
+
+    // Is a long re-entry glide (TryChunkedRejoin) still carrying the bot? Both
+    // halves matter: the deadline bounds a glide that dies silently, and the live
+    // ESCORT check drops the latch the moment something else takes the bot, so the
+    // off-path rebuild stands down for travel that is actually happening and for
+    // nothing else. Clears the latch as a side effect once either half fails.
+    bool RejoinGlideInFlight(DcApproachState& appr, Player* bot)
+    {
+        if (appr.rejoinGlideUntilMs == 0)
+            return false;
+        MotionMaster* const mm = bot->GetMotionMaster();
+        bool const live = getMSTime() < appr.rejoinGlideUntilMs && mm &&
+                          mm->GetCurrentMovementGeneratorType() == ESCORT_MOTION_TYPE &&
+                          bot->isMoving();
+        if (!live)
+            appr.rejoinGlideUntilMs = 0;
+        return live;
+    }
 
     // The creature store (Map::GetCreatureBySpawnIdStore) only contains
     // creatures in LOADED grids; grids stream in within ~MAX_VISIBILITY_DISTANCE
@@ -234,6 +306,13 @@ namespace
     {
         if (!bot)
             return false;
+        // No navmesh to land on: on a map the core runs without pathfinding
+        // PathGenerator answers every probe below with a straight shortcut, so
+        // the first offset always "works": a blind 5yd step along +X, repeated
+        // tick after tick, that walks the tank through walls
+        // (tr-20260910-233100-1, out of the Trial of the Champion arena).
+        if (!DisableMgr::IsPathfindingEnabled(bot->GetMap()))
+            return false;
         float const x = bot->GetPositionX();
         float const y = bot->GetPositionY();
         float const z = bot->GetPositionZ();
@@ -260,6 +339,34 @@ namespace
                 continue;
             if (t & PATHFIND_FARFROMPOLY_START)
                 continue;  // didn't actually help — still off the mesh
+
+            // A nudge is a SIDESTEP. Reject a probe whose generated path is far
+            // longer than the offset itself: on a ramp the blind axis probes
+            // point up/down the slope, and PathGenerator answers one of them by
+            // leaving the incline, running back along the corridor and
+            // returning — tens of yards of travel issued as a 5yd budge, which
+            // is the "long walk" half of the ramp ping-pong. Without this the
+            // recovery is what strands the tank, not what frees it.
+            float const straight = std::sqrt((nx - x) * (nx - x) + (ny - y) * (ny - y));
+            if (straight > 0.0f)
+            {
+                Movement::PointsArray const& pts = gen.GetPath();
+                float pathLen = 0.0f;
+                for (size_t i = 1; i < pts.size(); ++i)
+                {
+                    G3D::Vector3 const d = pts[i] - pts[i - 1];
+                    pathLen += d.length();
+                }
+                if (pathLen > straight * DC_NUDGE_MAX_DETOUR_RATIO)
+                {
+                    LOG_DEBUG("playerbots.dungeonclear",
+                              "[DC:{}] nudge probe ({:+.0f},{:+.0f}) rejected: {:.1f}yd path for a "
+                              "{:.1f}yd sidestep (limit {}x) -> trying the next offset",
+                              bot->GetName(), o.dx, o.dy, pathLen, straight,
+                              DC_NUDGE_MAX_DETOUR_RATIO);
+                    continue;
+                }
+            }
 
             MotionMaster* mm = bot->GetMotionMaster();
             if (mm)
@@ -295,8 +402,15 @@ namespace
             ctx->GetValue<ChunkedPathfinder::Result&>(DcKey::LongPath)->Get();
         DungeonFollowerState& follower =
             ctx->GetValue<DungeonFollowerState&>(DcKey::FollowerState)->Get();
+        // A Resnap that re-picks the point the cursor already held has repaired
+        // nothing, and reporting it as the cheap cure is what pinned this ladder on
+        // rung 1 for whole runs (S1089, and again on sparse anchor routes where the
+        // cursor is always its own nearest forward candidate). Require DISPLACEMENT,
+        // not just a successful anchor search: no movement means fall through to the
+        // rebuild, which is the escalation the caller is asking for.
+        bool resnapMoved = false;
         if (allowResnap && path.reachable && !path.segments.empty() &&
-            DungeonPathFollower::Resnap(bot, path, follower))
+            DungeonPathFollower::Resnap(bot, path, follower, &resnapMoved) && resnapMoved)
             return true;
 
         appr.longPathExpiresMs = 0;
@@ -511,23 +625,12 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::TryEngageHold(Advance
             AI_VALUE(ChunkedPathfinder::Result&, DcKey::LongPath);
         DungeonFollowerState const& followerNow =
             AI_VALUE(DungeonFollowerState&, DcKey::FollowerState);
-        bool anchoredHopsPending = false;
-        if (currentPath.reachable && !currentPath.segments.empty())
-        {
-            // Only inspect segments still ahead of the follower's cursor.
-            // Anchored segments already walked past don't need to gate
-            // the engage handoff.
-            for (size_t i = followerNow.segmentIdx; i + 1 < currentPath.segments.size(); ++i)
-            {
-                PathSegment const& seg = currentPath.segments[i];
-                if (seg.anchored && bot->GetDistance(seg.ex, seg.ey, seg.ez) > seg.arriveRadius)
-                {
-                    anchoredHopsPending = true;
-                    break;
-                }
-            }
-        }
-        if (!anchoredHopsPending)
+        // Only segments still ahead of the follower's cursor gate the handoff.
+        // DungeonClearAtBossTrigger::IsActive runs the SAME test — it is the rung
+        // this hold is waiting for, so the two must agree or the tank parks at
+        // the boss forever (it did: the trigger's copy started at segment 0, see
+        // the note there). Both call the one helper.
+        if (!DcEngageGeometry::AnchoredHopsPending(bot, currentPath, followerNow.segmentIdx))
         {
             // Surface WHY we're holding: the at-boss trigger only pulls once the
             // party is ready and no loot is pending. When it doesn't fire, this
@@ -548,6 +651,40 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::TryEngageHold(Advance
         }
     }
     return Step::Continue;
+}
+
+// Engage-trash walk-in yield. Engage-trash outranks Advance, but its trigger can
+// hold on only alternate ticks; Advance then won every other tick, read the walk's
+// POINT generator as "no glide running" and re-issued its spline over it, and the
+// next engage tick cancelled that spline again. Each swap starts with a stop, so
+// the tank froze in place until the stuck ladder stalled the run
+// (tr-20260924-081931-3: Karazhan Opera balcony stair, Spectral Patron walk-in vs
+// the Blackened Urn route). While engage-trash's walk-in is fresh and still moving,
+// consume the tick without touching movement. See
+// DungeonClearMath::ShouldYieldToEngageWalk for the bounds.
+DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::TryEngageWalkYield(AdvanceState const& st)
+{
+    DcApproachState& appr = *st.appr;
+    if (appr.engageWalkMs == 0)
+        return Step::Continue;
+
+    Unit* const target = appr.engageWalkTarget.IsEmpty()
+                             ? nullptr
+                             : ObjectAccessor::GetUnit(*bot, appr.engageWalkTarget);
+    uint32 const nowMs = getMSTime();
+    if (!DungeonClearMath::ShouldYieldToEngageWalk(
+            !appr.engageWalkTarget.IsEmpty(), target && target->IsAlive(), bot->isMoving(),
+            appr.engageWalkMs, nowMs, DC_ENGAGE_WALK_YIELD_MS))
+    {
+        appr.engageWalkTarget.Clear();
+        appr.engageWalkMs = 0;
+        return Step::Continue;
+    }
+
+    LOG_DEBUG("playerbots.dungeonclear",
+              "[DC:{}] advance yielding to engage-trash walk-in on {} ({}ms old)",
+              bot->GetName(), appr.engageWalkTarget.ToString(), nowMs - appr.engageWalkMs);
+    return Step::ReturnTrue;
 }
 
 // Loot yield (with commit-timeout). Step aside through the WHOLE loot lifecycle
@@ -768,7 +905,6 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::TryBossNotPresentStal
 void DungeonClearAdvanceAction::FillStuckObs(AdvanceState& st, DungeonClearApproach::Observation& obs)
 {
     DcApproachState& appr = *st.appr;
-    uint32& rebuildAttempts = appr.rebuildAttempts;
     Position& lastPos = appr.lastPos;
 
     // Position-based stuck check via the shared route-glide watchdog. Sample the
@@ -798,13 +934,15 @@ void DungeonClearAdvanceAction::FillStuckObs(AdvanceState& st, DungeonClearAppro
     // shuttle can never satisfy it (its near end only ties the best, its far end is
     // worse), while genuinely resumed travel satisfies it on the very next tick. It
     // cannot mis-fire on a boss that WANDERS away either: the counters are only ever
-    // INCREMENTED on a posStuck tick (moving with ~0 displacement), which a bot that is
-    // actually travelling never produces.
-    if (appr.recoveryProgressWatch.TickClosing(st.engageDist, DC_STUCK_DISPLACEMENT, getMSTime()))
-    {
-        rebuildAttempts = 0;
-        appr.resnapAttempts = 0;
-    }
+    // INCREMENTED on a failure (a refused move, a resnap that cured nothing), which a
+    // bot that is actually travelling never produces.
+    //
+    // This is now the ONE place any recovery counter is cleared — see
+    // DcApproachState::NoteRecoveryProgress for why that is structural rather than a
+    // convention. The rungs below no longer zero their own counters on "I issued a
+    // move": issuing is not arriving, and every livelock in this file's history came
+    // from a rung that could not tell the difference.
+    appr.NoteRecoveryProgress(st.engageDist, DC_STUCK_DISPLACEMENT, getMSTime());
 
     // Per-tick advance telemetry — the three signals the spline-issue lines
     // can't show on their own: did the bot physically move since the last
@@ -901,11 +1039,32 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::DoStuckRecover(Advanc
     if (rebuildAttempts >= 3)
     {
         rebuildAttempts = 0;
-        if (DC_ALLOW_RECOVERY_MOVES && TryFarFromPolyRecovery(bot))
+        // The nudge needs a budget of its own or it is not an escalation at all.
+        // TryFarFromPolyRecovery succeeds trivially whenever the bot is ON the
+        // navmesh — a 5yd probe from a walkable poly always paths — so it reset
+        // rebuildAttempts and reported "recovered" on every pass, and the stall
+        // beneath it could never be reached. Live in tr-20260818-073620-14: the
+        // ladder climbed to its top rung nine times over nine minutes on the
+        // Blackrock Spire ramp, nudged nine times, and never once stalled or
+        // told the player. The tank paced the same 5yd box the whole time.
+        //
+        // Count consecutive nudges; the recovery-progress watchdog clears the
+        // counter as soon as one actually buys ground (see FillStuckObs), so a
+        // nudge that works still costs nothing.
+        if (DC_ALLOW_RECOVERY_MOVES && appr.nudgeAttempts < DC_MAX_NUDGE_ATTEMPTS &&
+            TryFarFromPolyRecovery(bot))
         {
+            ++appr.nudgeAttempts;
+            LOG_INFO("playerbots.dungeonclear",
+                     "[DC:{}] stuck ladder: navmesh-nudge {} of {} near {}",
+                     bot->GetName(), appr.nudgeAttempts, DC_MAX_NUDGE_ATTEMPTS, next->name);
             DcStatusPublisher::SendAddonMessage(botAI, "CHAT\tRepathing around " + next->name + " \xe2\x80\x94 nudging onto the navmesh.");
             return Step::ReturnTrue;
         }
+        LOG_INFO("playerbots.dungeonclear",
+                 "[DC:{}] stuck ladder exhausted near {} ({} nudge(s) bought no ground) -> stalling",
+                 bot->GetName(), next->name, appr.nudgeAttempts);
+        appr.nudgeAttempts = 0;
         StallDungeonClear(botAI,
             "Stuck near " + next->name + " — not making forward progress. "
             "I'll try to clear nearby mobs; use 'dc skip' if it persists.");
@@ -924,8 +1083,17 @@ void DungeonClearAdvanceAction::FillPursuitObs(AdvanceState& st, DungeonClearApp
     float const engageDist = st.engageDist;
     DcApproachState& appr = *st.appr;
 
+    // Not while an anchored hop is still pending: a bee-line past an anchored
+    // route parks the tank where the engage handoff (same test) never fires, and
+    // pursuit's give-up latch resets every tick inside engage range, so the long
+    // path that would walk the route never gets the tick (tr-20260923-235223-3).
+    // Reads last tick's cached path — EnsureLongPath runs after this — which is
+    // fine for an anchored route.
     bool const canPursue =
-        liveBoss && engageDist <= DC_DIRECT_PURSUIT_RANGE && bot->IsWithinLOSInMap(liveBoss);
+        liveBoss && engageDist <= DC_DIRECT_PURSUIT_RANGE && bot->IsWithinLOSInMap(liveBoss) &&
+        !DcEngageGeometry::AnchoredHopsPending(
+            bot, AI_VALUE(ChunkedPathfinder::Result&, DcKey::LongPath),
+            AI_VALUE(DungeonFollowerState&, DcKey::FollowerState).segmentIdx);
     if (!canPursue)
         appr.pursuitWatch.Reset();  // fresh closing baseline for a later pursuit
 
@@ -981,9 +1149,10 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::DoPursue(AdvanceState
                                 /*idle*/ false, /*react*/ false, /*normal_only*/ false,
                                 /*exact_waypoint*/ false, MovementPriority::MOVEMENT_NORMAL);
     bool const moveAlive = chasing || bot->isMoving() ||
-                           IsWaitingForLastMove(MovementPriority::MOVEMENT_NORMAL);
+                           DcMoveDeferred(MovementPriority::MOVEMENT_NORMAL);
 
-    appr.stuckCount = 0;
+    // stuckCount is NOT cleared here: issuing a chase is not closing on the boss.
+    // NoteRecoveryProgress owns every recovery counter (see DcApproachState).
     ClearStall(context);
     SetPhase(context, "pursuing");
     LOG_DEBUG("playerbots.dungeonclear",
@@ -1031,6 +1200,15 @@ void DungeonClearAdvanceAction::FillPathObs(AdvanceState& st, DungeonClearApproa
                     G3D::Vector3(bossX, bossY, bossZ));
         return;  // off-path is meaningless while unreachable
     }
+
+    // A long re-entry glide is off the route BY CONSTRUCTION and for its whole
+    // length — that is what it is walking off. Letting the off-path rebuild judge
+    // it would cancel the cure on its third tick (DoOffPathRebuild →
+    // ResolveEscortConflict) and re-enter this rung from a standstill, forever.
+    // The latch is deadline-bounded and drops itself the moment the glide stops,
+    // so this stands the rebuild down only while real travel is in flight.
+    if (RejoinGlideInFlight(appr, bot))
+        return;
 
     if (DungeonPathFollower::IsOffPath(bot, path, follower) &&
         follower.offPathTicks >= DungeonPathFollower::OFF_PATH_TICK_LIMIT)
@@ -1147,7 +1325,16 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::TryReanchorStaleCurso
     if (hop.isDone || hop.isJump)
         return Step::Continue;
 
-    float const staleDist = bot->GetDistance(hop.point.x, hop.point.y, hop.point.z);
+    // Staleness is an ALONG-ROUTE question, so measure it in plan view — the
+    // same geometry NextHop's arrival test uses. A 3D distance here charges the
+    // bot for navmesh Z float, and on a ramp that float is 2-3.5yd: enough to
+    // push a hop that is 10yd away horizontally over the 12yd limit and fire a
+    // re-anchor every single tick. Each re-anchor is a Resnap + a fresh
+    // NextHop, and the resulting cursor churn is what turned a ramp into the
+    // 444-event resnap storm in tr-20260818-073620-14. Vertical mismatch is a
+    // real condition, but it is a FLOOR problem with its own handling below,
+    // not a reason to re-anchor.
+    float const staleDist = bot->GetExactDist2d(hop.point.x, hop.point.y);
 
     // DIRECTION, not just distance. The distance rule alone leaves a hole the
     // width of itself: the off-line rejoin below fires at OFF_PATH_THRESHOLD
@@ -1165,13 +1352,44 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::TryReanchorStaleCurso
     bool const behind = DungeonPathFollower::HopIsBehind(bot, path, follower, hop);
     if (staleDist > DC_REANCHOR_DISTANCE || behind)
     {
-        bool const reanchored = DungeonPathFollower::Resnap(bot, path, follower);
+        bool moved = false;
+        bool const reanchored = DungeonPathFollower::Resnap(bot, path, follower, &moved);
         LOG_DEBUG("playerbots.dungeonclear",
                   "[DC:{}] re-anchor: next hop {:.1f}yd (limit {}yd, behind={}) -> {}",
                   bot->GetName(), staleDist, DC_REANCHOR_DISTANCE, behind,
-                  reanchored ? "Resnapped + refetched hop" : "Resnap failed, falling through");
-        if (reanchored)
+                  !reanchored  ? "Resnap failed, falling through"
+                  : moved      ? "Resnapped + refetched hop"
+                               : "Resnap held the same cursor");
+        if (reanchored && moved)
             hop = DungeonPathFollower::NextHop(bot, path, follower);
+
+        // FIXED POINT. Resnap searches forward FROM the cursor, so the cursor is a
+        // candidate of its own search — and on an authored anchor route (points
+        // 15-20yd apart) a bot that has overshot by a few yards is nearer to the
+        // point it just passed than to the next one. Resnap therefore re-picks it,
+        // reports success, and leaves the hop exactly as behind as it found it, so
+        // this rung asks again next tick and every tick after. Live in
+        // tr-20260902-134056-2: 198 re-anchors at an unchanging 4.0-4.4yd, the tank
+        // bouncing against a hop it had already walked past for eight minutes, with
+        // no counter to notice because this rung only ever Continues.
+        //
+        // A hop the bot has PASSED is not a target, so retire it: step the cursor
+        // one point forward and refetch. That is the one escape Resnap structurally
+        // cannot provide, and it is safe for the reason HopIsBehind established —
+        // the ground being skipped is ground already covered.
+        if (behind && !moved)
+        {
+            G3D::Vector3 skipped;
+            if (DungeonPathFollower::SkipPassedPoint(path, follower, skipped))
+            {
+                LOG_DEBUG("playerbots.dungeonclear",
+                          "[DC:{}] re-anchor: hop still behind after resnap -> retiring "
+                          "passed point ({:.1f},{:.1f},{:.1f}), cursor now seg {} pt {}",
+                          bot->GetName(), skipped.x, skipped.y, skipped.z,
+                          follower.segmentIdx, follower.pointIdx);
+                hop = DungeonPathFollower::NextHop(bot, path, follower);
+            }
+        }
     }
     return Step::Continue;
 }
@@ -1231,7 +1449,7 @@ void DungeonClearAdvanceAction::FillHopObs(AdvanceState& st, DungeonClearApproac
         return;  // jump outranks ride / off-line / window
 
     // A healthy in-flight continuous-spline glide (ESCORT generator active AND
-    // moving) just rides — deliberately NOT IsWaitingForLastMove, whose
+    // moving) just rides — deliberately NOT DcMoveDeferred, whose pre-#2747
     // window-sized delay was the mid-path "frozen for seconds" freeze.
     MotionMaster* const mm = bot->GetMotionMaster();
     obs.splineRunning =
@@ -1255,7 +1473,14 @@ void DungeonClearAdvanceAction::FillHopObs(AdvanceState& st, DungeonClearApproac
         // exactly the step-pause the tank was reported doing on approach.
         bool interrupt = false;
         uint32 const nowMs = getMSTime();
-        if (DcSettings::GetFloat(bot, "AdvanceWindowYards") > 0.0f &&
+        // The probe measures the ROUTE's remaining window. During a long re-entry
+        // the bot is nowhere near that route, so the window it would build is not
+        // the ground being travelled and any sphere it reports is nonsense — halt
+        // on it and the re-entry is torn down for a hazard it was never near.
+        // Ride the re-entry; hazards on it are the normal route's job once the bot
+        // is back on the line.
+        if (!RejoinGlideInFlight(appr, bot) &&
+            DcSettings::GetFloat(bot, "AdvanceWindowYards") > 0.0f &&
             DcSettings::GetBool(bot, "PullEnRouteAvoid") &&
             nowMs - appr.glideHazardProbeMs >= DC_GLIDE_HAZARD_PROBE_MS)
         {
@@ -1307,9 +1532,41 @@ void DungeonClearAdvanceAction::FillHopObs(AdvanceState& st, DungeonClearApproac
     std::optional<G3D::Vector3> const curPt = DungeonPathFollower::CurrentPoint(path, follower);
     bool const vertOff = curPt.has_value() &&
                          std::fabs(bot->GetPositionZ() - curPt->z) > DC_CORRIDOR_Z_BAND;
-    obs.offLine = st.routeDeviation > DungeonPathFollower::OFF_PATH_THRESHOLD || vertOff;
+    // HYSTERESIS. Engage at OFF_PATH_THRESHOLD, release at the lower
+    // DC_OFF_LINE_RELEASE, so once the rung owns the bot it keeps it until the
+    // re-entry has actually finished. Released at the same 6yd it engaged at, the
+    // rung handed a bot sitting in the band back to the escort spline every other
+    // tick — and the spline's straight opening leg is precisely what cuts a bend
+    // when the bot is off the line. (BWL tr-20260830-115416-5: 4.1-6.9yd across
+    // the anchor 16->18 hairpin, straight into a navmesh void.) The vertical band
+    // is not part of the hysteresis: a floor mismatch is binary, not a drift.
+    obs.offLine = DungeonClearMath::IsOffLineWithHysteresis(
+        st.routeDeviation, appr.offLineLatched, vertOff,
+        DungeonPathFollower::OFF_PATH_THRESHOLD, DC_OFF_LINE_RELEASE);
+    appr.offLineLatched = obs.offLine;
     if (obs.offLine)
         return;  // off-line outranks window
+
+    // Back on the corridor: the rejoin rung is done, so its DRIFT baseline must not
+    // survive into the NEXT off-line episode (a stale low best would make the first
+    // refused tick of that episode read as drift).
+    appr.rejoinBestDev = std::numeric_limits<float>::max();
+    appr.rejoinProgressBest = std::numeric_limits<float>::max();
+
+    // rejoinRefusals is deliberately NOT cleared here, and the difference is the
+    // whole bug. rejoinBestDev is a per-EPISODE baseline; rejoinRefusals is a
+    // LIVENESS counter, and a liveness counter that resets on an episode boundary
+    // is worthless whenever something else owns that boundary. Here something does:
+    // an off-path rebuild (DoOffPathRebuild, one tier up) reseeds the follower, the
+    // fresh cursor drops RouteDeviation to ~0, the hysteresis releases, and control
+    // arrives at this line having moved the bot precisely nowhere. tr-20260902-134056-1
+    // rode that circuit for seven minutes: 68 consecutive refused rejoins to the same
+    // point (472.9,-259.7,104.7) at seg 11, the rebuild resetting the count every 2-3
+    // ticks, so the 8-refusal escalation below — chunked re-entry, then a `dc skip`
+    // stall — was unreachable by construction and the run died on the 600s watchdog
+    // with every counter reading clear. The counter now falls to
+    // NoteRecoveryProgress, which clears it when the bot is actually nearer the
+    // objective and at no other time.
 
     // Normal case: is a >=2-point spline window available? Build it once here and
     // carry it into DoIssueSplineWindow so the launch reuses this exact window.
@@ -1364,6 +1621,53 @@ void DungeonClearAdvanceAction::FillHopObs(AdvanceState& st, DungeonClearApproac
                           honoured ? "truncating" : "too close to honour, gliding",
                           before, st.splineWindow.size());
     }
+    // SCREEN THE OPENING LEG. window[0] is the bot's live position and window[1]
+    // the cursor point; BuildSplineWindow appends the rest verbatim and screens
+    // nothing, so that first segment is a straight line the route never vouched
+    // for. On the corridor it runs ALONG the route and is safe by construction.
+    // Off it, it is a chord across whatever the route was bending around — which
+    // is how a BWL tank ended up inside solid rock (tr-20260830-115416-5, the
+    // anchor 16->18 hairpin, five seconds with zero navmesh under it).
+    //
+    // The rejoin rung already owns everything past OFF_PATH_THRESHOLD, so the only
+    // exposure is the residual band beneath it. Probe ONLY inside that band: a
+    // bot within DC_OFF_LINE_RELEASE of the line has an opening leg that lies
+    // along the corridor and cannot cut a corner, and this is a per-tick hot path
+    // where an unconditional raycast would not pay for itself. Failing the
+    // screen drops the window, which sends the tick to the per-point MoveTo
+    // fallback — a PathGenerator route, wall-safe AND floor-safe by construction,
+    // so it routes AROUND whatever the chord tried to cross.
+    //
+    // TWO probes, because a wall and a hole fail differently. LegIsClear is a
+    // static-VMAP sightline and an open void has nothing in it to see, so a leg
+    // over a pit screens perfectly clean. LegIsOnMesh raycasts the NAVMESH and
+    // stops at the void's rim. Gundrak tr-20260831-174013-100 is the case that
+    // needs the second one: a tank 7.2yd off its route on the spur north of the
+    // Colossus arena, opening leg straight across the x 1638-1648 void, LOS
+    // clean — 202yd walked for 0.98yd of net progress, 142 direction reversals,
+    // and a stuck ladder that ran to completion nine times without ever
+    // suspecting the route (which was fine) or the leg (which nothing checked).
+    // Size and band are tested BEFORE either probe: window[1] must exist to be
+    // read, and neither raycast may run on a healthy on-corridor tick.
+    if (st.splineWindow.size() >= 2 && st.routeDeviation > DC_OFF_LINE_RELEASE)
+    {
+        bool const losClear = DungeonPathFollower::LegIsClear(bot, st.splineWindow[1]);
+        // Short-circuit: a leg already condemned by LOS never pays for the
+        // navmesh raycast as well.
+        bool const onMesh = losClear && DungeonPathFollower::LegIsOnMesh(bot, st.splineWindow[1]);
+        if (DungeonPathFollower::DropOpeningLeg(st.splineWindow.size(), st.routeDeviation,
+                                                DC_OFF_LINE_RELEASE, losClear, onMesh))
+        {
+            LOG_DEBUG("playerbots.dungeonclear",
+                      "[DC:{}] advance window: opening leg to ({:.1f},{:.1f},{:.1f}) is "
+                      "{} at {:.1f}yd off the line -> per-point MoveTo instead",
+                      bot->GetName(), st.splineWindow[1].x, st.splineWindow[1].y,
+                      st.splineWindow[1].z, losClear ? "off the navmesh" : "blocked",
+                      st.routeDeviation);
+            st.splineWindow.clear();
+        }
+    }
+
     obs.haveSplineWindow = st.splineWindow.size() >= 2;
 }
 
@@ -1466,9 +1770,12 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::DoJumpLeg(AdvanceStat
 // A healthy in-flight continuous-spline glide just rides: NextHop already
 // advanced the cursor past the glided-over points, so re-issuing would
 // StopMoving + Launch a fresh escort and hitch.
-DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::DoRideLiveGlide(AdvanceState& st)
+DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::DoRideLiveGlide(AdvanceState& /*st*/)
 {
-    st.appr->stuckCount = 0;
+    // A glide being IN FLIGHT is the weakest possible evidence of progress — it is
+    // the state a bot wedged against geometry sits in indefinitely, and clearing
+    // the ladder from here made "ride the spline" a way to never escalate. If the
+    // glide is carrying the bot anywhere, NoteRecoveryProgress sees it this tick.
     ClearStall(context);
     SetPhase(context, "moving");
     return Step::ReturnTrue;
@@ -1489,24 +1796,229 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::DoOffLineRejoin(Advan
     DungeonFollowerState& follower = *st.follower;
     DungeonPathFollower::Hop const& hop = st.hop;
 
+    // Route points are Detour corridor vertices: their z is already the floor the
+    // route runs on. Stock MoveTo's z-search would instead also try the ground 8yd
+    // BELOW the requested height and keep whichever path is shorter — over a spiral
+    // staircase that is the helix turn underneath, so each re-issue walked the tank
+    // one storey further down (Karazhan's Servants' Quarters stair under the Maiden
+    // route, tr-20260927-101126-7 / -101342-8). When a complete route verifiably
+    // arrives at the point's own height, go there exactly (still a generated path,
+    // DoMovePoint); otherwise leave the z-search in charge, since an exact move with
+    // no route arriving is the straight-line-through-a-floor case.
+    bool const exactFloor =
+        DcEngageGeometry::IsPointLevelReachable(bot, hop.point.x, hop.point.y, hop.point.z);
     // DcMoveTo cancels any stale straight spline so it can't shadow the pathed re-entry.
+    // A standing bot has no move in flight, so stock's last-move guards on this
+    // point protect nothing: re-issuing our own point is refused as a duplicate
+    // for 5s after loot or a drift halt stopped the bot short, and the bot idles
+    // there (tp-20260927-114025-1).
+    if (!bot->isMoving())
+        DcMovement::ReleaseMoveLock(bot);
     bool const rejoining =
         DcMoveTo(next->mapId, hop.point.x, hop.point.y, hop.point.z,
                  /*idle*/ false, /*react*/ false, /*normal_only*/ false,
-                 /*exact_waypoint*/ false, MovementPriority::MOVEMENT_NORMAL);
+                 exactFloor, MovementPriority::MOVEMENT_NORMAL);
+    float const dz = bot->GetPositionZ() - hop.point.z;
+    float const gap = DungeonClearMath::RejoinGap(st.routeDeviation, dz, DC_Z_LEVEL_TOLERANCE);
     LOG_DEBUG("playerbots.dungeonclear",
-              "[DC:{}] off-line {:.1f}yd -> rejoining route via generated path to "
-              "({:.1f},{:.1f},{:.1f}) (seg {} pt {}, moved={})",
-              bot->GetName(), st.routeDeviation, hop.point.x, hop.point.y, hop.point.z,
-              follower.segmentIdx, follower.pointIdx, rejoining);
-    appr.stuckCount = 0;
-    ClearStall(context);
+              "[DC:{}] off-line {:.1f}yd (dz {:.1f}, gap {:.1f}) -> rejoining route via "
+              "generated path to ({:.1f},{:.1f},{:.1f}) (seg {} pt {}, moved={}, exact={})",
+              bot->GetName(), st.routeDeviation, dz, gap, hop.point.x, hop.point.y,
+              hop.point.z, follower.segmentIdx, follower.pointIdx, rejoining, exactFloor);
     SetPhase(context, "moving");
-    // Own the tick whether or not MoveTo issued: a false return is the benign
-    // duplicate / waiting-on-last-move case (the pathed re-entry is already in
-    // flight), and we must never fall through to launch the straight escort
-    // spline while the bot is still off the line.
-    return Step::ReturnTrue;
+
+    DungeonClearMath::RejoinProgressVerdict const pv =
+        DungeonClearMath::TrackRejoinProgress(gap, appr.rejoinProgressBest,
+                                              DC_REJOIN_PROGRESS_EPS);
+    appr.rejoinProgressBest = pv.best;
+    if (pv.progressed)
+    {
+        appr.rejoinRefusals = 0;
+        ClearStall(context);
+    }
+    else if (pv.idle)
+        ++appr.rejoinRefusals;
+
+    // A REFUSAL IS NOT AUTOMATICALLY BENIGN. This rung used to return ReturnTrue
+    // unconditionally, reasoning that a false return means "the pathed re-entry is
+    // already in flight". Stock MoveTo refuses whenever ANY move is already
+    // queued, and DcMoveTo's ResolveEscortConflict clears only an ESCORT
+    // generator — so when DC's own per-point move is what is in flight
+    // (gen=POINT, which is the norm here: the previous tick's re-entry) the
+    // refusal handed the tick straight back to the move that was carrying the bot
+    // OFF the line, while this rung logged success and moved nothing. Measured on
+    // tr-20260830-115416-5: 48 of 53 rejoins for the tank refused (243 of 306
+    // server-wide), route deviation growing 6.2 -> 31.1yd across 22 consecutive
+    // refused ticks until Resnap blew its 45yd radius and threw the cursor
+    // backwards — the ping-pong, once every ~20s, all run.
+    //
+    // Cancelling on every refusal is not the answer either: the healthy case is a
+    // re-entry issued last tick and still walking, and tearing that down each tick
+    // is a stop/re-issue stutter. So judge the move in flight by whether it is
+    // doing this rung's job — NET PROGRESS back toward the corridor, the same
+    // yardstick recoveryProgressWatch applies one rung up. While the deviation
+    // holds at or below the best seen, ride it. Once it has grown past the slack,
+    // whatever is moving the bot is not a re-entry: halt it here so the next tick
+    // issues a clean one. StopMovingOnCurrentPos, not StopMoving — the latter
+    // does not cancel a launched escort spline (see DcMovement.h).
+    if (rejoining)
+        appr.rejoinBestDev = gap;
+    else
+    {
+        DungeonClearMath::RejoinRefusalVerdict const rv =
+            DungeonClearMath::DecideRejoinRefusal(gap, appr.rejoinBestDev,
+                                                  DC_REJOIN_DEV_SLACK);
+        if (rv.haltStaleMove)
+        {
+            LOG_DEBUG("playerbots.dungeonclear",
+                      "[DC:{}] off-line rejoin refused while drifting ({:.1f}yd, best "
+                      "{:.1f}yd) -> halting the stale move so the next tick can re-issue",
+                      bot->GetName(), gap, appr.rejoinBestDev);
+            bot->StopMovingOnCurrentPos();
+        }
+        appr.rejoinBestDev = rv.bestDeviation;
+    }
+
+    // LIVENESS, not just drift. DecideRejoinRefusal asks "is the move in flight
+    // carrying me AWAY?" — which a bot that is not moving at all answers "no",
+    // because its deviation is constant, forever. Riding that is riding nothing.
+    // So count ticks without progress (TrackRejoinProgress above), whether or not
+    // a move issued: a move that launches and buys no ground is just as frozen.
+    // tr-20260901-223655-10 (Halls of Lightning) is the case — the tank
+    // finished Bjarngrim 267.9yd behind anchor 0 of the Volkhan route, and this
+    // rung refused 3924 times in a row at an unchanging 267.2yd while reporting
+    // success, resetting stuckCount and clearing the stall on every one of them.
+    // Diag read `stuck=0/0/0, watchdogs: all clear` through ten and a half minutes
+    // of a party standing perfectly still.
+    if (appr.rejoinRefusals < DC_REJOIN_REFUSAL_LIMIT)
+    {
+        // Own the tick: we must never fall through to launch the straight escort
+        // spline while the bot is still off the line.
+        return Step::ReturnTrue;
+    }
+
+    // Off the route's storey: the hop is overhead or underfoot, and no MoveTo to it
+    // will be accepted. Rebuild the route from here instead of spending the strikes
+    // (see ShouldRepathOffLevel). EnsureLongPath picks up the expiry next tick and
+    // InstallLongPath seeds the cursor at the bot.
+    if (DungeonClearMath::ShouldRepathOffLevel(dz, DC_Z_LEVEL_TOLERANCE,
+                                               appr.offLevelRepathSpent))
+    {
+        LOG_INFO("playerbots.dungeonclear",
+                 "[DC:{}] off-line rejoin: {:.1f}yd off the line but off its level (dz {:.1f}) "
+                 "at seg {} pt {} -> re-pathing to {} from here",
+                 bot->GetName(), st.routeDeviation, dz, follower.segmentIdx,
+                 follower.pointIdx, next->name);
+        appr.offLevelRepathSpent = true;
+        appr.rejoinRefusals = 0;
+        appr.longPathExpiresMs = 0;
+        ClearStall(context);
+        return Step::ReturnTrue;
+    }
+
+    // The re-entry is not happening. Before giving the tick back to the recovery
+    // ladder, try the one cause this rung can fix itself: a leg too long for a
+    // single MoveTo to represent at all (DC_REJOIN_CHUNKED_DISTANCE).
+    if (st.routeDeviation >= DC_REJOIN_CHUNKED_DISTANCE && TryChunkedRejoin(st))
+    {
+        appr.rejoinRefusals = 0;  // a glide was issued: give it a fresh ladder
+        ClearStall(context);
+        return Step::ReturnTrue;
+    }
+
+    // Out of ideas for this cycle. Hand the tick DOWN rather than owning it, and
+    // COUNT it — the position-based detector cannot do that for us here: it only
+    // ticks for a bot that `isMoving()`, and this bot is issuing nothing at all
+    // (the live diag read `moving=0 gen=IDLE(0)` for ten minutes). stuckCount is
+    // the one counter that measures refusals, which is exactly the failure, so
+    // this rung has to feed it the same way DoMoveToFallback does.
+    LOG_INFO("playerbots.dungeonclear",
+             "[DC:{}] off-line rejoin made no progress for {} ticks at {:.1f}yd "
+             "(strike {}/{})",
+             bot->GetName(), appr.rejoinRefusals, st.routeDeviation,
+             appr.stuckCount + 1, DC_STUCK_LIMIT);
+    appr.rejoinRefusals = 0;
+    if (++appr.stuckCount < DC_STUCK_LIMIT)
+        return Step::ReturnFalse;
+
+    // Every cycle spent and the chunked re-entry could not be issued either. Stall
+    // for real: force a fresh path build from wherever the bot actually is, and
+    // surface the `dc skip` prompt. Before this, the rung absorbed the wedge in
+    // silence and the ONLY thing that ever ended the run was the 600s no-progress
+    // watchdog, ten minutes later, with every diag counter reading clear.
+    appr.stuckCount = 0;
+    appr.longPathExpiresMs = 0;
+    follower = DungeonFollowerState{};
+    StallDungeonClear(botAI,
+        "Stuck off the route to " + next->name + " — I can't path back to it from here. "
+        "I'll try to clear nearby mobs; use 'dc skip' if it persists.");
+    return Step::ReturnFalse;
+}
+
+// Long re-entry. The corridor back to the route is longer than ONE PathGenerator
+// call can express (see DC_REJOIN_CHUNKED_DISTANCE), so the plain MoveTo above
+// cannot fail its way to success no matter how many ticks it is given — it is
+// refused on geometry, not on contention. Build the way back with the module's
+// own chunked builder, which exists for exactly this cap ("PathGenerator caps
+// each call at ~296yd ... for any longer route we have to chain calls" —
+// ChunkedPathfinder.h), and glide the first window of it.
+//
+// The points come from the chunked builder's smoothed navmesh corridor, measured
+// from where the bot ACTUALLY is, so gliding them keeps the wall-safety the plain
+// MoveTo was chosen for in the first place — this is not the straight escort
+// chord the rung above warns about. bossEntry 0 forces anchor-free chunking: we
+// want a raw path back to a route point, never a route-registry lookup.
+bool DungeonClearAdvanceAction::TryChunkedRejoin(AdvanceState& st)
+{
+    DungeonBossInfo const* next = st.next;
+    DungeonPathFollower::Hop const& hop = st.hop;
+
+    ChunkedPathfinder::Result const back = ChunkedPathfinder::Build(
+        bot, next->mapId, /*bossEntry*/ 0, hop.point.x, hop.point.y, hop.point.z);
+    if (!back.reachable || back.segments.empty())
+    {
+        LOG_INFO("playerbots.dungeonclear",
+                 "[DC:{}] long re-entry: no chunked path back to the route "
+                 "({:.1f}yd to seg {} pt {}): {}",
+                 bot->GetName(), st.routeDeviation, st.follower->segmentIdx,
+                 st.follower->pointIdx,
+                 back.failureReason.empty() ? "no navigable route" : back.failureReason);
+        return false;
+    }
+
+    // Same window cap as the route glide (AdvanceWindowYards; 0 = unbounded), so a
+    // re-entry can no more outrun the blocking-trash detector than a normal leg
+    // can. window[0] is the live position, exactly as BuildSplineWindow builds it.
+    float const windowYards = DcSettings::GetFloat(bot, "AdvanceWindowYards");
+    Movement::PointsArray pts;
+    pts.push_back(G3D::Vector3(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ()));
+    float travelled = 0.0f;
+    for (PathSegment const& seg : back.segments)
+    {
+        for (G3D::Vector3 const& p : seg.polyline)
+        {
+            travelled += (p - pts.back()).magnitude();
+            pts.push_back(p);
+            if (windowYards > 0.0f && travelled >= windowYards)
+                break;
+        }
+        if (windowYards > 0.0f && travelled >= windowYards)
+            break;
+    }
+    if (pts.size() < 2 || !DcMovement::SplinePath(botAI, pts))
+        return false;
+
+    // Latch the glide so the off-path rebuild stands down for exactly as long as
+    // it is walking (see DcApproachState::rejoinGlideUntilMs).
+    float const speed = std::max(1.0f, bot->GetSpeed(MOVE_RUN));
+    st.appr->rejoinGlideUntilMs =
+        getMSTime() + static_cast<uint32>(1000.0f * travelled / speed) + DC_REJOIN_GLIDE_SLACK_MS;
+
+    LOG_INFO("playerbots.dungeonclear",
+             "[DC:{}] long re-entry: {:.1f}yd off-line is past the single-MoveTo "
+             "reach -> gliding {} chunked pts ({:.1f}yd) back to the route",
+             bot->GetName(), st.routeDeviation, pts.size(), travelled);
+    return true;
 }
 
 // Normal case: hand the whole upcoming polyline run (built in FillHopObs) to the
@@ -1523,7 +2035,9 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::DoIssueSplineWindow(A
     Movement::PointsArray points(st.splineWindow.begin(), st.splineWindow.end());
     if (DcMovement::SplinePath(botAI, points))
     {
-        st.appr->stuckCount = 0;
+        // Launching a spline is an issue, not an arrival — the wall-clip and
+        // ping-pong reports are all bots with a freshly issued spline going
+        // nowhere. NoteRecoveryProgress clears the ladder if it travels.
         ClearStall(context);
         SetPhase(context, "moving");
         return Step::ReturnTrue;
@@ -1557,9 +2071,14 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::DoMoveToFallback(Adva
                               /*exact_waypoint*/ false, MovementPriority::MOVEMENT_NORMAL);
     if (!moved)
     {
+        // Deferred by the movement arbiter: a higher move still holds and will
+        // expire. Wait without counting it (MoveToFallbackCountsStuck).
+        if (!DungeonClearMath::MoveToFallbackCountsStuck(
+                moved, DcMoveDeferred(MovementPriority::MOVEMENT_NORMAL)))
+            return Step::ReturnFalse;
         // MoveTo returned false. Benign in the common case (duplicate
-        // move queued / waiting on last move). Only treat as a real
-        // stall after several consecutive failures.
+        // move queued). Only treat as a real stall after several
+        // consecutive failures.
         if (++stuck >= DC_STUCK_LIMIT)
         {
             // Force a fresh chunked rebuild — the cached path's first
@@ -1592,6 +2111,15 @@ bool DungeonClearAdvanceAction::Execute(Event /*event*/)
     // any map with no zones and no scripted-pull plan. See DcSocialQuarantine.h.
     DcSocialQuarantine::Update(bot, context);
 
+    // NEVER A RIDER. Everything below walks the BOT, and on a vehicle the bot is
+    // the passenger: a glide on it moves nothing, and the long-range pathfinder
+    // has no answer for a drake over open air. A mounted leader belongs to its
+    // map's vehicle driver (The Oculus's flight driver, Trial of the Champion's
+    // joust driver). On The Oculus stock OccFlyingMultiplier already zeroes this
+    // rung while mounted; this is the belt to that brace.
+    if (bot->GetVehicle())
+        return false;
+
     // Hard pause guard. The engine builds its action queue from the triggers
     // that fired at the START of the tick; on the tick the door-blocked action
     // auto-pauses, `advance` was already queued (paused was still false then) and
@@ -1611,6 +2139,26 @@ bool DungeonClearAdvanceAction::Execute(Event /*event*/)
     // the pull is dragging out of. See DcActionShared::PullOwnsTheTank.
     if (PullOwnsTheTank(bot, context, "advance"))
         return false;
+
+    // ENCOUNTER-HOLD guard. Blackwing Lair, phase 1: the moment Grethok's anchor
+    // clears, the next boss is Razorgore — and Razorgore is being walked egg to
+    // egg by our own runner. Everything below treats a live boss as a thing to
+    // close on (DoPursue re-paths at his current position; TryEngageHold parks at
+    // the engage range), which turns the raid into a conga line behind the boss
+    // it is forbidden to touch, forty yards from the ledge the runner is rooted
+    // on. HOLD instead and let the camp rung (61.5, both engines) own where the
+    // raid stands for the rest of phase 1. Self-releasing within ~3s of the last
+    // egg — see DcBlackwingLair::EggRunHoldsTheRaid.
+    if (DcBlackwingLair::EggRunHoldsTheRaid(bot))
+    {
+        LOG_DEBUG("playerbots.dungeonclear",
+                  "[DC:{}] advance stood down: the Razorgore egg run holds the raid "
+                  "— the camp owns our position", bot->GetName());
+        DcMovement::StopBot(bot, DcMovement::Stop::Hold);
+        ClearStall(context);
+        SetPhase(context, "");
+        return true;
+    }
 
     // Breadcrumb trail + camp upkeep (seed when unset, trail it forward while
     // scouting). Body lives in DcPullPlanner::MaintainScoutCamp so every rung that
@@ -1684,7 +2232,13 @@ bool DungeonClearAdvanceAction::Execute(Event /*event*/)
     // direct-pursuit give-up latch so a boss that wanders back out can be
     // re-pursued cleanly (the counters themselves live on appr and are consumed
     // by FillHopObs/DoHopDoneEscalation and DoPursue below).
-    if (engageDist < engageRange)
+    //
+    // Gated on atBoss, not raw 3D range: a tank inside the range but OFF the
+    // boss's floor is still approaching, and wiping the pursuit latch every tick
+    // there means a refused pursuit can never abdicate to the long path —
+    // tr-20261018-101829-3 sat at noClose=0/5 for 7 minutes, 30yd under
+    // Emperor Thaurissan's throne, against a 32yd room-aggro hand-off.
+    if (atBoss)
         appr.OnEnteredEngageRange();
 
     // Bundle the per-tick approach state for the extracted phase steps below.
@@ -1697,6 +2251,7 @@ bool DungeonClearAdvanceAction::Execute(Event /*event*/)
     st.engageDist = engageDist;
     st.engageRange = engageRange;
     st.atBoss = atBoss;
+    st.appr = &appr;
 
     // An active submerged swim leg owns the tick outright: it drives a raw 3D
     // escort spline through a tunnel the navmesh can't model (the floor under
@@ -1727,6 +2282,8 @@ bool DungeonClearAdvanceAction::Execute(Event /*event*/)
     if (Step s = TryLootYield(st); s != Step::Continue)
         return s == Step::ReturnTrue;
     if (Step s = TryEngageHold(st); s != Step::Continue)
+        return s == Step::ReturnTrue;
+    if (Step s = TryEngageWalkYield(st); s != Step::Continue)
         return s == Step::ReturnTrue;
     if (Step s = TryBetweenPullsRest(st); s != Step::Continue)
         return s == Step::ReturnTrue;
@@ -1822,6 +2379,28 @@ bool DungeonClearAdvanceAction::Execute(Event /*event*/)
     // --- Tier C: the hop cluster. One NextHop call advances the follower cursor,
     // so the resulting hop is carried through in st (never recomputed). ---
     st.hop = DungeonPathFollower::NextHop(bot, path, follower);
+
+    // Stranded cursor: the bot has arrived at its own hop in plan view but sits
+    // outside the vertical band, so walking cannot close the gap and NextHop
+    // cannot advance. Left alone this is a silent forever-loop — posStuck
+    // resnaps onto the same point, the rebuild re-derives it from the same
+    // position, and the tank paces under it (tr-20260818-073620-14, nine
+    // minutes at (-54,-366,76) on the Blackrock Spire ramp). Step the cursor
+    // past it and re-fetch, so the tick has somewhere real to go.
+    if (!st.hop.isDone && !st.hop.isJump)
+    {
+        G3D::Vector3 skipped;
+        if (DungeonPathFollower::SkipStrandedPoint(bot, path, follower, skipped))
+        {
+            LOG_INFO("playerbots.dungeonclear",
+                     "[DC:{}] stranded cursor: standing {:.1f}yd under/over route point "
+                     "({:.1f},{:.1f},{:.1f}) -> skipped to seg {} pt {}",
+                     bot->GetName(), bot->GetPositionZ() - skipped.z,
+                     skipped.x, skipped.y, skipped.z, follower.segmentIdx, follower.pointIdx);
+            st.hop = DungeonPathFollower::NextHop(bot, path, follower);
+        }
+    }
+
     TryReanchorStaleCursor(st);  // mutates st.hop / cursor; never terminates the tick
 
     // Sync the legacy "current hop" telemetry — `dc status` and a few tests
@@ -1853,7 +2432,46 @@ bool DungeonClearAdvanceAction::Execute(Event /*event*/)
         return false;
 
     if (vC == DungeonClearApproach::Verdict::OffLineRejoin)
+    {
+        // NOT WHILE AN EVENT THAT OWNS THE PULL HAS TAKEN OVER. The rejoin aims at
+        // the ROUTE CURSOR, and an event that steps its own movement has by
+        // definition been walking the party somewhere the cursor knows nothing
+        // about — so the cursor is stale, and "rejoin the route" means "walk back
+        // to the last place the route was right", which is backwards.
+        //
+        // Measured on tp-20260907-221612-1 (Halls of Reflection). The escape
+        // gossip lands; the throne-room objective clears in that same tick; this
+        // rung fires 54.2yd off-line and DcMoveTo's the tank to the THRONE anchor
+        // it has just left, 54 yards the wrong way. The move sets a LastMovement
+        // wait, the whole ladder idles out the ~5s cap, and by the time the escape
+        // driver gets a tick the party is west of the corridor mouth and has to
+        // come back east THROUGH the Lich King — 183.9yd of path for 133.3yd of
+        // net travel, ending 13.4yd from him inside Remorseless Winter. All ten
+        // runs; the driver reported TOO CLOSE / BEHIND HIM 16-19s in, every time.
+        //
+        // The predicate is the same one the pull pipeline and the scout-lag ask,
+        // and it reads true for a CONDITIONAL event the moment its activation
+        // condition does — which for the escape is the tick the boss state flips,
+        // i.e. the tick this rung would otherwise misfire in. Yield rather than
+        // claim: the event is about to steer, and this rung has nothing useful to
+        // contribute to a party whose route cursor is behind it.
+        //
+        // EXCEPT an event that yields the approach (DungeonEvent::yieldsTheApproach):
+        // it claims every tick it moves the party, so a tick that reaches this rung
+        // is one it handed back for Advance to finish. Held there, The Oculus's
+        // "on site" yield and this stand-down waited on each other for ten minutes
+        // 3yd outside the south pad's arrival (tr-20260913-003200-10).
+        if (DungeonEventExecutor::PullOwningEventHoldsTheApproach(bot, context))
+        {
+            LOG_DEBUG("playerbots.dungeonclear",
+                      "[DC:{}] off-line {:.1f}yd -> NOT rejoining: a pull-owning event is "
+                      "driving and the route cursor (seg {} pt {}) is behind the party",
+                      bot->GetName(), st.routeDeviation, st.follower->segmentIdx,
+                      st.follower->pointIdx);
+            return false;
+        }
         return DoOffLineRejoin(st) == Step::ReturnTrue;
+    }
 
     // IssueSplineWindow, then the terminal per-point MoveTo (window < 2 points, or
     // a SplinePath that refused). DoIssueSplineWindow returns Continue when the

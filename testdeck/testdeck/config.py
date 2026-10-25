@@ -19,6 +19,7 @@ per-request later.
 
 import ipaddress
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -94,7 +95,9 @@ class Config:
     playerbots_conf: Path = None
     dungeonclear_conf: Path = None
     dbc_dir: Path = None
+    client_dir: Path = None         # a WoW client root, for map-pack art
     data_dir: Path = None
+    mappack_dir: Path = None        # generated dungeon map art (under data_dir)
     app_dir: Path = None            # the testdeck/ checkout (holds dist/)
     mysql_bin: str = ""             # "" = look on PATH, then the usual places
     # server
@@ -102,6 +105,7 @@ class Config:
     port: int = 8790
     allowed_nets: list = field(default_factory=list)
     allowed_hosts: set = field(default_factory=set)   # extra Host: NAMES
+    allowed_frame_ancestors: list = field(default_factory=list)  # origins
     # auth
     min_gmlevel: int = 1
     admin_gmlevel: int = 3
@@ -126,6 +130,9 @@ class Config:
     dc_testplans: str = "dc_testplans.jsonl"
     dc_live: str = "dc_testrun_live.json"
     dc_dungeons: str = "dc_test_dungeons.json"
+    # continuous mode: tools/dc_test_run.py for evidence capture ("" = the
+    # one beside this checkout)
+    soak_tool: str = ""
     # misc
     bot_account_prefix_default: str = "rndbot"
     driver_character_default: str = "Dcdriver"
@@ -187,6 +194,10 @@ class Config:
     @property
     def rosters_file(self):
         return self.data_dir / "rosters.json"
+
+    @property
+    def mappack_file(self):
+        return self.mappack_dir / "mappack.json"
 
     @property
     def secret_file(self):
@@ -279,6 +290,7 @@ def load(explicit=None, app_dir=None):
     _load_bridge(cfg, data.get("bridge", {}))
     _load_realm(cfg, data.get("realm", {}))
     _load_dc(cfg, data.get("dungeonclear", {}))
+    cfg.soak_tool = str(data.get("soak", {}).get("dc_test_run", "") or "")
     return cfg
 
 
@@ -375,6 +387,11 @@ def _load_paths(cfg, sec, app_dir):
                          cfg.dist / "data" / "dbc",
                          cfg.dist / "dbc",
                      ]))
+    # Where the dungeon map pack is generated to. Under data_dir by default,
+    # because the art is derived from the operator's own client and must not
+    # end up somewhere that looks redistributable.
+    cfg.mappack_dir = _p(sec.get("mappack_dir"), cfg.data_dir / "mappack")
+    cfg.client_dir = _p(sec.get("client_dir"))
     cfg.mysql_bin = str(sec.get("mysql_bin", ""))
 
 
@@ -404,6 +421,71 @@ def _load_server(cfg, sec):
     cfg.allowed_hosts = {str(h).strip().lower()
                          for h in (sec.get("allowed_hosts") or [])
                          if str(h).strip()}
+    # Origins allowed to frame the deck. Empty keeps the default, which
+    # refuses every framer; see app.security_headers_for.
+    raw = sec.get("allowed_frame_ancestors")
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise ConfigError("[server] allowed_frame_ancestors must be a list of "
+                          'origins, e.g. ["https://wowmin.example.com"]')
+    cfg.allowed_frame_ancestors = []
+    for value in raw:
+        origin = parse_frame_origin(value)
+        if origin not in cfg.allowed_frame_ancestors:
+            cfg.allowed_frame_ancestors.append(origin)
+
+
+_DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def parse_frame_origin(value):
+    """One allowed_frame_ancestors entry, as the canonical origin string
+    emitted into CSP frame-ancestors. Raises ConfigError on anything that is
+    not exactly scheme://host[:port] with an http or https scheme.
+
+    The result is spliced into a header, so the check is an allowlist on the
+    whole string — a stray `;` or space would otherwise smuggle in a new CSP
+    directive. Wildcards, credentials, paths (even a lone `/`), queries and
+    fragments are refused rather than trimmed: an entry that is not what it
+    looks like should not quietly widen who can frame the deck."""
+    def bad(why):
+        return ConfigError(f"[server] allowed_frame_ancestors: {value!r}: {why}")
+
+    if not isinstance(value, str):
+        raise bad("must be a string")
+    text = value.strip()
+    m = re.fullmatch(r"([A-Za-z]+)://(.*)", text)
+    if not m:
+        raise bad("must be a full origin, e.g. https://wowmin.example.com")
+    scheme, rest = m.group(1).lower(), m.group(2)
+    if scheme not in ("http", "https"):
+        raise bad("scheme must be http or https")
+    if "*" in rest:
+        raise bad("wildcards are not allowed — list each origin")
+    if "@" in rest:
+        raise bad("credentials are not allowed in an origin")
+    for ch, what in (("/", "a path"), ("?", "a query"), ("#", "a fragment")):
+        if ch in rest:
+            raise bad(f"an origin has no {what} — use scheme://host[:port]")
+
+    hm = re.fullmatch(r"(\[[^\]]*\]|[^:]*)(?::(\d{1,5}))?", rest)
+    if not hm or not hm.group(1):
+        raise bad("not a valid host[:port]")
+    host, port = hm.group(1).lower(), hm.group(2)
+    if host.startswith("["):
+        try:
+            if ipaddress.ip_address(host[1:-1]).version != 6:
+                raise ValueError
+        except ValueError:
+            raise bad("not a valid IPv6 address") from None
+    elif not all(_DNS_LABEL.match(label) for label in host.split(".")):
+        raise bad("not a valid hostname or IPv4 address")
+    if port is not None:
+        if not 0 < int(port) < 65536:
+            raise bad("port out of range")
+        return f"{scheme}://{host}:{int(port)}"
+    return f"{scheme}://{host}"
 
 
 def _load_auth(cfg, sec):

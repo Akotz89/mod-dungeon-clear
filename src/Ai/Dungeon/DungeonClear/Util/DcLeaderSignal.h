@@ -164,8 +164,12 @@ public:
     // and the rest of it is still standing in a room the party must not enter.
     // Followers stay ANCHORED (not passive — they fight what comes to them) for
     // the duration. Drives DungeonClearHoldAtCampCombatTrigger and the camp-hold
-    // action's leash radius / movement priority.
+    // action's leash radius / movement priority. A boxed room-clear pull
+    // (DcPullContext::roomCampFight) counts as scripted here and below.
     static bool IsLeaderScriptedCampFight(Player* bot);
+
+    // The room-clear subset of IsLeaderScriptedCampFight (roomCampFight, Engage).
+    static bool IsLeaderRoomCampFight(Player* bot);
 
     // True while `bot`'s leader has ANY scripted-pull stage in flight — the tag leg
     // and the drag as well as the camp fight. Wider than IsLeaderScriptedCampFight
@@ -189,6 +193,21 @@ public:
     // leader itself, off/paused runs, or a leader out of combat. Drives
     // DungeonClearAssistCamp{,Combat}Trigger.
     static bool IsLeaderFightAssistWanted(Player* bot);
+
+    // Threat lead, damage side. NoteLeaderHit is fed by the damage hook: the
+    // first time an enabled DC leader damages a non-player in its current fight,
+    // it stamps DcRunState::leaderFirstHitMs. ShouldHoldDpsDamage is read by the
+    // multiplier for every damaging action: true while `bot` (a DPS follower in
+    // an active run) must wait out the lead from that first hit — see
+    // DungeonClearMath::ShouldHoldThreatLead.
+    static void NoteLeaderHit(Player* attacker);
+    // The leader's combat flag just went 0->1 (PlayerScript enter-combat hook):
+    // a NEW fight, so the lead clock restarts. LeaderCombatSince maintains its
+    // stamp lazily and misses a short out-of-combat gap between chained packs,
+    // which left the previous pack's first hit standing and the lead "already
+    // run" for the next one (Pull Lab O2, 19 of 21 remaining violations).
+    static void NoteLeaderEnterCombat(Player* player);
+    static bool ShouldHoldDpsDamage(Player* bot);
 
     // The MIRROR of IsLeaderFightAssistWanted for the LEADER itself: true when
     // `bot` IS the elected leader tank, is OUT of combat on an active (enabled,
@@ -225,7 +244,18 @@ public:
     // the LEADER's crumbs cross-bot (only the tank records them) and only returns a
     // crumb `bot` can reach over a complete generated path. False if there is no
     // leader, the trail is empty, or no reachable point lies far enough back.
-    static bool GetLeaderScoutTrailPoint(Player* bot, float lag, Position& out);
+    //
+    // `probeReachable` buys the reachability/zone-line gate, and it is the whole
+    // cost of the call: a full PathGenerator build (plus a zone-line raycast) per
+    // candidate crumb. Pass FALSE when the answer is only being MEASURED — the
+    // arrival-hold and "am I already on this crumb?" tests in
+    // DungeonClearFollowTankAction, which either stop the bot where it stands or
+    // hand the tick to Follow(), and so can never walk anyone across a navmesh
+    // seam. Those two tests ran on every trailing tick of every follower and were
+    // paying for a Detour query whose result they threw away. Keep it TRUE (the
+    // default) on any path that then MOVES to the returned point.
+    static bool GetLeaderScoutTrailPoint(Player* bot, float lag, Position& out,
+                                         bool probeReachable = true);
 
     // Multi-point variant of GetLeaderScoutTrailPoint: the centered breadcrumb
     // POLYLINE a follower should glide to catch up to the tank, rather than the
@@ -307,6 +337,93 @@ public:
     // aura already on the tank when applied. Paired with the pull-mode toggle.
     static void SetLeaderDazeImmunity(Player* leader, bool apply);
 
+    // BLACKWING LAIR, Razorgore: is `bot` the orb runner the leader elected?
+    //
+    // The only cross-bot fact the egg run publishes. The leader's driver picks a
+    // member that can legally take the Orb of Domination (alive bot, no pet, no
+    // Mind Exhaustion, not the tank) and stamps it into its own run state; that
+    // member's orb rung reads this on its OWN tick and walks itself over. The
+    // leader never touches the runner's movement — a cross-bot MotionMaster poke
+    // fights both the runner's own AI and the `bwl` raid strategy's repositioning,
+    // every tick, and loses.
+    //
+    // False for everyone else, for a real player (no AI to drive), whenever the
+    // leader's run is off or paused, AND whenever the driver has gone quiet.
+    //
+    // That last clause is not decoration. The election is a plain GUID in the
+    // leader's run state and the driver only clears it on a tick that reaches
+    // Step::Done — but the tick after the thirtieth egg the event stops being
+    // DUE, so the hook is never called again and no such tick ever happens. Read
+    // as a bare GUID compare, the runner stayed elected for the rest of the raid:
+    // it held its station at the orb while the party walked to Vaelastrasz.
+    // Pairing the compare with the driver's own liveness stamp releases it within
+    // a tick or two of phase 1 ending, from every exit the encounter has.
+    //
+    // The driver's liveness stamp covers the whole of the runner's life: there is
+    // no election at all until the tank's pull on Grethok has landed, and from
+    // that tick the driver stamps on every step it has work for.
+    static bool IsLeaderRazorgoreRunner(Player* bot);
+
+    // BLACKWING LAIR, Razorgore: is the leader's egg run live right now?
+    //
+    // True while the driver has had work to do within the last few seconds — it
+    // stamps DcRunState::razorDrivingMs on every step but completion and the
+    // pre-pull wait, so this arms with the tank's pull on Grethok and releases
+    // within a tick or two of the last egg breaking, with no latch to reset on a
+    // wipe. The raid's camp rung is its
+    // only consumer: while it holds, everyone but the orb runner fights at the
+    // authored camp instead of wherever the pull left them.
+    static bool IsLeaderRazorgoreDriving(Player* bot);
+
+    // BLACKWING LAIR, the Suppression Rooms: is the leader crossing the gauntlet
+    // right now?
+    //
+    // True while the transit driver has had work within the last few seconds — it
+    // stamps DcRunState::transitDrivingMs on every tick from the leader's arrival
+    // at the staging point to its arrival at the Broodlord standoff. Exactly the
+    // Razorgore-driving shape and for the same reason: the stamp is the whole
+    // window, so the rung that reads it arms with the crossing and releases within
+    // a tick or two of it ending, by EVERY exit the leg has (the standoff, the
+    // event's timeout, a wipe, `dc pause`, a dead leader). There is no latch to
+    // reset.
+    static bool IsLeaderTransitDriving(Player* bot);
+
+    // ...and WHERE is it taking us — the leader's live route cursor, the anchor it
+    // is currently walking toward.
+    //
+    // This is the moving anchor the pack rung leashes to, and it is why that rung
+    // could not simply reuse the Razorgore camp: on this leg there is no fixed
+    // point to camp at. Returns false whenever the transit is not driving, so one
+    // call answers both "is there a pack to hold" and "hold it where".
+    static bool GetTransitAnchor(Player* bot, Position& out);
+
+    // KARAZHAN, chess: the run's chess conductor, as the members read it.
+    //
+    // The conductor lives on the RUN OWNER (FindRunOwner — dead or alive, the bot
+    // whose run state is enabled), and every member's rung reads these three
+    // facts off it on its own tick. All three answer "nothing" unless the run is
+    // on, unpaused, armed, and the conductor has stamped within the freshness
+    // window — so a run switched off, paused, or finished releases every member
+    // within a tick or two, with no latch of its own to reset (the Razorgore
+    // shape).
+    //
+    // The piece the conductor gave `bot` (empty = none: hold at the sideline).
+    static ObjectGuid GetChessAssignment(Player* bot);
+    // Is the run's chess conductor armed and ticking? `stateOut` gets its
+    // DcChessConductor::State when it is.
+    static bool IsLeaderChessArmed(Player* bot, uint8* stateOut = nullptr);
+    // `bot`'s sideline slot, 0..9 — its index in the conductor's seat order, or a
+    // GUID-derived fallback before the conductor has seated anyone.
+    static uint32 GetChessSeat(Player* bot);
+    // A member gave up taking `piece` (the gossip never took): the conductor
+    // hands it something else on its next tick.
+    static void ReportChessRefusal(Player* bot, ObjectGuid piece);
+
+    // The same read for a caller that has ALREADY resolved the leader. The wrapper
+    // above is on two per-tick, per-bot paths and FindLeaderTank costs a
+    // process-wide mutex acquisition; a caller that needs the leader for its own
+    // reasons must not pay for a second one.
+    static bool GetTransitAnchorFrom(Player* leader, Position& out);
 };
 
 #endif  // _DC_LEADER_SIGNAL_H

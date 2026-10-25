@@ -30,6 +30,41 @@ namespace DcTestRunRecord
         }
     }
 
+    bool IsJsonNumber(std::string_view v)
+    {
+        // -?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?
+        std::size_t i = 0, n = v.size();
+        auto digit = [&](std::size_t k) { return k < n && v[k] >= '0' && v[k] <= '9'; };
+        if (i < n && v[i] == '-')
+            ++i;
+        if (!digit(i))
+            return false;
+        if (v[i] == '0')
+            ++i;
+        else
+            while (digit(i))
+                ++i;
+        if (i < n && v[i] == '.')
+        {
+            ++i;
+            if (!digit(i))
+                return false;
+            while (digit(i))
+                ++i;
+        }
+        if (i < n && (v[i] == 'e' || v[i] == 'E'))
+        {
+            ++i;
+            if (i < n && (v[i] == '+' || v[i] == '-'))
+                ++i;
+            if (!digit(i))
+                return false;
+            while (digit(i))
+                ++i;
+        }
+        return i == n;
+    }
+
     std::string EscapeJson(std::string_view s)
     {
         std::string out;
@@ -77,6 +112,7 @@ namespace DcTestRunRecord
           << ",\"instanceId\":" << rec.instanceId
           << ",\"level\":" << rec.level
           << ",\"heroic\":" << (rec.heroic ? "true" : "false")
+          << ",\"size\":" << rec.size
           << ",\"compSeed\":" << rec.compSeed
           << ",\"gearIlvl\":" << rec.gearIlvl
           << ",\"gearQuality\":" << rec.gearQuality
@@ -217,10 +253,46 @@ namespace DcTestRunRecord
         AppendEscaped(s, rec.stallAtEnd);
         s << ",\"phaseAtEnd\":";
         AppendEscaped(s, rec.phaseAtEnd);
+        if (!rec.traceFile.empty())
+        {
+            s << ",\"traceFile\":";
+            AppendEscaped(s, rec.traceFile);
+            s << ",\"oracles\":";
+            AppendEscaped(s, rec.oracles);
+        }
         s << ",\"wipeOnBoss\":" << (rec.wipeOnBoss ? "true" : "false")
           << ",\"wipeOpponentEntry\":" << rec.wipeOpponentEntry
           << ",\"wipeOpponent\":";
         AppendEscaped(s, rec.wipeOpponent);
+        s << ",\"scenario\":";
+        AppendEscaped(s, rec.scenario);
+        s << ",\"scenarioOf\":";
+        AppendEscaped(s, rec.scenarioOf);
+        s << ",\"focus\":[";
+        for (std::size_t i = 0; i < rec.focus.size(); ++i)
+            s << (i ? "," : "") << rec.focus[i];
+        s << "],\"successPredicate\":";
+        AppendEscaped(s, rec.successPredicate);
+        s << ",\"successBy\":";
+        AppendEscaped(s, rec.successBy);
+        s << ",\"tailPending\":" << (rec.tailPending ? "true" : "false")
+          << ",\"extras\":{";
+        for (std::size_t i = 0; i < rec.extras.size(); ++i)
+        {
+            Record::Extra const& e = rec.extras[i];
+            if (i)
+                s << ',';
+            AppendEscaped(s, e.key);
+            s << ':';
+            // A numeric extra is emitted bare only when it really is a JSON
+            // number; anything else (a producer bug) degrades to a string rather
+            // than corrupting the line.
+            if (e.numeric && IsJsonNumber(e.value))
+                s << e.value;
+            else
+                AppendEscaped(s, e.value);
+        }
+        s << '}';
         s << ",\"diag\":";
         DcDiag::AppendJson(s, rec.diag);
         s << '}';

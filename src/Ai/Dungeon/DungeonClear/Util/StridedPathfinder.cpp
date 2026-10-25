@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "DisableMgr.h"
 #include "Log.h"
 #include "Map.h"
 #include "ModelIgnoreFlags.h"
@@ -17,6 +18,7 @@
 #include "Ai/Dungeon/DungeonClear/Data/DungeonClearRouteRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonSpawnGraph.h"
 #include "Ai/Dungeon/DungeonClear/Util/CorridorCenter.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRunWing.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearGeometry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearTuning.h"  // DC_PI
 #include "Ai/Dungeon/DungeonClear/Util/LongRangePathfinder.h"
@@ -207,23 +209,62 @@ namespace
         // rebuilds next tick (the primary normally succeeds), which is far better
         // than stranding the party up a wall. HasVolumes gates the per-point loop
         // so maps without a volume — i.e. almost all — pay nothing.
-        if (DcNavPenaltyRegistry::HasVolumes(mapId))
+        //
+        // The screen rejects a corridor that ENTERS a region, never one that is
+        // LEAVING one. A party can legitimately be standing inside a fence — the
+        // Hellfire Ramparts wall covers ordinary room floor a few yards from the
+        // zone-in point — and rejecting every probe from in there strands them:
+        // each tier fails the same screen, so the party is walled into the spot
+        // the fence was only ever meant to keep routes out of. So when this
+        // stride's own start is inside a region, its leading points are allowed to
+        // be too; the screen arms the moment the corridor first reaches clear
+        // ground, and any point that goes back in after that is still rejected.
+        // Strides chain from the previous clean end, so a stride that starts
+        // outside is screened exactly as before.
+        // The run wing arms the wing-tagged rows (Blackrock Spire: keep an LBRS
+        // run out of UBRS and vice versa) exactly as it does in DcRouteFilter.
+        std::string const runWing = DcRunWing::FenceWing(bot);
+        if (DcNavPenaltyRegistry::HasVolumes(mapId, runWing))
         {
+            bool walkingOut = DcNavPenaltyRegistry::IsInsideRegion(mapId, cx, cy, cz, runWing);
             for (G3D::Vector3 const& p : candidate)
             {
-                if (DcNavPenaltyRegistry::PenaltyAt(mapId, p.x, p.y, p.z) > 1.0f)
+                if (!DcNavPenaltyRegistry::IsInsideRegion(mapId, p.x, p.y, p.z, runWing))
                 {
-                    LOG_DEBUG("playerbots.dungeonclear",
-                              "[dungeon-clear] probe rejected: corridor enters a no-go volume on "
-                              "map {} (type=0x{:x}); trying next tier",
-                              mapId, outType);
-                    return false;
+                    walkingOut = false;   // clear ground reached — the screen is live
+                    continue;
                 }
+                if (walkingOut)
+                    continue;             // still on the way out of the start region
+
+                LOG_DEBUG("playerbots.dungeonclear",
+                          "[dungeon-clear] probe rejected: corridor enters a no-go volume on "
+                          "map {} (type=0x{:x}); trying next tier",
+                          mapId, outType);
+                return false;
             }
         }
 
         outPoints = std::move(candidate);
         return true;
+    }
+
+    // The route on a map the core runs WITHOUT pathfinding: one straight segment
+    // to the target, shaped like an anchored leg (a single-point polyline the
+    // follower walks straight to). See the call site in Build for why.
+    StridedPathfinder::Result DirectRoute(float tx, float ty, float tz)
+    {
+        StridedPathfinder::Result result;
+        PathSegment seg;
+        seg.ex = tx;
+        seg.ey = ty;
+        seg.ez = tz;
+        seg.arriveRadius = ARRIVE_RADIUS;
+        seg.polyline.push_back(G3D::Vector3(tx, ty, tz));
+        result.segments.push_back(seg);
+        result.reachable = true;
+        result.complete = true;
+        return result;
     }
 }
 
@@ -243,6 +284,18 @@ StridedPathfinder::Result StridedPathfinder::Build(Player* bot, uint32 mapId, ui
         result.failureReason = "no map";
         return result;
     }
+
+    // NO NAVMESH TO ROUTE ON. The core switches pathfinding off outright for Eye
+    // of Eternity and both Trials (DisableMgr::IsPathfindingEnabled), so their
+    // navmesh never loads a single tile: every Detour tier below answers "bot off
+    // navmesh", and Advance's FARFROMPOLY nudge then probes with PathGenerator —
+    // which on such a map answers every probe with a straight shortcut, so each
+    // nudge walked the tank another 5yd along +X. tr-20260910-233100-1: 23s of
+    // nudges between the Argent champion and the Black Knight marched the whole
+    // party out through the Trial of the Champion arena's north side. The core
+    // moves every unit on these maps in a straight line; route the same way.
+    if (!DisableMgr::IsPathfindingEnabled(map))
+        return DirectRoute(tx, ty, tz);
 
     // Snap the target so its position is guaranteed on-mesh. The boss list
     // values already snap, but Build() is also called for non-boss targets

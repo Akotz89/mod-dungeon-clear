@@ -72,8 +72,66 @@ namespace
         // flickering on 18309/18311/18313, far=108+, never 0).
         { 557, 18341, 70.0f, { 18309, 18311, 18313 }, true, -145.0f, -50.0f },
         { 601, 28684,  40.0f, {} }, // Azjol-Nerub — Krik'thir the Gatewatcher
-        { 230, 9019,  166.0f, {} }, // Blackrock Depths — Emperor Dagran Thaurissan
+        // Blackrock Depths — Emperor Dagran Thaurissan. CallForHelp(VISIBLE_RANGE)
+        // wakes the whole throne room, the two balconies included, so their packs
+        // count however long the ramp walk is (see RoomAggroBoss::detourReachable).
+        // The throne-side floor goes last (bossSideLastRadius): 36yd takes in the
+        // flanking packs (<= 29.9yd from him) and stops short of the balconies'
+        // nearest mob (39.6yd).
+        { 230, 9019, 166.0f, {}, false, 0.0f, 0.0f, /*pullOutRadius*/ 0.0f,
+          /*skirtRadius*/ 0.0f, /*hasCampBox*/ false, 0.0f, 0.0f, 0.0f, 0.0f,
+          /*detourReachable*/ true, /*bossSideLastRadius*/ 36.0f },
         { 429, 14354,  50.0f, {} }, // Dire Maul East — Pusillin
+
+        // Upper Blackrock Spire (229) — General Drakkisath. NOT a script radius:
+        // his own engage only DoZoneInCombats his two Chromatic Elite Guards (his
+        // formation, fought with him). The room around him is the problem — 14
+        // Blackhand / Rage Talon mobs stand within 57yd of him at the north pair,
+        // the south archway the party walks in by, and the western group, and a
+        // boss fight among them pulls them in. 60yd is the measured gap: the next
+        // spawn out is 71.5yd off, in the corridors. Single level (z 111).
+        { 229, 10363,  60.0f, {} }, // Upper Blackrock Spire — General Drakkisath
+
+        // Deadmines (36) — Gilnid, the goblin foundry.
+        //
+        // THE RADIUS IS NOT READ FROM A SCRIPT HERE, because there is no script to
+        // read: Gilnid's whole SmartAI is a Molten Metal cast, an out-of-combat
+        // yell, and a door open on death. He force-pulls nothing. This row rests on
+        // the SCHOLOMANCE precedent above — "does not pre-aggro, but the room and
+        // the boss cannot be separated by ordinary means" — and 60yd is the
+        // measured spawn envelope of the foundry, not a script constant.
+        //
+        // What makes the room undecomposable: 19 ELITES at level 18, against a
+        // level-18 party, standing 7.1-57.6yd from Gilnid. At a same-level elite's
+        // ~20yd aggro radius, 17 of the 19 form ONE connected chain — single-linkage
+        // clustering finds no pack boundary anywhere in the room, so waking any of
+        // them can cascade through the lot. The dynamic pull governor cannot see
+        // this: it sizes a pack with 6yd spread / 10yd assist windows, so on a room
+        // whose mobs sit 15-20yd apart it reports "estimated 2 aggro" and returns
+        // LEEROY every time (424 LEEROY vs 4 ADVANCED across tp-20260815-171416-1).
+        // The party then walks in, collects the room, and Gilnid — who is simply the
+        // next roster target — joins on top of it.
+        //
+        // Live (tp-20260815-171416-1): 5 of 20 runs wiped "on Gilnid" with the
+        // status line alternating fighting_boss / fighting_trash every 1-2 seconds
+        // (tr-...-10: Gilnid, Craftsman, Engineer, Remote-Controlled Golem, Craftsman
+        // in fourteen seconds). Four of those five logged EVERY death as ON BOSS
+        // with no trash on the sheet at all — Gilnid lands the killing blows, so the
+        // record reads like a boss-difficulty problem when it is a room problem.
+        //
+        // 60 sweeps all 19 (50 would leave the three western-most at 52.0/55.3/57.6).
+        // It also takes in the adjacent mine trash — 2 Defias Taskmaster, 7 Strip
+        // Miner, 1 Overseer, 1 Miner — which costs nothing in practice: the clear
+        // approaches the foundry from the west THROUGH that tunnel, so those are
+        // already dead when the gate is evaluated, and RoomClearTimeout is the valve
+        // for any straggler that is not.
+        //
+        // No skirtRadius / pullOutRadius override. The computed boss sphere already
+        // does the right thing at both ends: the two Craftsmen at 7.1 and 9.2yd fall
+        // INSIDE it and are excluded from room trash, so they come with the boss as
+        // a normal 1-boss + 2-adds pull, and everything past it is ordinary
+        // clearable room trash.
+        { 36, 1763, 60.0f, {} }, // Deadmines — Gilnid (goblin foundry)
 
         // NOTE: Tendris Warpwood (11489) is deliberately NOT a room-aggro boss.
         // The radius-around-the-boss model is the wrong tool for him: live runs
@@ -97,6 +155,69 @@ namespace
         { 650, 35571, 100.0f, {} }, // Runok Wildmane
         { 650, 35572, 100.0f, {} }, // Mokra the Skullcrusher
         { 650, 35617, 100.0f, {} }, // Visceri
+
+        // Gundrak (604) — Slad'ran, the snake pit.
+        //
+        // Like Gilnid above, there is NO script force-pull to read a radius from:
+        // boss_slad_ran's Reset()/JustEngagedWith schedule only Poison Nova, Powerful
+        // Bite, Venom Bolt and the two summon waves. The row exists because the ROOM
+        // joins the fight anyway, by geometry rather than by CallForHelp — the boss
+        // spawns at the NORTH end of a ~70yd pit (1775.13, 674.98, 129.3) while his
+        // five Slad'ran Summon Targets (29682) sit 29-73yd SOUTH at y 606-646, i.e.
+        // right on top of the trash. The two Vipers at 90% and three Constrictors at
+        // 50% (75% heroic) therefore SPAWN inside the trash packs and run north
+        // through them, and Poison Nova (55081, 15yd) pushes the whole party 17yd
+        // outward into them every 16-53s.
+        //
+        // THE ROOM IS THE NINE ELITES, and only those:
+        //   * 29774 Spitting Cobra          x5, spawns 26.9-62.0yd — level 77, hp x4
+        //   * 29768 Unyielding Constrictor  x4, spawns 29.9-48.0yd — level 77, hp x4
+        //
+        // radius 75 is measured, not read from a script, and it is sized off the
+        // PATROL envelope rather than the spawn points. Two of the four constrictors
+        // are MovementType 2: guid 127014 runs path 1270140 (28 points, 24.9-69.9yd
+        // from the boss) and guid 127017 runs path 1270170 (26 points, 33.2-64.1yd).
+        // So the real far edge of the room is 69.9, not the 62.0 the spawn rows
+        // suggest — a radius sized to the spawns would drop a patrolling constrictor
+        // out of the set at the far end of its path and call the room clear while it
+        // was still walking back. 75 covers 69.9 and still stops short of the NEXT
+        // room's mobs of the same entries: the nearest non-room Spitting Cobra is
+        // 79.5yd out and the nearest non-room Unyielding Constrictor 88.9yd. (Of the
+        // 12 cobras and 12 constrictors on map 604 only these 9 are Slad'ran's; the
+        // rest reach 153 and 209yd.)
+        //
+        // WHY THE WHITELIST, given every entry on it reads hostile anyway. It is here
+        // to keep two NON-threats out of the room set:
+        //
+        // (1) 29630 Fanged Pit Viper, x86 at 21.1-71.3yd — the snakes carpeting the
+        //     pit floor. These were briefly whitelisted so the clear would sweep them;
+        //     a live run showed that going badly, and they should not have been in
+        //     scope to begin with. They are faction template 7 — FriendGroup 0,
+        //     EnemyGroup 0, no Enemies_* — so they stand NEUTRAL and never aggro on
+        //     proximity; nothing but a stray AoE brings them into the fight, and at
+        //     level 1 with HealthModifier 1 that same AoE kills them outright. They
+        //     were never part of the room-joins-the-fight problem, and clearing them
+        //     meant 86 individual engage cycles strung across a 70yd room against a
+        //     180s RoomClearTimeout. Leaving them alone is free.
+        // (2) 29834 Drakkari Frenzy, x8 within 73yd but at z 104-110 — down in the
+        //     MOAT, ~20yd below the boss platform (the column under the Slad'ran
+        //     altar has water at 110.14 and ground at 103.22, no 129 surface). These
+        //     DO read hostile, so an empty "any hostile" row would count them and
+        //     send the clear after mobs it cannot walk to: the Pandemonius failure
+        //     above, orbiting the boss until the timeout expires.
+        //
+        // The 13321 Frogs and 29637 Crafty Snake are critters and the 29682 Summon
+        // Targets carry UNIT_FLAG_NOT_SELECTABLE, so IsPossibleTarget already drops
+        // those three without help from the whitelist.
+        //
+        // No pullOutRadius / skirtRadius override. The computed sphere is ~26-28yd
+        // here (Slad'ran's aggro range + his 2.0 combat reach + the bot's + margin 2
+        // + padding 3), so at most the single closest Spitting Cobra (26.9yd) falls
+        // inside it and comes with the boss as a normal 1-boss + 1-add pull — the
+        // same call the Gilnid row makes for its two Craftsmen. Shrinking the
+        // exclusion to claw that one cobra back would force advanced pull-to-camp
+        // for the whole room (see pullOutRadius), which is not worth it for one add.
+        { 604, 29304, 75.0f, { 29774, 29768 } }, // Gundrak — Slad'ran
 
         // NOTE: The Mechanar (554) Mechano-Lord Capacitus had a room-aggro entry
         // here to pre-clear his SE Driller pack, back when the clear reached him
@@ -136,6 +257,50 @@ namespace
         // pullOutRadius 14, not the skirt).
         { 554, 19221, 70.0f, {}, false, 0.0f, 0.0f, /*pullOutRadius*/ 14.0f,
           /*skirtRadius*/ 40.0f },
+
+        // Karazhan (532) — Moroes. The Banquet Hall is cleared before he is
+        // touched. He stands on a dais 3yd above the hall floor (-10982.7,
+        // -1877.9, 81.8), aggressive, and on engage does CallForHelp(20) +
+        // DoZoneInCombat. His Reset() summons four of six guests 4-7yd around
+        // him, and each guest's SmartAI does CallForHelp 15 +
+        // SetInCombatWithZone on aggro. So coming within ~20yd of the dais, or
+        // pulling anything a guest can reach, starts the fight with every
+        // nearby pack.
+        //
+        // The hall (world DB, distance from Moroes): Phantom Guest formations
+        // of 8-9 elites led by 135233 (west, 21.8-38.6yd) and 135206 (east,
+        // 21.1-37.9yd), 135217 (south row, 41.6-45.3yd) and 135229 (far
+        // south, 54.4-56.4yd); four Ghostly Stewards (45.5-53.7yd) and three
+        // pathing Skeletal Waiters (36.5-41.4yd). Four more guests stand on the
+        // upper gallery at z 93.8; the reach filter drops them.
+        //
+        // radius 60 covers the far formation. The whitelist (Phantom Guest,
+        // Steward, Waiter) is what keeps his summoned guests (17007,
+        // 19872-19876) out of the room-trash set.
+        //
+        // pullOutRadius 12. The computed exclusion sphere would swallow both
+        // 21yd formations as "comes with the boss": Moroes plus 17 elites.
+        // Twelve keeps the summoned guests (<=7yd) excluded and makes every
+        // formation clearable, and it forces the advanced pull, so the tank
+        // tags a formation from outside and drags it south instead of meleeing
+        // it next to the dais.
+        //
+        // skirtRadius 32: his 20yd CallForHelp, plus a guest's 15yd call
+        // anchored ~6yd off him, minus overlap, plus margin. The approach
+        // orbit, the boss standoff and the pull camp all stay 32yd off the
+        // dais, which puts the camp at the south end of the hall.
+        //
+        // Camp box: his evade box (x >= -11028, y >= -1955), pulled 15yd in
+        // so the fanned-out camp, a step-out and the pack around the tank all
+        // stay inside it. Without it the drag walked camps back to the south
+        // door (y -1955..-1957), and a fresh camp at y -1943 put the fight
+        // against the Phantom Attendants' corridor (tr-20260926-174359-2).
+        // The max bounds are past the dais and the east wall, so they never
+        // bind.
+        { 532, 15687, 60.0f, { 16409, 16414, 16415 }, false, 0.0f, 0.0f,
+          /*pullOutRadius*/ 12.0f, /*skirtRadius*/ 32.0f,
+          /*hasCampBox*/ true, /*campMinX*/ -11013.0f, /*campMaxX*/ -10900.0f,
+          /*campMinY*/ -1940.0f, /*campMaxY*/ -1800.0f },
     };
 }
 
@@ -166,6 +331,14 @@ bool RoomAggroRegistry::InRoomBand(RoomAggroBoss const& boss, float worldY)
     if (!boss.hasYBand)
         return true;
     return worldY > boss.minY && worldY < boss.maxY;
+}
+
+bool RoomAggroRegistry::InCampBox(RoomAggroBoss const& boss, float worldX, float worldY)
+{
+    if (!boss.hasCampBox)
+        return true;
+    return worldX >= boss.campMinX && worldX <= boss.campMaxX &&
+           worldY >= boss.campMinY && worldY <= boss.campMaxY;
 }
 
 bool RoomAggroRegistry::IsRoomTrash(RoomAggroBoss const& boss, uint32 entry,

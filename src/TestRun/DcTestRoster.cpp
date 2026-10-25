@@ -62,10 +62,15 @@ namespace DcTestRoster
             return {Kind::Empty, {}, "party= needs 5 character names, e.g. "
                                      "party=Tankname,Healname,Dps1,Dps2,Dps3"};
 
-        if (names.size() != DcTestComp::kPartySize)
+        // 2-40 names (raid-support Plan D): roles stay positional — first is
+        // the tank, second the healer, the rest DPS. Sized rosters wanting
+        // more tanks/healers mark them in-game (the harness never respecs).
+        if (names.size() < DcTestComp::kMinPartySize ||
+            names.size() > DcTestComp::kMaxPartySize)
             return {Kind::WrongCount, {},
-                    "party= needs exactly " + std::to_string(DcTestComp::kPartySize) +
-                        " names (tank,heal,dps,dps,dps) — got " + std::to_string(names.size())};
+                    "party= needs " + std::to_string(DcTestComp::kMinPartySize) + "-" +
+                        std::to_string(DcTestComp::kMaxPartySize) +
+                        " names (tank,heal,dps,...) — got " + std::to_string(names.size())};
 
         for (std::size_t i = 0; i < names.size(); ++i)
             for (std::size_t j = i + 1; j < names.size(); ++j)

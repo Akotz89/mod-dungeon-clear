@@ -4,6 +4,7 @@
  */
 
 #include "DcStrategyGate.h"
+#include "DcModuleEnable.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 
 #include "Map.h"
@@ -59,6 +60,13 @@ namespace DcStrategyGate
 {
     void Reconcile(Player* bot)
     {
+        // Master switch. With the module disabled nothing was ever registered
+        // into the shared contexts, so there is no DC strategy to install — and
+        // nothing to strip either, which is why this is a plain return rather
+        // than a forced teardown. See DcModuleEnable.h.
+        if (!DcModule::IsEnabled())
+            return;
+
         if (!bot)
             return;
 
@@ -111,8 +119,43 @@ namespace DcStrategyGate
             botAI->ChangeStrategy("-dungeon clear combat", BOT_STATE_NON_COMBAT);
     }
 
+    void ApplyEntryDefaults(Player* bot)
+    {
+        if (!DcModule::IsEnabled() || !bot)
+            return;
+
+        PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
+        if (!botAI)
+            return;
+
+        Map* map = bot->GetMap();
+        if (!map || !map->IsDungeon())
+            return;
+
+        // Eat/drink. A bot inside a dungeon that is missing playerbots' `food`
+        // non-combat strategy never consumes between pulls: it stands at the
+        // rest spot and regens at the passive tick rate, which stretches a run
+        // from minutes to hours. The strategy is a stock default but can be
+        // missing (a bot whose saved strategy list predates it). Install it on
+        // entry only — a manual `nc -food` afterwards is the player's choice
+        // and sticks until the next entry.
+        if (!botAI->HasStrategy("food", BOT_STATE_NON_COMBAT))
+            botAI->ChangeStrategy("+food", BOT_STATE_NON_COMBAT);
+
+        // RAID consumables (raid-support Plan C): playerbots' opt-in `worldbuff`
+        // strategy is the v1 consumable stand-in — a level-banded simulated
+        // flask/food aura matrix (conf-shipped, AddAura-applied). Bots never
+        // stock real flasks, so it is installed on raid entry. Never stripped:
+        // whether a bot carries it anywhere else is the player's choice.
+        if (map->IsRaid() && !botAI->HasStrategy("worldbuff", BOT_STATE_NON_COMBAT))
+            botAI->ChangeStrategy("+worldbuff", BOT_STATE_NON_COMBAT);
+    }
+
     void ReconcileAllBots()
     {
+        if (!DcModule::IsEnabled())
+            return;  // nothing registered -> nothing to reconcile; skip the walk
+
         // Iterate every online player and reconcile the ones that are bots.
         // Reconcile() no-ops on real players (no bot AI) and on already-compliant
         // bots, so this is cheap. Runs on the world thread inside World::Update,

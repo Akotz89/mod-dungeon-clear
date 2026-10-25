@@ -113,10 +113,17 @@ these automatically as part of the normal boss route, with no player input.
 
 Event support currently covers, in classic: Deadmines, Shadowfang Keep, Wailing
 Caverns, Uldaman, Sunken Temple, Razorfen Downs, Scarlet Monastery, Zul'Farrak,
-Blackrock Depths, Scholomance, Stratholme, and Dire Maul; and in Burning
+Blackrock Depths, Upper Blackrock Spire, Scholomance, Stratholme, and Dire
+Maul; and in Burning
 Crusade: Hellfire Ramparts, Blood Furnace, Shattered Halls, Slave Pens,
 Underbog, Steamvault, Sethekk Halls, Mechanar, Arcatraz, Black Morass, Old
-Hillsbrad, and Magisters' Terrace. Coverage continues to expand.
+Hillsbrad, and Magisters' Terrace; and in Wrath of the Lich King: Utgarde Keep,
+the Nexus, Azjol-Nerub, Ahn'kahet, Drak'Tharon Keep, the Violet Hold, Gundrak,
+Halls of Stone, Halls of Lightning, Utgarde Pinnacle, the Culling of Stratholme,
+Trial of the Champion, Pit of Saron, and Halls of Reflection. Coverage continues
+to expand. (Trial of the Champion's joust itself is fought by mod-playerbots'
+`wotlk-toc` strategy; mod-dungeon-clear musters the mounted party and starts
+each phase.)
 
 Faction-specific events run only for the relevant side, and heroic-only events
 never fire on a normal run. If an event cannot complete (for example, a scripted
@@ -171,7 +178,9 @@ and gears it, sends it to a dungeon entrance and lets it clear the place on its
 own. You stay out of the party and watch, or `.dc test watch` the camera along.
 Every run records its seed, so a run that hits a bug can be replayed with the
 exact same party, and `.dc test plan` runs the same dungeon N times to give you
-a success *rate* rather than an anecdote.
+a success *rate* rather than an anecdote. `.dc test plan start pool=a,b:heroic,…
+total=0` runs a whole pool of dungeons until stopped — the Test Deck's
+Continuous mode, which keeps every failure and its logs across restarts.
 
 **[Test Runs](https://github.com/jrad7/mod-dungeon-clear/wiki/Test-Runs)** —
 the full command reference, gear and party options, plans, watching, the

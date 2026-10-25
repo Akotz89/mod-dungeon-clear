@@ -11,6 +11,7 @@
 #include "MovementActions.h"
 #include "Position.h"
 #include "Ai/Dungeon/DungeonClear/DcApproachState.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcPbCompat.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearApproach.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
 
@@ -20,6 +21,7 @@ class Creature;
 class Map;
 struct DungeonBossInfo;
 struct EventStep;
+struct DungeonEvent;
 struct DungeonEventProgress;
 
 // Thin MovementAction subclass that every movement-issuing DC action derives
@@ -38,11 +40,55 @@ protected:
     // Arbiter-funneled point move. Refuses while the run is paused (killing the
     // queued-action race), cancels a stale escort glide that would otherwise
     // coast under the new move, then delegates to MovementAction::MoveTo. Same
-    // own-the-tick semantics and argument list as the inherited MoveTo.
+    // own-the-tick semantics and argument list as the inherited MoveTo, plus one
+    // trailing knob:
+    //
+    // `ignoreEnemyTargets` (default TRUE) opts the leg out of stock's
+    // TravelPath::ClipPath (mod-playerbots #2747), which otherwise truncates an
+    // out-of-combat walk at the first path point inside attack range of a live
+    // hostile. That fires exactly in DC's pull approach, which deliberately walks
+    // to and past the aggro edge; DC owns its own aggro geometry (nav penalties,
+    // hazard registries, camp anchors, pull governor) and a silent truncation
+    // upstream of all of that is strictly harmful. No current caller passes
+    // false; the knob exists so one can, deliberately. Pre-#2747 it is accepted
+    // and dropped.
     bool DcMoveTo(uint32 mapId, float x, float y, float z, bool idle = false, bool react = false,
                   bool normal_only = false, bool exact_waypoint = false,
                   MovementPriority priority = MovementPriority::MOVEMENT_NORMAL, bool lessDelay = false,
-                  bool backwards = false);
+                  bool backwards = false, bool ignoreEnemyTargets = true);
+
+    // Would the movement arbiter refuse a move at `prio` right now? The one
+    // question every own-the-tick guard asks, spelled once for both sides of
+    // mod-playerbots #2747 — IsWaitingForLastMove before it, !CanOverrideMovement
+    // after (see DcPbCompat.h for why those are not simply inverses of each
+    // other). Both are protected members of MovementAction, so this has to be a
+    // member here; the `Self` cast makes the call dependent so the branch for the
+    // other version is never name-looked-up against headers that lack it.
+    template <class Self = DcMovementAction>
+    bool DcMoveDeferred(MovementPriority prio)
+    {
+        Self* self = static_cast<Self*>(this);
+        if constexpr (DcPbCompat::kMovementV2)
+            return !self->CanOverrideMovement(prio);
+        else
+            return self->IsWaitingForLastMove(prio);
+    }
+
+    // The inherited MoveTo, with #2747's trailing ignoreEnemyTargets forwarded on
+    // V2 and dropped on V1. DcMoveTo's only delegate; same `Self` idiom.
+    template <class Self = DcMovementAction>
+    bool DcRawMoveTo(uint32 mapId, float x, float y, float z, bool idle, bool react,
+                     bool normal_only, bool exact_waypoint, MovementPriority priority,
+                     bool lessDelay, bool backwards, bool ignoreEnemyTargets)
+    {
+        Self* self = static_cast<Self*>(this);
+        if constexpr (DcPbCompat::kMovementV2)
+            return self->MoveTo(mapId, x, y, z, idle, react, normal_only, exact_waypoint,
+                                priority, lessDelay, backwards, ignoreEnemyTargets);
+        else
+            return self->MoveTo(mapId, x, y, z, idle, react, normal_only, exact_waypoint,
+                                priority, lessDelay, backwards);
+    }
 
     // Pick a standoff point on a ring around `center`: the first candidate (from
     // DungeonClearMath::StandoffCandidates, ordered bot-side first) that snaps to
@@ -52,8 +98,11 @@ protected:
     // validate. Shared by the healer LOS reposition (ring around the hurt target)
     // and the contribution-gated combat regroup (ring around the fight anchor), so
     // both park a bot in the same validated band by one implementation.
+    // `leashCenter`/`leashRadius` (optional): also reject any point farther than
+    // leashRadius (2D) from leashCenter — see HealLeashRegistry.
     bool FindStandoffPoint(Map* map, Position const& center, float ringRadius,
-                           float maxRadius, float& x, float& y, float& z);
+                           float maxRadius, float& x, float& y, float& z,
+                           Position const* leashCenter = nullptr, float leashRadius = 0.0f);
 
     // What one glide tick did, so the caller can layer its own stall/park
     // bookkeeping without the driver needing the context.
@@ -120,7 +169,10 @@ protected:
     // DcEngageGeometry::AggroSafeApproachPoint with RoomAggroPathPadding honoured.
     // The single home of the skirt geometry, shared by EngageDirect's walk-in and
     // MoveToSkirtingRoomAggro so all three room-clear drivers orbit identically.
-    std::optional<Position> RoomAggroSkirtPoint(Unit* target);
+    // With `dest`, the approach line ends at that point instead of at `target`
+    // (the orbit latch is still keyed on `target`).
+    std::optional<Position> RoomAggroSkirtPoint(Unit* target,
+                                                Position const* dest = nullptr);
 
     // Walk toward `target`, detouring around an active room-aggro boss sphere
     // when one lies between (RoomAggroSkirtPoint) — else straight at `target`.
@@ -129,6 +181,13 @@ protected:
     // engage handshake (the pull-idle room-clear branch); EngageDirect consumers
     // get the skirt for free via EngageDirect itself.
     bool MoveToSkirtingRoomAggro(Unit* target, MovementPriority prio);
+
+    // Walk to `dest`, the room-clear stand spot in front of `pack`: skirt the
+    // room-aggro boss sphere first, then orbit `pack` at `packRadius` so the walk
+    // around it to the front never crosses its aggro. Same own-the-tick semantics
+    // as MoveToSkirtingRoomAggro.
+    bool MoveToStandSkirtingRoomAggro(Unit* pack, Position const& dest,
+                                      float packRadius, MovementPriority prio);
 
     // Drive an EscortCreature step (Wailing Caverns' Disciple of Naralex): START
     // its scripted escort via gossip, then each tick FOLLOW the escortee and
@@ -163,6 +222,28 @@ protected:
     // destination). Returns false once within cast range, so the caller falls
     // through to Drive and RunStep fires the GO.
     bool DriveUseItemOnGO(EventStep const& step);
+
+    // The event's pack leash (DungeonEvent::packLeash): true while the leader
+    // should stand and let the party close up before its next step. Counts the
+    // living members on the map outside the leash and runs DcPackLeash::Decide
+    // against the run state's two clocks; logs the hold and any watchdog release.
+    bool HoldForPackLeash(DungeonEvent const& ev);
+
+    // Drive a UseItemAt step's APPROACH (the Culling of Stratholme's five plagued
+    // grain crates, 48-81yd apart along 330yd of road). Owns the tick (returns
+    // true) while walking the tank to the step's anchor through the DC movement
+    // system, for the same reason the UseItemOnGO driver does: the at-objective
+    // StopBot(Hold) runs BEFORE Drive and cancels a plain MovePoint spline every
+    // tick, so RunStep's own HopTo alone would stutter-walk the road one tick of
+    // movement at a time. Returns false once the tank is inside the step's arrival
+    // radius (or the receipt GO is already standing), so the caller falls through
+    // to Drive and RunStep uses the item / latches.
+    //
+    // Simpler than the UseItemOnGO driver by exactly the things the crates do not
+    // need: no target GO, so no LOS/doorway detour and no forced-destination
+    // walk-in — every crate stands in the open on the road, and the spell finds its
+    // own target within 8yd rather than range-checking an interact box.
+    bool DriveUseItemAt(EventStep const& step);
 
     // Recovery verdict for a long non-combat set-piece (the Old Hillsbrad barrel
     // run). The objective drive owns the tick at DcRel::AtObjective (30), which
@@ -227,6 +308,7 @@ private:
 
     // Pre-route phases (boss snapshot only).
     Step TryEngageHold(AdvanceState const& st);
+    Step TryEngageWalkYield(AdvanceState const& st);
     Step TryLootYield(AdvanceState const& st);
     Step TryBetweenPullsRest(AdvanceState const& st);
     Step TryBossNotPresentStall(AdvanceState const& st);
@@ -253,6 +335,7 @@ private:
     Step DoJumpLeg(AdvanceState& st);
     Step DoRideLiveGlide(AdvanceState& st);
     Step DoOffLineRejoin(AdvanceState& st);
+    bool TryChunkedRejoin(AdvanceState& st);         // long re-entry; one MoveTo can't reach
     Step DoIssueSplineWindow(AdvanceState& st);
     Step DoMoveToFallback(AdvanceState& st);         // terminal: always handles the tick
 };
@@ -716,11 +799,12 @@ public:
 
 // ANY role, BOTH engines. Moves the bot OUT of an active-vacate hazard emitter's
 // pulse (DcHazard::NearestVacate — the Arcatraz Destroyed Sentinel's 15yd Energy
-// Discharge). Aims a point directly away from the emitter, just past its pulse
-// radius plus slack, snapped to the navmesh, clear of every OTHER hazard, and
-// path-reachable; if the straight-away point is blocked it fans the away-bearing
-// around until one validates. Re-issued each tick. MOVEMENT_COMBAT priority so it
-// overrides the bot's MoveChase / advance. Driven by
+// Discharge, a Maraudon Creeping Sludge's 5yd Poison Shock). Aims a point directly
+// away from the emitter, past its pulse radius plus that row's retreat slack,
+// snapped to the navmesh, clear of every other hazard's placement keep-out AND of
+// every live danger band, and path-reachable; if the straight-away point is
+// blocked it fans the away-bearing around until one validates. MOVEMENT_COMBAT
+// priority so it overrides the bot's MoveChase / advance. Driven by
 // DungeonClearHazardVacateTrigger.
 class DungeonClearHazardVacateAction : public DcMovementAction
 {
@@ -729,6 +813,252 @@ public:
         : DcMovementAction(botAI, "dungeon clear hazard vacate")
     {
     }
+    bool Execute(Event event) override;
+
+private:
+    // The committed retreat point. This action used to recompute every tick, which
+    // is fine with ONE emitter (the bearing is stable) and catastrophic with a
+    // field of them: NearestVacate re-elects a different centre on a step of drift
+    // and the bearing reverses, so the bot re-plots its spline several times a
+    // second and travels nowhere. While this point is still outside every danger
+    // band and the bot is still walking to it, the action owns the tick and leaves
+    // the move alone. Cleared when the bot is clear, or when no bearing validated.
+    //
+    // `_fleeSetAtMs` caps how long that ride may last. A commitment is only as good
+    // as the point behind it, and an unbounded one turned a bad candidate into a
+    // 47-second march in tr-20260815-154816-5. Committed is not unsupervised.
+    Position _fleeTo;
+    bool     _fleeToValid = false;
+    uint32   _fleeSetAtMs = 0;
+};
+
+// BLACKWING LAIR ONLY, one member, both engines. The orb runner's half of
+// Razorgore's egg run: walk to the Orb of Domination and take it.
+//
+// Three states, and every one of them owns the tick:
+//
+//   TRAVELLING — the orb is on the upper ledge 78yd from the boss's spawn, which
+//   is a LONG HAUL: the engine PathGenerator caps a generated path at 74 polys
+//   and a request past that truncates SILENTLY, leaving the bot standing still
+//   with nothing to observe at the call site. So the walk goes through
+//   LongRangePathfinder + one escort spline, exactly like the Violet Hold
+//   driver's portal hops, with a bare MovePoint only for the last short leg.
+//
+//   HOLDING — standing at the orb with the platform's three elites still up and
+//   NOBODY HAVING PULLED THEM: own the tick, click nothing. In practice the
+//   runner is never elected in that window (the leader's FSM does not elect one
+//   until the pull lands), so this is the belt to the FSM's braces — same gate,
+//   by construction, because the runner arrives on its own tick and must not
+//   click an orb the leader believes is still being held back.
+//
+//   CLICKING — standing at the orb, no pet, no Mind Exhaustion: any cast in
+//   flight is interrupted, then GameObject::Use(bot). That call reaches
+//   go_orb_of_domination::GossipHello before the goober type is ever considered,
+//   so it IS the player's click — the script sets the boss's charmer, has it
+//   attack the runner, and casts 19832. The interrupt is load-bearing: the
+//   script's own cast is non-triggered and a cast already in progress refuses it
+//   silently, which is a click that looks like it happened and did not.
+//
+//   POSSESSING — OWN THE TICK AND DO NOTHING. 19832 is a channel, and the egg run
+//   lives or dies by it: a cast, a swing or a step from the runner's own body ends
+//   the possession, frees a boss the raid may not kill, and costs the bot a 60s
+//   lockout. So the rung takes the tick, drops the victim (autoattack runs off
+//   Unit::Update, not off the action engine) and spends the rest of the window
+//   mute. That is the mechanic's price, not an inefficiency — the earlier shape
+//   handed the tick back "so the rotation runs" and the rotation broke the channel.
+//
+// It never yields, in other words, because there is no state in which something
+// else running is better than this bot standing still.
+//
+// Driven by DungeonClearRazorgoreOrbTrigger; the election that names the runner
+// is the leader's (BlackwingLairDriver.cpp).
+class DungeonClearRazorgoreOrbAction : public DcMovementAction
+{
+public:
+    DungeonClearRazorgoreOrbAction(PlayerbotAI* botAI)
+        : DcMovementAction(botAI, "dungeon clear razorgore orb")
+    {
+    }
+    bool Execute(Event event) override;
+};
+
+// BLACKWING LAIR ONLY, everyone except the orb runner, COMBAT engine only. Walks
+// the raid to the camp at the foot of the orb platform and holds it there for the
+// egg run.
+//
+// The reason it exists, from the first live run: the orb and the egg run worked,
+// and the raid fought wherever the pull had left it. The runner is ROOTED on the
+// ledge for ninety seconds at a time and cannot defend itself, so every add that
+// picked it arrived unopposed. Camping the raid between the room and the ledge
+// puts the tank, the heals and the AoE on the path everything takes to reach it.
+//
+// The camp is on the FLOOR beside the platform, not on it (see CAMP_X/Y/Z for the
+// column probe and the distances): a raid on a small ledge has nowhere to spread
+// and nothing between it and the floor the adds cross.
+//
+// COMBAT ENGINE ONLY, deliberately. Out of combat the walk-in and the pre-boss
+// muster own the raid's position, and a rung at this relevance in the non-combat
+// engine would hijack the approach to the boss. The camp's job starts when the
+// fight does.
+//
+// Goes INERT once inside the leash rather than owning the tick and yielding, so
+// the combat engine never contends with it for a bot that is already in position.
+// One leash for the whole raid (CAMP_LEASH, 30yd) — loose enough that anyone can
+// step onto an add that reached the healers without being yanked off it every
+// tick. Driven by DungeonClearRazorgoreCampTrigger.
+//
+// The walk-back aims at the camp's near EDGE, not its centre (CAMP_HOLD_MARGIN):
+// a bot the fight pushed out takes one step back inside the boundary and holds
+// there. Aiming at the centre is what the first live run looked like — every bot
+// crossing the whole camp inward, getting pushed out, and crossing again.
+class DungeonClearRazorgoreCampAction : public DcMovementAction
+{
+public:
+    DungeonClearRazorgoreCampAction(PlayerbotAI* botAI)
+        : DcMovementAction(botAI, "dungeon clear razorgore camp")
+    {
+    }
+    bool Execute(Event event) override;
+};
+
+// Walk back inside the transit pack leash. Every member but the leader, both
+// engines, while the leader is crossing the Suppression Rooms.
+//
+// The destination is the near EDGE of the leash around the leader's live route
+// cursor, not the cursor itself — the CAMP_HOLD_MARGIN lesson, and it matters
+// more here than it did at Razorgore because the anchor is moving toward the bot
+// as well: aiming at the centre of a leash that is itself advancing makes every
+// correction a sprint past the leader instead of a step back into formation.
+//
+// Nothing in this rung walks a bot FORWARD past the cursor, and nothing holds one
+// there. It only ever closes a gap. Driven by DungeonClearTransitPackTrigger.
+class DungeonClearTransitPackAction : public DcMovementAction
+{
+public:
+    DungeonClearTransitPackAction(PlayerbotAI* botAI)
+        : DcMovementAction(botAI, "dungeon clear transit pack")
+    {
+    }
+    bool Execute(Event event) override;
+};
+
+// LET GO of a creature DcTargetExclusionRegistry bars right now. One tick, three
+// side effects, and then the trigger that fires it goes inert:
+//
+//   * AttackStop(), because autoattack runs off GetVictim() inside Unit::Update
+//     and not off the action engine — declining to pick a new target does not stop
+//     a swing already in flight, and on a 40-bot raid those swings are the damage
+//     that matters;
+//   * clear `current target`, because the whole class rotation reads it, so a
+//     stale one keeps casting into the barred creature long after the picker
+//     stopped offering it;
+//   * interrupt a cast already flying at it, for the same reason — a 2.5s cast
+//     started one tick before the bar came up still lands.
+//
+// It does NOT try to pick a replacement. The stock pickers do that on the next
+// tick and they now honour the bar (Value/DungeonClearDpsTargetValue), so a raid
+// with adds up flows straight onto the adds; a raid with nothing else to shoot
+// simply holds its fire, which is the correct answer and the whole point.
+//
+// See DungeonClearHoldFireTrigger for what "barred" means and why the exclusion
+// pool alone could not carry it.
+class DungeonClearHoldFireAction : public Action
+{
+public:
+    DungeonClearHoldFireAction(PlayerbotAI* botAI)
+        : Action(botAI, "dungeon clear hold fire")
+    {
+    }
+    bool Execute(Event event) override;
+};
+
+// HALLS OF REFLECTION ONLY, every role, BOTH engines. Move this bot FORWARD along
+// the escape path — to the party's stand point, a few yards past the point
+// Jaina/Sylvanas is waiting at — because it is inside the Lich King's Remorseless
+// Winter ring or has fallen behind him.
+//
+// THE DIRECTION IS THE ENTIRE CONTENT OF THIS ACTION. It never computes a bearing
+// away from anything: the destination is an authored point that is ahead of the
+// leader, ahead of the Lich King, and on the far side of both from the summons
+// chasing the party. A radial retreat — which is what DungeonClearHazardVacate
+// would do with the same emitter — is wrong here in the one direction that
+// matters, because "away from him" for a bot that is already behind him is
+// further behind, and behind is a 10 000-damage Zap plus a knockback that makes
+// the next check worse.
+//
+// Which stand point is decided the same way the driver decides it: from the
+// LEADER'S position (DcHallsOfReflection::StopIndexNear), because currentWall is
+// private to the boss AI and her position is the observable equivalent. Both must
+// reach the same answer or the tank and its followers would hold different
+// ground, which is why the arithmetic is one shared pure function rather than two
+// copies.
+//
+// Driven by DungeonClearHorStayAheadTrigger.
+class DungeonClearHorStayAheadAction : public DcMovementAction
+{
+public:
+    DungeonClearHorStayAheadAction(PlayerbotAI* botAI)
+        : DcMovementAction(botAI, "dungeon clear hor stay ahead")
+    {
+    }
+    bool Execute(Event event) override;
+};
+
+// BLACKROCK DEPTHS' IRON HALL ONLY, every member, both engines: walk to a
+// fire-free stop rather than stand in the Ironhand Guardians' fire — in a fight,
+// the nearest one it can still hit its target from. Driven by
+// DungeonClearIronHallSafeSpotTrigger; the decision is DcIronHall::Decide.
+class DungeonClearIronHallSafeSpotAction : public DcMovementAction
+{
+public:
+    DungeonClearIronHallSafeSpotAction(PlayerbotAI* botAI)
+        : DcMovementAction(botAI, "dungeon clear iron hall safe spot")
+    {
+    }
+    bool Execute(Event event) override;
+};
+
+// BLACKROCK DEPTHS' LYCEUM ONLY, every member but the tank, combat engine: walk
+// back inside DcLyceumCloseUp::CLOSE_TO of the tank. Driven by
+// DungeonClearLyceumCloseUpTrigger; the decision is DcLyceumCloseUp::Decide.
+class DungeonClearLyceumCloseUpAction : public DcMovementAction
+{
+public:
+    DungeonClearLyceumCloseUpAction(PlayerbotAI* botAI)
+        : DcMovementAction(botAI, "dungeon clear lyceum close up")
+    {
+    }
+    bool Execute(Event event) override;
+};
+
+// The Iron Hall's follow-tank clamp: true while `bot` should hold the stop the hop
+// put it on (or is still walking to it) rather than follow `tank`. Inert off map
+// 230. Implemented with the rung, in DcIronHallSafeSpotAction.cpp.
+bool DcIronHallHoldsFollow(Player* bot, PlayerbotAI* botAI, Player* tank);
+
+// THE OCULUS ONLY, every member, both engines: the rider rung — an essence from
+// the givers, the mount, this member's drake on its lane, the landing, the
+// dismount, and the stations on Eregos. A PLAIN Action on purpose: stock
+// `wotlk-occ`'s OccFlyingMultiplier zeroes every MovementAction on a mounted bot,
+// and this rung drives the drake's MotionMaster directly. See
+// DcOculusRiderAction.cpp. Driven by DungeonClearOculusRiderTrigger.
+class DungeonClearOculusRiderAction : public Action
+{
+public:
+    DungeonClearOculusRiderAction(PlayerbotAI* botAI) : Action(botAI, "dungeon clear oc rider") {}
+    bool Execute(Event event) override;
+};
+
+// KARAZHAN ONLY, every member in the Gamesman's Hall, both engines: the chess seat
+// — take the assigned piece, keep it, stand on the sideline, fight nothing — and,
+// on the run owner, the conductor that plays the game. A PLAIN Action: it moves
+// its bot with its own point moves and must never be zeroed by a movement
+// multiplier. See Action/DcChessPieceAction.cpp. Driven by
+// DungeonClearKzChessTrigger.
+class DungeonClearKzChessAction : public Action
+{
+public:
+    DungeonClearKzChessAction(PlayerbotAI* botAI) : Action(botAI, "dungeon clear kz chess") {}
     bool Execute(Event event) override;
 };
 

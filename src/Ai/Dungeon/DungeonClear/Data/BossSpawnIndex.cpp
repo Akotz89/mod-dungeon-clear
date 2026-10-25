@@ -14,7 +14,7 @@
 #include "ObjectMgr.h"
 
 std::unordered_map<uint64, std::vector<DungeonBossInfo>> BossSpawnIndex::_store;
-bool BossSpawnIndex::_built = false;
+std::once_flag BossSpawnIndex::_once;
 
 std::vector<DungeonBossInfo> const& BossSpawnIndex::Get(uint32 mapId, Difficulty difficulty)
 {
@@ -28,10 +28,7 @@ std::vector<DungeonBossInfo> const& BossSpawnIndex::Get(uint32 mapId, Difficulty
 
 void BossSpawnIndex::EnsureBuilt()
 {
-    if (_built)
-        return;
-    Build();
-    _built = true;
+    std::call_once(_once, &BossSpawnIndex::Build);
 }
 
 void BossSpawnIndex::Build()

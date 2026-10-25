@@ -6,7 +6,7 @@
 #include "ObjectiveHookRegistry.h"
 
 #include <atomic>
-#include <unordered_map>
+#include <optional>
 #include <utility>
 
 #include "Creature.h"
@@ -26,10 +26,16 @@
 #include "WorldPacket.h"
 #include "WorldSession.h"
 #include "PlayerbotAI.h"
+
+#include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 #include "Playerbots.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcFormGate.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcMovement.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcPlayerbotCompat.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRaidMuster.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTargeting.h"
 
 namespace
@@ -473,6 +479,174 @@ namespace
         return ObjectiveArriveResult::Done;
     }
 
+    // --- Azjol-Nerub: HadronoxHasWebbedTheDoors (hook id 13) --------------
+    // A WAIT, not an action — the one hook here that does nothing to the world.
+    //
+    // Hadronox's add swarm is infinite: three world triggers (23472) summoned in
+    // her Reset() carry periodic summon auras that keep firing for as long as
+    // the encounter is not done, and every add she kills while it carries her
+    // Leech Poison heals her 10% of max HP. The only off-switch is
+    // EVENT_HADRONOX_MOVE3 — gated on every Anub'ar Crusher (28922) being dead,
+    // scheduled 70s after the pull, and re-checked every 2s — which walks her up
+    // to (530.4, 560.0, 733.2) and casts Web Front Doors (53177) on arrival.
+    //
+    // Killing the crushers therefore only makes the web ELIGIBLE. The clear has
+    // to keep the party on the platform until it has actually happened, or boss
+    // navigation takes the tank down to meet her mid-climb while the swarm is
+    // still pouring in.
+    //
+    // `_doorsWebbed` is private and has exactly one exposure: boss_hadronox::
+    // GetData(me->GetEntry()), the 'Hadronox Denied' achievement probe, which
+    // returns 0 once the doors are webbed and 1 while they are open. Read it
+    // with her OWN entry — any other id falls through to the same `return 0`
+    // and would read as "webbed" from the first tick.
+    constexpr uint32 AN_HADRONOX = 28921;
+
+    ObjectiveArriveResult HadronoxHasWebbedTheDoors(Player* bot, AiObjectContext* context,
+                                                    DungeonBossInfo const& /*info*/)
+    {
+        // Map-wide, like the Underbog's Ghaz'an probe: she spends the whole
+        // event walking a 120yd lap between z 695 and z 733 and a radius scan
+        // would lose her halfway through it.
+        Creature* hadronox = DcTargeting::GetLiveBoss(bot, context, AN_HADRONOX);
+        if (!hadronox || !hadronox->IsAlive() || !hadronox->AI())
+            return ObjectiveArriveResult::Done;  // dead/gone — nothing left to wait for
+
+        return hadronox->AI()->GetData(AN_HADRONOX) == 0 ? ObjectiveArriveResult::Done
+                                                         : ObjectiveArriveResult::Running;
+    }
+
+    // --- Drak'Tharon Keep: HoldNovosCamp (hook id 14) ---------------------
+    // The whole of Novos' phase 1, and the ONLY step of map 600's conditional
+    // event 1. Like the Black Morass wave driver it re-decides from live world
+    // state every tick rather than walking a step list, because what the
+    // encounter needs is not a sequence but a standing position preference held
+    // under continuous fire. The dungeon-side reasoning — why a camp, why THIS
+    // camp, what the gate is — lives in DrakTharonKeepEvents.cpp; this is the
+    // mechanism.
+    //
+    // THREE THINGS CAN GO WRONG POSITIONALLY, and the hook is one test per:
+    //
+    //  1. THE ARCANE FIELD. 47346 is a PERSISTENT_AREA_AURA at Novos' feet,
+    //     11.0yd, 1665 damage per second, for the whole of phase 1. The tank
+    //     lands the pull IN it and the corpse stream keeps giving it reasons to
+    //     drift back north. The DcHazardRegistry row and its vacate rung already
+    //     push every bot out; this pushes the LEADER specifically, on the tick
+    //     the driver owns, so the two agree rather than take turns.
+    //  2. THE STAIRCASE. Every Risen Shadowcaster and Hulking Corpse of the phase
+    //     is left standing, passive but hostile, at the spawn trigger 45yd up the
+    //     stairs (56yd from the camp). A clear that wanders down there is off the
+    //     80yd leash and out of the fight.
+    //  3. ORDINARY DRIFT. The corpses arrive 15yd south of the camp and the
+    //     handlers walk in from the room's corners, so a tank that simply chases
+    //     its current victim ends the phase somewhere else entirely.
+    //
+    // AND ONE THING MUST NOT GO WRONG: the tank must still FIGHT. This hook runs
+    // above the stock combat movers (DcRel::EventDueCombat), and Engine::
+    // DoNextAction runs exactly ONE action per tick, so a driver that returns
+    // Running every tick starves the rotation outright — no target, no swing, no
+    // threat. That is how Black Morass wiped parties. Hence: Done is the DEFAULT
+    // answer here, and Done means "nothing to steer, take your tick back"
+    // (DungeonEvent::stepsOwnMovement makes DcRunEventAction yield on it).
+    //
+    // The melee-contact exemption is the same idea one step down. Between the
+    // 6yd leash and the 25yd hard leash the tank is left alone WHILE it is
+    // actually swinging at something, so the driver never yanks it off a corpse
+    // it is holding at the stairs' foot; the exemption stops the moment the
+    // victim dies or walks away.
+    //
+    // NO isMoving() GUARD, deliberately — the trap the Black Morass driver
+    // documents. In combat the bot is essentially always moving under MoveChase,
+    // so `if (isMoving()) return;` would make this a no-op for the entire
+    // encounter. The re-issue floor below is what keeps re-taking the tick from
+    // becoming spline spam instead.
+    //
+    // The camp, the scan radius, the Arcane Field keep-out and the two leashes
+    // are all DcDrakTharonKeep (Data/Events/DungeonEventTables.h) — shared with
+    // the event that drives this hook, and with t/TestDcHazard, which pins the
+    // camp against the 47346 row's own keep-out cylinder. One definition each.
+    //
+    // Same-destination re-issue floor. The camp is ONE fixed point, so unlike the
+    // Black Morass there is no "which portal" question to answer — this exists
+    // purely so a MoveChase that stomps our point-move is recovered from promptly
+    // without re-pathing every tick.
+    constexpr uint32 DTK_REISSUE_MS = 1000;
+
+    // Hook 40 — see DC_HOOK_RAID_MUSTER.
+    ObjectiveArriveResult RaidMusterAtObjective(Player* bot, AiObjectContext* context,
+                                                DungeonBossInfo const& /*info*/)
+    {
+        PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
+        if (!botAI)
+            return ObjectiveArriveResult::Done;
+        std::optional<DungeonBossInfo> const next =
+            context->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)->Get();
+        if (!next)
+            return ObjectiveArriveResult::Done;
+        // The muster is keyed on the anchor's entry and is Boss-only; present the
+        // objective as the boss it is about to start.
+        DungeonBossInfo asBoss = *next;
+        asBoss.kind = DungeonAnchorKind::Boss;
+        return DcRaidMuster::Holds(bot, botAI, context, asBoss) ? ObjectiveArriveResult::Running
+                                                                : ObjectiveArriveResult::Done;
+    }
+
+    ObjectiveArriveResult HoldNovosCamp(Player* bot, AiObjectContext* context,
+                                        DungeonBossInfo const& /*info*/)
+    {
+        Creature* novos = bot->FindNearestCreature(DcDrakTharonKeep::NOVOS,
+                                                   DcDrakTharonKeep::NOVOS_SCAN, /*alive*/ true);
+        if (!novos)
+            return ObjectiveArriveResult::Done;  // dead / out of the room — nothing to hold for
+
+        // The encounter's own phase bit: set by JustEngagedWith, cleared in the
+        // same statement that starts phase 2. Once it is gone the pool is gone
+        // with it (47346 is channeled and the phase flip interrupts it), so melee
+        // must be free to close on him.
+        if (!novos->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE))
+            return ObjectiveArriveResult::Done;
+
+        float const toCamp = bot->GetExactDist2d(DcDrakTharonKeep::CAMP_X, DcDrakTharonKeep::CAMP_Y);
+        bool const inField = bot->GetExactDist2d(novos) < DcDrakTharonKeep::FIELD_KEEPOUT;
+
+        bool inMelee = false;
+        if (Unit* victim = bot->GetVictim())
+            inMelee = victim->IsAlive() && bot->IsWithinMeleeRange(victim);
+
+        if (!inField && toCamp <= DcDrakTharonKeep::CAMP_HARD_LEASH &&
+            (toCamp <= DcDrakTharonKeep::CAMP_LEASH || inMelee))
+            return ObjectiveArriveResult::Done;  // in position — hand the tick back
+
+        // Throttled re-issue. A point move inside one chamber is at most ~56yd
+        // (the stairs), well inside what MovePoint's PathGenerator delivers, so
+        // there is no long-haul spline branch to take here.
+        // On the bot's own run state — see Util/DcThrottle.h for why not in a
+        // file-scope thread_local map keyed by GUID.
+        if (DcRun::Of(context).Throttled(DcThrottle::DtkCampIssue, DTK_REISSUE_MS))
+            return ObjectiveArriveResult::Running;  // still walking home
+
+        // Drop any escort glide first: a coast-past from the advance ladder is
+        // aimed somewhere else entirely and would ride out over this point move.
+        DcMovement::ResolveEscortConflict(bot);
+        bot->GetMotionMaster()->MovePoint(0, DcDrakTharonKeep::CAMP_X,
+                                          DcDrakTharonKeep::CAMP_Y, DcDrakTharonKeep::CAMP_Z,
+                                          FORCED_MOVEMENT_NONE, 0.0f, 0.0f,
+                                          /*generatePath*/ true, false);
+
+        static uint32 lastHoldLog = 0;
+        if (!lastHoldLog || GetMSTimeDiffToNow(lastHoldLog) > 10000)
+        {
+            lastHoldLog = getMSTime();
+            LOG_DEBUG("playerbots.dungeonclear",
+                      "DungeonClear: Drak'Tharon Keep — walking {} back to the Novos camp "
+                      "({:.1f}yd out, {:.1f}yd from Novos{})",
+                      bot->GetName(), toCamp, bot->GetExactDist2d(novos),
+                      inField ? ", INSIDE the Arcane Field" : "");
+        }
+
+        return ObjectiveArriveResult::Running;
+    }
+
     // --- Old Hillsbrad: GrantIncendiaryBombs (hook id 3) ------------------
     // Brazen (18725) only offers his drake ride to Durnholde Keep when the player
     // HOLDS the Pack of Incendiary Bombs (item 25853) — gossip menu 7959 option 0
@@ -654,12 +828,29 @@ namespace
             Reg::AddHook(t, 7, &DriveAnzuSummon);        // Sethekk Halls — force-summon Anzu (send-event 14797)
             Reg::AddHook(t, 9, &StartNethekurseIntro);   // Shattered Halls — fire Nethekurse's client-only intro
             Reg::AddHook(t, 10, &SendGhazanToPlatform);  // The Underbog — send Ghaz'an up his ramp (AT 4302)
+            Reg::AddHook(t, 13, &HadronoxHasWebbedTheDoors);  // Azjol-Nerub — hold until Hadronox webs the doors
+            Reg::AddHook(t, 14, &HoldNovosCamp);         // Drak'Tharon Keep — hold the Novos camp through phase 1
+            Reg::AddHook(t, DC_HOOK_RAID_MUSTER, &RaidMusterAtObjective);  // generic — raid muster at an objective
 
             // Controllers, one TU each. Called explicitly (not self-registering)
             // because this module is a static lib: a TU whose only output is
             // constructor side-effects has no referenced symbol and the linker
             // drops it, taking its hooks with it. Ids 8 and 12 live here.
             RegisterBlackMorassHooks(t);
+            RegisterVioletHoldHooks(t);
+            RegisterBlackwingLairHooks(t);
+            RegisterHallsOfStoneHooks(t);
+            RegisterHallsOfLightningHooks(t);
+            RegisterUtgardePinnacleHooks(t);
+            RegisterPitOfSaronHooks(t);
+            RegisterHallsOfReflectionHooks(t);
+            RegisterCullingOfStratholmeHooks(t);
+            RegisterTrialOfTheChampionHooks(t);
+            RegisterOculusHooks(t);
+            RegisterKarazhanChessHooks(t);
+            RegisterStratholmeHooks(t);
+            RegisterBlackrockDepthsHooks(t);
+            RegisterBlackrockSpireHooks(t);
             return t;
         }();
         return kHooks;

@@ -1,0 +1,40 @@
+{
+  "about": "DPS too soon (follower flagged early): a 2-ghoul Stratholme pack (snapshot tr-20260922-190510-14#6) forced through the Advanced drag. At aggroConfirmed one ghoul is turned onto the frost mage at camp, so a follower is combat-flagged before the tank's fight has started. DungeonClearMath::ShouldReleaseFollower releases any follower already in combat (alreadyInCombat) and any follower when the leader has no combat stamp yet (combatSinceMs == 0), and the party-combat latch arms assist off any member's flag; the passive camp hold is the only thing left between the rest of the party and the ghoul. The injection is the sweep point, so `sweep=all` maps which holding windows leak. Plague Ghoul 53290 (a waypoint patroller spawned 7yd from the start) is not kept: it engaged the party during staging/settling, so the target ghouls were already at 70% and in combat at t=0 (lb-20261003-155828-1 run -19).",
+  "schema": 1,
+  "source": { "snapshot": "tr-20260922-190510-14#6" },
+  "geometry": {
+    "map": 329,
+    "dungeon": "strat",
+    "heroic": false,
+    "region": { "center": [3728.8, -3453.8, 130.3], "radius": 60.0 },
+    "objective": 10516,
+    "objectiveName": "The Unforgiven"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [53292, 53300],
+        "near": [53587, 53590, 247226]
+      }
+    }
+  },
+  "party": {
+    "comp": "warrior-prot,shaman-resto,mage-frost,warlock-demo,hunter-surv",
+    "level": 60,
+    "start": [3715.8, -3473.0, 129.7, 0.826],
+    "react": "fast",
+    "seedTarget": true
+  },
+  "settings": {
+    "PullSetting": 2,
+    "PullForceAdvanced": 1
+  },
+  "injections": [
+    { "when": { "event": "aggroConfirmed", "delayMs": 0 }, "do": { "aggro": "spawn:53300", "on": "dps" }, "sweep": true }
+  ],
+  "goal": { "kill": "pack:target", "timeoutS": 90 },
+  "expect": {
+    "oracles": { "O2": "fail", "O3": "fail" },
+    "knownFailure": "open:DungeonClearMath::ShouldReleaseFollower alreadyInCombat / combatSinceMs==0 bypass (plan §1 class 9, flag-to-first-combat-tick gap)"
+  }
+}

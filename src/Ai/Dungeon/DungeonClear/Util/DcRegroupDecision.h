@@ -40,6 +40,7 @@ namespace DcRegroupDecision
         bool  casting = false;           // a generic or channeled spell is in flight
         bool  ccd = false;               // stunned / fleeing / confused / rooted
         bool  hasVisibleAttacker = false;// stock LOS-filtered `attackers` value non-empty
+        bool  hasLosTarget = false;      // live, valid, in-LOS `current target` (DC's own seed included)
         bool  hasHurtHealTarget = false; // DcKey::HealTarget resolves to a live hurt member (healers)
         bool  tankLos = false;           // bot->IsWithinLOSInMap(tank)
         float tankDist2d = 0.0f;         // bot->GetExactDist2d(tank)
@@ -53,6 +54,7 @@ namespace DcRegroupDecision
     //   2. tankDist2d > hardTether   -> HardTether (drifted-into-nowhere safety net)
     //   3. DPS (melee & ranged):
     //        hasVisibleAttacker      -> None       (rotation + reach/chase have work)
+    //        hasLosTarget            -> None       (the rotation can shoot what it sees)
     //        else                    -> Reconnect
     //   4. Healer:
     //        hasHurtHealTarget       -> None       (HealReposition rel 41 owns that case)

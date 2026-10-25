@@ -45,11 +45,17 @@ struct BossRosterPatch
     // travel objectives into the same scale via MakeObjective's orderOverride.
     // Entries not listed keep their DBC encounterIndex order.
     std::vector<std::pair<uint32, int32>> reorder;
+    // Entries to keep in the roster but never target: "present but skipped by
+    // design" (vehicle bosses, externally-controlled set pieces). Stamps
+    // DungeonBossInfo::skipByDesign on the matching kept entry — the anchor
+    // stays visible/ordered, the picker passes it over, and the all-cleared
+    // contract treats it like a skip.
+    std::vector<uint32> skipByDesign;
     // Difficulty gate. Most patches are Any (5-man rosters mostly match across
     // normal/heroic); a heroic-only correction (an added heroic bonus boss /
     // anchor, or a remove that only applies on heroic) goes in a SECOND patch
     // for the same map with gate HeroicOnly — Apply applies every patch whose
-    // gate matches the run's difficulty, in registration order.
+    // gate matches the run's difficulty key, in registration order.
     DcDifficultyGate gate{DcDifficultyGate::Any};
 };
 
@@ -70,12 +76,18 @@ public:
     // callers, which go through Apply/HasPatch.
     static std::vector<BossRosterPatch> const& AllPatches();
 
-    // Returns the patched boss list for `mapId` at `difficulty`. Every patch
-    // whose mapId matches AND whose gate matches the difficulty is applied, in
+    // Returns the patched boss list for `mapId` at difficulty `key`. Every patch
+    // whose mapId matches AND whose gate matches the difficulty key is applied, in
     // registration order (a map typically has one Any patch, optionally plus a
     // HeroicOnly one). If none match, the base list is returned unchanged.
-    static std::vector<DungeonBossInfo> Apply(uint32 mapId, Difficulty difficulty,
+    static std::vector<DungeonBossInfo> Apply(uint32 mapId, DcDiffKey key,
                                               std::vector<DungeonBossInfo> base);
+
+    // Apply ONE explicit patch to `base` — the same transform Apply runs per
+    // matching table row, exposed for kernel tests (an unregistered patch can
+    // be exercised without a table entry). Not used by runtime callers.
+    static std::vector<DungeonBossInfo> ApplyPatch(BossRosterPatch const& patch,
+                                                   std::vector<DungeonBossInfo> base);
 
     // True if any patch exists for the map (cheap gate for callers).
     static bool HasPatch(uint32 mapId);

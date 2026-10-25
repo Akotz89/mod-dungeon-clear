@@ -29,6 +29,15 @@ namespace
                 out.push_back(&d);
         return out;
     }
+
+    std::vector<DcSettingDef const*> RaidRows()
+    {
+        std::vector<DcSettingDef const*> out;
+        for (DcSettingDef const& d : kDcSettings)
+            if (DcHasRaidDefault(d))
+                out.push_back(&d);
+        return out;
+    }
 }
 
 TEST(DcSettingsRegistryTest, SentinelMeansNoHeroicLayer)
@@ -81,9 +90,79 @@ TEST(DcSettingsRegistryTest, ServerOnlyRowsCarryNoHeroicDefault)
     // Server-only rows govern the harness, the path workers and the spectator
     // camera — none of which is a property of the dungeon's difficulty. Keeping
     // them out means the difficulty lookup is never reached from the worker
-    // threads that read them (see DcSettings::IsHeroicRun).
+    // threads that read them (see the layer tests in DcSettings::GetRaw).
     for (DcSettingDef const* d : HeroicRows())
         EXPECT_TRUE(d->playerFacing) << d->key;
+}
+
+// --- Raid layer (same contracts as the heroic layer) ----------------------
+
+TEST(DcSettingsRegistryTest, SentinelMeansNoRaidLayer)
+{
+    DcSettingDef plain{"X", DcType::Float, 1, 0, 10, true};
+    EXPECT_FALSE(DcHasRaidDefault(plain));
+    EXPECT_TRUE(std::isnan(plain.raidVal));
+
+    DcSettingDef raided{"Y", DcType::Float, 1, 0, 10, true, kDcNoHeroic, 4};
+    EXPECT_TRUE(DcHasRaidDefault(raided));
+    EXPECT_FALSE(DcHasHeroicDefault(raided));
+    EXPECT_EQ(raided.raidVal, 4);
+}
+
+TEST(DcSettingsRegistryTest, RaidDefaultsSitInsideTheRowsOwnRange)
+{
+    for (DcSettingDef const* d : RaidRows())
+    {
+        EXPECT_GE(d->raidVal, d->minVal) << d->key;
+        EXPECT_LE(d->raidVal, d->maxVal) << d->key;
+    }
+}
+
+TEST(DcSettingsRegistryTest, RaidDefaultsAreWholeNumbersForDiscreteTypes)
+{
+    for (DcSettingDef const* d : RaidRows())
+    {
+        if (d->type == DcType::Float)
+            continue;
+        EXPECT_EQ(d->raidVal, std::round(d->raidVal)) << d->key;
+        if (d->type == DcType::Bool)
+            EXPECT_TRUE(d->raidVal == 0 || d->raidVal == 1) << d->key;
+    }
+}
+
+TEST(DcSettingsRegistryTest, RaidDefaultsActuallyDifferFromNormal)
+{
+    for (DcSettingDef const* d : RaidRows())
+        EXPECT_NE(d->raidVal, d->defVal) << d->key;
+}
+
+TEST(DcSettingsRegistryTest, ServerOnlyRowsCarryNoRaidDefault)
+{
+    for (DcSettingDef const* d : RaidRows())
+        EXPECT_TRUE(d->playerFacing) << d->key;
+}
+
+TEST(DcSettingsRegistryTest, RaidProfileIsExactlyTheScaleSet)
+{
+    // The raid layer is only the numbers that must scale with 10-40 members.
+    // Pinned like the heroic set: adding a raid default to an unrelated key has
+    // to fail here and be justified. Keep in step with the RAID DEFAULTS block
+    // in mod_dungeon_clear.conf.dist. (Plan B/C keys — quorum, muster budgets —
+    // join this list when they land with authored raid values.)
+    std::vector<std::string> const expected{
+        "PartyMaxSpread",
+        "PostCombatRezTimeoutSecs",
+    };
+
+    std::vector<std::string> actual;
+    for (DcSettingDef const* d : RaidRows())
+        actual.emplace_back(d->key);
+
+    std::vector<std::string> sortedExpected = expected;
+    std::vector<std::string> sortedActual = actual;
+    std::sort(sortedExpected.begin(), sortedExpected.end());
+    std::sort(sortedActual.begin(), sortedActual.end());
+    EXPECT_EQ(sortedActual, sortedExpected);
 }
 
 TEST(DcSettingsRegistryTest, HeroicProfileIsExactlyThePullSafetySet)

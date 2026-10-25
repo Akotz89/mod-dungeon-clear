@@ -6,11 +6,16 @@
 #include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
 #include "Ai/Dungeon/DungeonClear/Data/Events/DungeonRosterBuilders.h"
 
+#include <cmath>
+#include <list>
+
 #include "Creature.h"
 #include "InstanceScript.h"
+#include "Log.h"
 #include "Player.h"
 #include "Playerbots.h"
 #include "Ai/Dungeon/DungeonClear/Overrides/BossRosterRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Overrides/ObjectiveHookRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTargeting.h"
 
 // --- Stratholme (map 329) — live (Scarlet) side: Dathrohan -> Balnazzar -----
@@ -75,10 +80,18 @@
 // IMPORTANT — no instance-data gate for the slaughter phase. The instance
 // exposes only TYPE_ZIGGURAT1/2/3 via GetData(); _slaughterProgress is private.
 // So unlike ZulFarrak's temple (MoveToHoldUntilInstanceData) every slaughter
-// gate here is a LIVE creature / GO-state read, which survives the combat gaps
-// and is observable at any time. Each WaitForSpawn carries a finite timeout and
-// the following kill/clear step no-ops cleanly when nothing is alive, so a
-// fight-straight-through can never wedge the run.
+// gate here is a LIVE creature / GO-state read.
+//
+// A WaitForSpawn(wantAlive) gate is NOT safe here on its own: it passes only if
+// an OUT-OF-COMBAT tick lands while the wave is alive, and the event engine is
+// dormant in combat. The 33 Mindless charge the party seconds after Ramstein
+// dies and hold it in combat until the last one falls, so the first tick the
+// chain sees is after the wave — and a timed-out step on a required event is a
+// STALL, not a skip. Five of five soak failures (sk-20261003-174711) sat on
+// exactly that step for 236s with the party idle and the Black Guards already
+// up or dead. So the wave-1 gate reads the side gate (opens the instant
+// Ramstein dies, never closes), and the whole event completes the moment the
+// Baron door reads open (CompleteWhenGOState), whichever step it is on.
 
 namespace
 {
@@ -89,7 +102,7 @@ namespace
     constexpr uint32 STR_DATH_TIMEOUT = 120000;  // 2 min per phase
 
     // --- ziggurat acolyte chambers ---------------------------------------
-    constexpr uint32 STR_ACOLYTE = 10399;  // Thuzadin Acolyte (inside, documentary)
+    constexpr uint32 STR_ACOLYTE = 10399;  // Thuzadin Acolyte (inside; crystal-repair scan)
 
     // Ziggurat boss entries — used only for panel placement: each acolyte clear
     // sorts in the `dc bosses` panel just BEFORE the NEXT anchor in clear order
@@ -115,11 +128,38 @@ namespace
     constexpr float STR_ZIG_RADIUS = 18.0f;   // covers the inner chamber
     constexpr float STR_ZIG_ZBAND = 12.0f;    // keep the multi-level floors out
 
+    // --- ziggurat crystal repair -----------------------------------------
+    // Every Thuzadin Acolyte's death SetData's the NEAREST live Ash'ari Crystal
+    // (10415) within 200yd, and the crystal dies on that SetData whether or not
+    // the instance accepts it — SetData(TYPE_ZIGGURATx, 2) only takes when the
+    // state is exactly 1. Any acolyte that dies nearer another ziggurat's
+    // crystal spends it — the likeliest culprit is the lone acolyte between the
+    // ziggurats (3929.8,-3674.3), 118yd from crystal 1 and 128yd from crystal 3,
+    // which reaches crystal 3 once crystal 1 is gone — and a crystal spent
+    // against a state-0 ziggurat leaves it at 1 forever once its boss dies: both
+    // Slaughter Square gates stay shut and the run pauses on a closed gate
+    // (tr-20261003-200149-149; which acolyte did it was not logged). The
+    // chamber clear used to latch on ClearRadius alone and hid it. So each
+    // ziggurat event ends in a hook that holds until the state reads 2 and, when
+    // the chamber's acolytes AND its crystal are already dead — nothing left in
+    // the world can ever write the 2 — makes the crystal's own write itself.
+    constexpr uint32 STR_ASHARI_CRYSTAL = 10415;
+    // The crystal hovers ~50yd straight above its chamber floor; match it by
+    // footprint, not 3D distance.
+    constexpr float STR_CRYSTAL_XY = 10.0f;
+    constexpr float STR_ZIG_SCAN = 120.0f;
+    constexpr uint32 STR_ZIG_CONFIRM_TIMEOUT = 60000;
+
+    // ObjectiveHookRegistry ids (one flat space; 41 and 44+ were free).
+    constexpr uint32 STR_HOOK_ZIG1_CLEARED = 44;
+    constexpr uint32 STR_HOOK_ZIG2_CLEARED = 45;
+    constexpr uint32 STR_HOOK_ZIG3_CLEARED = 46;
+
     // --- slaughterhouse --------------------------------------------------
     constexpr uint32 STR_BILE_SPEWER = 10416;    // pre-spawned abomination
     constexpr uint32 STR_VENOM_BELCHER = 10417;  // pre-spawned abomination
     constexpr uint32 STR_RAMSTEIN = 10439;     // summoned once the abominations die
-    constexpr uint32 STR_MINDLESS = 11030;     // wave 1 (33x mindless undead)
+    constexpr uint32 STR_MINDLESS = 11030;     // wave 1 (33x mindless undead; documentary)
     constexpr uint32 STR_BLACK_GUARD = 10394;  // wave 2 (5x black guard)
     // Active-seek radius for the abomination / Ramstein mop-up (issue #5). The
     // 13 abominations span ~68yd around the hall centre; the seek must cover the
@@ -132,10 +172,11 @@ namespace
     // combat (the event engine is dormant in combat) and bridges the multi-second
     // inter-wave lulls that would otherwise let a creature gate complete early.
     constexpr uint32 STR_GO_BARON_DOOR = 175796;   // opens when the 5 guards die
+    constexpr uint32 STR_GO_SIDE_GATE = 175358;    // opens when Ramstein dies (wave 1)
     constexpr uint32 STR_GO_OPEN = 0;              // GO_STATE_ACTIVE (open)
-    // The Baron door sits ~51yd north of the hall centre; the default GO search is
-    // only 20yd, so the wait needs an explicit reach that finds it from anywhere
-    // in the hall.
+    // The Baron door sits ~51yd north of the hall centre and the side gate
+    // (3960.6,-3392.9) ~75yd west of it; the default GO search is only 20yd, so
+    // the waits need an explicit reach that finds them from anywhere in the hall.
     constexpr float STR_DOOR_SEARCH = 120.0f;
 
     // Slaughterhouse-hall centre. NOT the old SlaughterPos (4032,-3378): that sits
@@ -188,6 +229,37 @@ namespace
     bool StrZig3(Player* bot, AiObjectContext* /*context*/)
     {
         return ZigguratAcolytes(bot, STR_TYPE_ZIGGURAT3);
+    }
+
+    // See the crystal-repair note above. Running while an acolyte or the crystal
+    // of this chamber is still alive (the crystal will fire on the next acolyte
+    // death); Done once the state is past 1.
+    ObjectiveArriveResult ZigguratCleared(Player* bot, uint32 dataType,
+                                          float cx, float cy, float cz)
+    {
+        InstanceScript* inst = DcTargeting::GetInstanceScript(bot);
+        if (!bot || !inst || inst->GetData(dataType) != 1)
+            return ObjectiveArriveResult::Done;
+
+        std::list<Creature*> acolytes;
+        bot->GetCreatureListWithEntryInGrid(acolytes, STR_ACOLYTE, STR_ZIG_SCAN);
+        for (Creature* c : acolytes)
+            if (c->IsAlive() && c->GetExactDist2d(cx, cy) <= STR_ZIG_RADIUS &&
+                std::fabs(c->GetPositionZ() - cz) <= STR_ZIG_ZBAND)
+                return ObjectiveArriveResult::Running;
+
+        std::list<Creature*> crystals;
+        bot->GetCreatureListWithEntryInGrid(crystals, STR_ASHARI_CRYSTAL, STR_ZIG_SCAN);
+        for (Creature* c : crystals)
+            if (c->IsAlive() && c->GetExactDist2d(cx, cy) <= STR_CRYSTAL_XY)
+                return ObjectiveArriveResult::Running;
+
+        LOG_WARN("playerbots.dungeonclear",
+                 "[DC:{}] Stratholme ziggurat {} stuck at state 1 with its chamber clear "
+                 "and its Ash'ari Crystal already spent -> SetData({}, 2)",
+                 bot->GetName(), dataType, dataType);
+        inst->SetData(dataType, 2);
+        return ObjectiveArriveResult::Done;
     }
 
     // --- Timmy the Cruel (live side, Crusaders' Square) ------------------
@@ -257,8 +329,8 @@ void RegisterStratholmeEvents(std::vector<DungeonEvent>& out)
     // ClearRadius (position-based) rather than KillCreature(10399): it drives
     // the tank into the chamber and clears whatever guards the crystal without
     // depending on the exact acolyte count, and the zBand keeps the chamber's
-    // adjacent levels out of the clear. (void STR_ACOLYTE — documentary entry.)
-    (void) STR_ACOLYTE;
+    // adjacent levels out of the clear. (void STR_MINDLESS — documentary: wave 1 gates on the side gate.)
+    (void) STR_MINDLESS;
 
     // --- live side: Grand Crusader Dathrohan -> Balnazzar (anchored, id 5) --
     // Anchored at the Dathrohan objective (BossRosterRegistry OBJ(2), bit 6).
@@ -289,6 +361,8 @@ void RegisterStratholmeEvents(std::vector<DungeonEvent>& out)
                       .PanelBeforeBoss(STR_NERUBENKAN)
                       .ClearRadius(STR_ZIG1_X, STR_ZIG1_Y, STR_ZIG1_Z,
                                    STR_ZIG_RADIUS, STR_ZIG_ZBAND)
+                      .Custom(STR_HOOK_ZIG1_CLEARED)
+                          .Timeout(STR_ZIG_CONFIRM_TIMEOUT)
                       .Build());
 
     out.push_back(EventBuilder(329, 2, "Ziggurat 2 acolytes (Nerub'enkan)")
@@ -296,6 +370,8 @@ void RegisterStratholmeEvents(std::vector<DungeonEvent>& out)
                       .PanelBeforeBoss(STR_MALEKI)
                       .ClearRadius(STR_ZIG2_X, STR_ZIG2_Y, STR_ZIG2_Z,
                                    STR_ZIG_RADIUS, STR_ZIG_ZBAND)
+                      .Custom(STR_HOOK_ZIG2_CLEARED)
+                          .Timeout(STR_ZIG_CONFIRM_TIMEOUT)
                       .Build());
 
     out.push_back(EventBuilder(329, 3, "Ziggurat 3 acolytes (Maleki)")
@@ -306,6 +382,8 @@ void RegisterStratholmeEvents(std::vector<DungeonEvent>& out)
                       .PanelBeforeBoss(BossRosterRegistry::ObjectiveEntry(1))
                       .ClearRadius(STR_ZIG3_X, STR_ZIG3_Y, STR_ZIG3_Z,
                                    STR_ZIG_RADIUS, STR_ZIG_ZBAND)
+                      .Custom(STR_HOOK_ZIG3_CLEARED)
+                          .Timeout(STR_ZIG_CONFIRM_TIMEOUT)
                       .Build());
 
     // --- the slaughterhouse chain (persistent anchored, eventId 1) ---------
@@ -316,6 +394,7 @@ void RegisterStratholmeEvents(std::vector<DungeonEvent>& out)
     out.push_back(EventBuilder(329, 4, "Slaughterhouse (Baron run)")
                       .Anchored(11)
                       .Persistent()
+                      .CompleteWhenGOState(STR_GO_BARON_DOOR, STR_GO_OPEN, STR_DOOR_SEARCH)
                       // 1. Clear the hall of the pre-spawned abominations (13x Bile
                       //    Spewer 10416 / Venom Belcher 10417). Ramstein is summoned
                       //    ONLY when EVERY abomination dies, so a single one left alive
@@ -346,13 +425,15 @@ void RegisterStratholmeEvents(std::vector<DungeonEvent>& out)
                       //    KillCreatureEngage owns his kill-bit flip.
                       .KillCreatureEngage(STR_RAMSTEIN, /*count*/ 1, STR_ABOM_SEEK)
                           .Timeout(STR_PHASE_TIMEOUT)
-                      // 2. Wave 1: Ramstein's death spawns 33 Mindless Undead (11030)
-                      //    after a ~5s lull. Wait for the first to appear (a genuine
-                      //    out-of-combat lull, so the spawn can't be missed), then
-                      //    ClearRadius them — they charge the hall, so the radius +
+                      // 2. Wave 1: Ramstein's death opens the side gate and spawns 33
+                      //    Mindless Undead (11030) after a ~5s lull. Gate on the side
+                      //    gate (monotonic — see the header note on why not
+                      //    WaitForSpawn(Mindless)), then ClearRadius whatever of the
+                      //    wave is still up — they charge the hall, so the radius +
                       //    reactive combat reap them; count-tolerant (TEMPSUMMON).
-                      .WaitForSpawn(STR_MINDLESS, /*alive*/ true)
-                          .Timeout(STR_WAVE_GAP_TIMEOUT)
+                      .WaitForGOState(STR_GO_SIDE_GATE, STR_GO_OPEN,
+                                      /*timeoutMs*/ STR_WAVE_GAP_TIMEOUT,
+                                      /*searchRadius*/ STR_DOOR_SEARCH)
                       .ClearRadius(STR_SLAUGHTER_X, STR_SLAUGHTER_Y, STR_SLAUGHTER_Z,
                                    STR_SLAUGHTER_RADIUS, STR_SLAUGHTER_ZBAND)
                           .Timeout(STR_PHASE_TIMEOUT)
@@ -386,6 +467,19 @@ void RegisterStratholmeEvents(std::vector<DungeonEvent>& out)
                       .Build());
 }
 
+
+void RegisterStratholmeHooks(ObjectiveHookRegistry::HookTable& out)
+{
+    ObjectiveHookRegistry::AddHook(out, STR_HOOK_ZIG1_CLEARED,
+        [](Player* bot, AiObjectContext*, DungeonBossInfo const&)
+        { return ZigguratCleared(bot, STR_TYPE_ZIGGURAT1, STR_ZIG1_X, STR_ZIG1_Y, STR_ZIG1_Z); });
+    ObjectiveHookRegistry::AddHook(out, STR_HOOK_ZIG2_CLEARED,
+        [](Player* bot, AiObjectContext*, DungeonBossInfo const&)
+        { return ZigguratCleared(bot, STR_TYPE_ZIGGURAT2, STR_ZIG2_X, STR_ZIG2_Y, STR_ZIG2_Z); });
+    ObjectiveHookRegistry::AddHook(out, STR_HOOK_ZIG3_CLEARED,
+        [](Player* bot, AiObjectContext*, DungeonBossInfo const&)
+        { return ZigguratCleared(bot, STR_TYPE_ZIGGURAT3, STR_ZIG3_X, STR_ZIG3_Y, STR_ZIG3_Z); });
+}
 
 // --- roster patch (relocated from BossRosterRegistry) --------------------
 void RegisterStratholmeRoster(std::vector<BossRosterPatch>& t)

@@ -4,6 +4,7 @@ and reading numbers out of an AzerothCore .conf.
 
 import asyncio
 import json
+import os
 import re
 import subprocess
 
@@ -70,25 +71,58 @@ async def run_cmd(argv, cwd=None, timeout=20):
         return -1, str(e)
 
 
-def tail_jsonl(path, limit):
+def tail_jsonl(path, limit, predicate=None):
     """Newest-first tail of a JSONL file; malformed lines are skipped so a
-    partial write can't 500 the panel."""
-    rows = []
+    partial write can't 500 the panel. Reads backwards from the end in
+    blocks, so a 90 MB history costs what the tail costs. `predicate`
+    filters rows before they count toward `limit`."""
+    return tail_rows(path, max(1, min(limit, 5000)), predicate)
+
+
+def tail_rows(path, limit, predicate=None):
+    """Newest-first rows from the end of a JSONL file, reading backwards in
+    blocks — never the whole file. `predicate` filters; `limit` counts rows
+    that pass. A half-written final line fails to parse and is skipped."""
+    out = []
+
+    def take(raw):
+        row = parse_jsonl_line(raw)
+        if row is not None and (predicate is None or predicate(row)):
+            out.append(row)
+        return len(out) >= limit
+
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()[-max(1, min(limit, 500)):]
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    except FileNotFoundError:
-        pass
-    rows.reverse()
-    return rows
+        fh = path.open("rb")
+    except OSError:
+        return out
+    with fh:
+        pos = fh.seek(0, os.SEEK_END)
+        buf = b""
+        while pos > 0:
+            step = min(1 << 16, pos)
+            pos -= step
+            fh.seek(pos)
+            buf = fh.read(step) + buf
+            lines = buf.split(b"\n")
+            buf = lines[0]              # may continue in the previous block
+            for raw in reversed(lines[1:]):
+                if take(raw):
+                    return out
+        if buf:
+            take(buf)
+    return out
+
+
+def parse_jsonl_line(raw):
+    """One JSONL line (bytes) -> dict, or None for blank / malformed / non-object."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        row = json.loads(raw.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return None
+    return row if isinstance(row, dict) else None
 
 
 async def clear_jsonl(path, label, use_sudo=False):

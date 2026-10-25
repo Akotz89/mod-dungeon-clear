@@ -8,7 +8,6 @@
 #include <cmath>
 #include <list>
 #include <string>
-#include <unordered_map>
 
 #include "Creature.h"
 #include "InstanceScript.h"
@@ -25,9 +24,11 @@
 #include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcMovement.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTargeting.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
 #include "Ai/Dungeon/DungeonClear/Util/LongRangePathfinder.h"
+#include "Util/DcPlayerbotsConfig.h"
 
 // The Black Morass wave driver — the imperative half of map 269's clear.
 //
@@ -262,18 +263,14 @@ namespace
     // The camp line's throttle was a single global static, so with 8-10 concurrent
     // instances every consecutive line came from a DIFFERENT bot — which makes the
     // one measurement that matters ("is this bot's distance falling tick over
-    // tick?") impossible to read. thread_local keyed by GUID gives a genuine
-    // per-bot window and is race-free without a lock: a map's bots are updated on
-    // one map-update thread, so each thread owns its table.
+    // tick?") impossible to read. A per-bot slot on the bot's own run state gives
+    // a genuine per-bot window; see Util/DcThrottle.h for why not in a file-scope
+    // thread_local map keyed by GUID.
     void BmTravelLog(Player* bot, char const* what, float dist, std::string const& detail)
     {
-        thread_local std::unordered_map<uint32, uint32> lastMs;
-        uint32 const guid = bot->GetGUID().GetCounter();
-        uint32 const now = getMSTime();
-        uint32& prev = lastMs[guid];
-        if (prev && GetMSTimeDiffToNow(prev) < 3000)
+        PlayerbotAI* const botAI = GET_PLAYERBOT_AI(bot);
+        if (!botAI || DcRun::Of(botAI).Throttled(DcThrottle::BmTravelLog, 3000))
             return;
-        prev = now;
         LOG_DEBUG("playerbots.dungeonclear",
                  "DungeonClear: Black Morass — {} travel: {} (dist {:.1f}yd){}{}",
                  bot->GetName(), what, dist, detail.empty() ? "" : " — ", detail);
@@ -327,22 +324,10 @@ namespace
 
         // Same-destination re-issue floor (see BM_REISSUE_MS): the check above
         // cannot see a glide the combat engine has since layered MoveChase over.
-        {
-            struct LastIssue { float x, y, z; uint32 ms; };
-            thread_local std::unordered_map<uint32, LastIssue> lastIssue;
-            uint32 const guid = bot->GetGUID().GetCounter();
-            auto it = lastIssue.find(guid);
-            if (it != lastIssue.end())
-            {
-                LastIssue const& li = it->second;
-                float const ddx = li.x - x, ddy = li.y - y, ddz = li.z - z;
-                bool const sameDest =
-                    std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz) <= BM_REPATH_EPSILON;
-                if (sameDest && GetMSTimeDiffToNow(li.ms) < BM_REISSUE_MS)
-                    return;
-            }
-            lastIssue[guid] = { x, y, z, getMSTime() };
-        }
+        if (PlayerbotAI* const issuer = GET_PLAYERBOT_AI(bot))
+            if (DcRun::Of(issuer).ThrottledIssue(DcThrottle::BmTravelIssue, x, y, z,
+                                                 BM_REPATH_EPSILON, BM_REISSUE_MS))
+                return;
 
         if (dist > BM_LONG_HAUL)
         {
@@ -492,7 +477,7 @@ namespace
         if (botAI->GetState() != BOT_STATE_COMBAT)
         {
             botAI->ChangeEngine(BOT_STATE_COMBAT);
-            botAI->SetNextCheckDelay(sPlayerbotAIConfig.reactDelay);
+            botAI->SetNextCheckDelay(DC_PB_CONFIG(ReactDelay, reactDelay));
         }
         return !alreadyOnIt;
     }
@@ -539,20 +524,21 @@ namespace
     // it, which is exactly the right moment to re-pick), and otherwise choose the
     // nearest rift that ALREADY HAS a live keeper — the one that can be shut off
     // now — falling back to the nearest rift at all when none has spawned its
-    // keeper yet. thread_local for the same reason as BmTravelLog: one map-update
-    // thread owns its table, so it is race-free without a lock.
+    // keeper yet. The latch lives on the bot's own run state: a file-scope
+    // thread_local map is the worst place for a LOCK, because when a map moves
+    // between MapUpdater pool threads the table reads empty and the lock silently
+    // lapses. See Util/DcThrottle.h.
     Creature* BmSelectTargetRift(Player* bot)
     {
-        thread_local std::unordered_map<uint32, ObjectGuid> locked;
-        uint32 const guid = bot->GetGUID().GetCounter();
+        PlayerbotAI* const botAI = GET_PLAYERBOT_AI(bot);
+        ObjectGuid* locked = botAI ? &DcRun::Of(botAI).bmRiftLock : nullptr;
 
-        auto it = locked.find(guid);
-        if (it != locked.end())
+        if (locked && !locked->IsEmpty())
         {
-            if (Creature* held = ObjectAccessor::GetCreature(*bot, it->second))
+            if (Creature* held = ObjectAccessor::GetCreature(*bot, *locked))
                 if (held->IsAlive())
                     return held;
-            locked.erase(it);
+            locked->Clear();
         }
 
         std::list<Creature*> rifts;
@@ -592,8 +578,8 @@ namespace
         }
 
         Creature* pick = bestWithKeeper ? bestWithKeeper : bestAny;
-        if (pick)
-            locked[guid] = pick->GetGUID();
+        if (pick && locked)
+            *locked = pick->GetGUID();
         return pick;
     }
 
@@ -662,8 +648,8 @@ namespace
         // Without this the run does not stop, it just stops being winnable: the
         // core waits 300s, runs CleanupInstance, respawns Medivh and replays the
         // whole encounter from rift 0. Measured 2026-07-24 that costs ~1400s per
-        // attempt against a 3600s run budget, so a party that fails twice can no
-        // longer finish inside the hour and simply burns the clock — every
+        // attempt against the run budget (3600s when measured, 7200s now), so a
+        // party that fails repeatedly can no longer finish and burns the clock — every
         // timed-out run in that batch was this, reported as the useless verdict
         // "overall_timeout" instead of naming the real failure.
         //
@@ -887,11 +873,9 @@ namespace
         // null forever" means we are camping a portal whose keeper we cannot see;
         // a shield falling with draining=0 means the ring radius is too tight.
         {
-            thread_local std::unordered_map<uint32, uint32> lastMs;
-            uint32& prev = lastMs[bot->GetGUID().GetCounter()];
-            if (!prev || GetMSTimeDiffToNow(prev) > 3000)
+            PlayerbotAI* const waveAI = GET_PLAYERBOT_AI(bot);
+            if (waveAI && !DcRun::Of(waveAI).Throttled(DcThrottle::BmWaveLog, 3000))
             {
-                prev = getMSTime();
                 LOG_DEBUG("playerbots.dungeonclear",
                          "DungeonClear: Black Morass — {} wave: shield {}%, rift {}/18, "
                          "draining {}, pulled {}, keeper {}, atKeeper {}, aeonus {}",

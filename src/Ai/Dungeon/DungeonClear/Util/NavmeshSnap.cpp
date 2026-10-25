@@ -15,12 +15,8 @@
 #include "MapDefines.h"
 #include "Player.h"
 
-namespace
-{
-    constexpr float SNAP_VERT_EXTENT = 10.0f;
-}
-
-NavmeshSnap::Result NavmeshSnap::Snap(Map const* map, float x, float y, float z, float maxRadius)
+NavmeshSnap::Result NavmeshSnap::Snap(Map const* map, float x, float y, float z, float maxRadius,
+                                      float vertExtent)
 {
     Result result;
     if (!map)
@@ -50,7 +46,7 @@ NavmeshSnap::Result NavmeshSnap::Snap(Map const* map, float x, float y, float z,
     for (int attempt = 0; attempt < 2; ++attempt)
     {
         float const radius = (attempt == 0) ? maxRadius : maxRadius * 2.0f;
-        float const extents[3] = { radius, SNAP_VERT_EXTENT, radius };
+        float const extents[3] = { radius, vertExtent, radius };
         dtPolyRef polyRef = 0;
         float closest[3] = { 0.0f, 0.0f, 0.0f };
         if (dtStatusSucceed(query->findNearestPoly(point, extents, &filter, &polyRef, closest)) &&

@@ -5,6 +5,39 @@
 
 #include "DungeonClearRouteRegistry.h"
 
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
+
+namespace
+{
+    // One-time seed of the hand-authored routes.
+    //
+    // The per-dungeon appenders are called EXPLICITLY, for the same reason the
+    // event and roster tables do it (see DungeonEventTables.h): the module is a
+    // static lib, and a translation unit whose only output is constructor side
+    // effects — which is what the "static Register instance" pattern this header
+    // used to describe would be — is dropped by the linker along with its rows.
+    //
+    // Seeded lazily from Get() rather than from a namespace-scope initialiser so
+    // it cannot race the Store() static's own construction. Register() is still
+    // callable directly; the unit tests use it with synthetic map ids.
+    void SeedAuthoredRoutes()
+    {
+        static bool const seeded = []
+        {
+            RegisterAzjolNerubRoute();
+            RegisterBlackwingLairRoute();
+            RegisterHallsOfLightningRoute();
+            RegisterUtgardePinnacleRoute();
+            RegisterBlackrockSpireRoute();
+            RegisterPitOfSaronRoute();
+            RegisterHallsOfReflectionRoute();
+            RegisterKarazhanRoute();
+            return true;
+        }();
+        (void)seeded;
+    }
+}
+
 std::unordered_map<DungeonClearRouteRegistry::Key, std::vector<WaypointHint>, DungeonClearRouteRegistry::KeyHash>&
 DungeonClearRouteRegistry::Store()
 {
@@ -20,6 +53,7 @@ void DungeonClearRouteRegistry::Register(uint32 mapId, Difficulty difficulty, ui
 
 std::vector<WaypointHint> const* DungeonClearRouteRegistry::Get(uint32 mapId, Difficulty difficulty, uint32 bossEntry)
 {
+    SeedAuthoredRoutes();
     auto const& s = Store();
     auto it = s.find(Key{mapId, difficulty, bossEntry});
     // Heroic shares the normal dungeon's geometry, and the hand-authored routes

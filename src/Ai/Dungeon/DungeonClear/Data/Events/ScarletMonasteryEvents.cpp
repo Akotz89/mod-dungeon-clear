@@ -97,22 +97,25 @@ void RegisterScarletMonasteryWings(std::unordered_map<uint32, DungeonWingLayout>
     // (event-locked) and injects Scarlet Commander Mograine (3976), so
     // 3976 is listed here too — otherwise the wing filter, which runs
     // after the patch, would drop the injected boss.
+    //
+    // Each wing's token is its DcTestDungeonRegistry row token, so rez
+    // recovery regroups a wiped party at ITS wing's entrance.
     store[189] = {true, {
         {"Scarlet Monastery (Graveyard)", {
             3983,   // Interrogator Vishas
             4543,   // Bloodmage Thalnos
-        }},
+        }, "sm-gy"},
         {"Scarlet Monastery (Library)", {
             3974,   // Houndmaster Loksey
             6487,   // Arcanist Doan
-        }},
+        }, "sm-lib"},
         {"Scarlet Monastery (Armory)", {
             3975,   // Herod
-        }},
+        }, "sm-arm"},
         {"Scarlet Monastery (Cathedral)", {
             4542,   // High Inquisitor Fairbanks
             3976,   // Scarlet Commander Mograine (injected by roster patch)
             3977,   // High Inquisitor Whitemane (removed by patch; kept for wing detection)
-        }},
+        }, "sm-cath"},
     }};
 }

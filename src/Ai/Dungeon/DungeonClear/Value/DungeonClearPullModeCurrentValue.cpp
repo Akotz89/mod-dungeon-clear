@@ -10,7 +10,9 @@
 #include "Ai/Dungeon/DungeonClear/Data/FightInPlaceRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/ScriptedPullRegistry.h"
 #include "Ai/Dungeon/DungeonClear/DcPullContext.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcBossStandDown.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcLeaderSignal.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcNoStopZone.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTargeting.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTickMemo.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearUtil.h"
@@ -19,6 +21,8 @@
 
 bool DungeonClearPullModeCurrentValue::Calculate()
 {
+    DcPullContext& pull = context->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+
     // While a PERSISTENT anchored event drives (ZulFarrak's temple), the event
     // owns the tank: force the EFFECTIVE pull mode Off so the whole dynamic/
     // advanced pull system stands down as one — no camp-drag kiting the tank off
@@ -29,8 +33,121 @@ bool DungeonClearPullModeCurrentValue::Calculate()
     // that replaces per-mechanic suppressions — the event needs exactly "pull Off"
     // behaviour. The stored pull-setting preference is untouched (the addon status
     // still shows it, and it resumes the instant the event completes).
-    if (DungeonEventExecutor::IsPersistentAnchoredEventActive(context))
+    //
+    // CLEAR THE STANDING VERDICT, don't just stop reporting it. This return skips
+    // DcPullPlanner::UpdateDynamicPullMode below — and that function is the only
+    // writer of the Dynamic verdict, so a bare `return false` freezes whatever
+    // `decision` happened to be latched on the tick the event started rather than
+    // standing it down. `decision == PatrolHold` is the one that bites: the pull
+    // trigger keeps its rung live on that code by design (pull mode reads off, but
+    // the tank must still hold at commit range while it waits a patrol out), so the
+    // pull action re-planted the tank at DcRel::Pull (35) every tick, above
+    // DcRel::AtObjective (30), and the event never got another tick to drive its own
+    // steps. The patrol-wait timeout cannot break the tie either — ShouldWaitForPatrol
+    // is only evaluated inside the governor we just skipped.
+    //
+    // Live: tr-20260817-100413-43/44/45, all three stalled identically in Shattered
+    // Halls. The tank latched "patrol-contended" on the Shattered Hand Champion pack
+    // (17671) at the assassin hallway's mouth — contended by the very stealthed
+    // Assassins (17695) the sweep event exists to kill — one second before the sweep
+    // event's step 0 completed and armed this stand-down. `decision` then read
+    // PatrolHold for 913 seconds, the sweep never advanced past step 0, and the run
+    // failed the 600s no-progress watchdog with the party standing in the hallway.
+    //
+    // ANCHORED IS ONLY HALF OF IT. The predicate below also covers a CONDITIONAL
+    // event whose row carries `ownsThePull` — BWL's Suppression Rooms crossing.
+    // The anchored-only read could never see that one: it resolves the event from
+    // DcKey::NextDungeonBoss and requires an Objective anchor, while a conditional
+    // event drives BETWEEN anchors with the next BOSS still sitting in that value
+    // (live: the whole crossing ran with NextDungeonBoss = Broodlord, kind boss).
+    // So the stand-down never armed, the advanced pull's Idle branch answered every
+    // whelp aggro with a fresh camp walked back along the route, and the tank ran
+    // the gauntlet backwards 16-102yd at a time — nine legs in four minutes on
+    // tr-20260828-142623-4. See DungeonEvent::ownsThePull.
+    //
+    // A NO_STOP ROUTE LEG STANDS THE PULL DOWN THE SAME WAY, and it wants exactly
+    // this behaviour rather than a variant of it — no camp, no drag, no LOS-break
+    // setback, no scout-lag stranding, the stored setting untouched and handed back
+    // on the way out. So it shares the branch and the latch below rather than
+    // growing a third one.
+    //
+    // What it buys: some stretches of an authored route are ground to CROSS, not
+    // ground to camp, for reasons the pull planner cannot see. BWL's
+    // Vaelastrasz->staging hall runs 24.3yd under the upper suppression room and
+    // is inside that floor's 3D aggro radius for 24% of its length. Left to plan,
+    // the pull system answers the legitimate pack at the FAR end of that hall with
+    // `safe-camp: ranged attacker -> requiring LOS break, maxDrag extended to
+    // 60yd`, drags the camp BACKWARD into the middle of the overhead band, and
+    // parks the raid there to fight, loot and rest. On tp-20260828-175353-1 that is
+    // where all five raids ended their run. See DcNoStopZone.
+    //
+    // A LIVE RAID ENCOUNTER STANDS THE PULL DOWN THE SAME WAY, and this is the
+    // branch it belongs in rather than a gate of its own — "the raid is fighting
+    // its boss" wants precisely what the two above want: no camp, no drag, no
+    // scout-lag, the stored setting untouched and handed back on the way out.
+    //
+    // DcBossStandDown is the run's non-interference contract: while an encounter
+    // is live the fight belongs to mod-playerbots' raid strategies and DC goes
+    // inert. It was only ever wired into DungeonClearCombatMultiplier, which
+    // covers the COMBAT engine — and the pull pipeline is a NON-combat rung whose
+    // Idle branch gates on the tank's OWN combat flag. A tank that has dropped
+    // combat mid-encounter (the boss is on somebody else, which on a 40-man is
+    // most of the fight) therefore walked straight through the contract and
+    // started a fresh trash pull on top of the raid's boss.
+    //
+    // What that cost, live on Firemaw (tr-20260829-204120-2, 21:01:40, 39s into
+    // the encounter): "dynamic verdict for pack 12459: ADVANCED", a camp
+    // published at (-7615.7,-1061.1,449.2) — 102yd back down the Broodlord
+    // corridor and around its bend from the boss — and then 32 bots on one tick
+    // logging "advanced-pull: held passive at camp". `+passive` is a STOCK
+    // strategy flip (DcFollowerLifecycle::ApplyFollowerPassive), so the combat
+    // multiplier's stand-down could not undo it: the ranged simply stopped
+    // attacking. Three such pins in a 160s fight, plus 2023 camp-recall ticks
+    // dragging the raid backwards for the rest of it. Reported as "ranged dps got
+    // stuck around a corner out of line of sight and did not dps the boss".
+    //
+    // Lowering the LATCHED bool is what actually fixes it, which is why this
+    // shares the branch instead of vetoing at the pull trigger: the camp hold,
+    // the party-spread gate and ReapStrandedPassives all read that bool, so the
+    // followers are released and un-passived on the next world update. A veto at
+    // the trigger alone would have stopped the NEXT pull and left the raid pinned
+    // and passive at the one already standing.
+    if (DungeonEventExecutor::IsPullOwningEventDriving(bot, context) ||
+        DcNoStopZone::IsInNoStopZone(bot, context) ||
+        DcBossStandDown::IsActive(bot))
+    {
+        pull.ClearDynamicVerdict();
+        // LOWER THE LATCHED BOOL TOO, not just the effective value. Returning
+        // false here skips UpdateDynamicPullMode, which is the only writer of
+        // DcKey::PullMode — so whatever the governor had latched when the event
+        // armed stays latched for the event's whole duration. That bool is what
+        // the follower camp-hold reads (DcLeaderSignal::GetLeaderPullInfo /
+        // GetLeaderCampHold, DcPartyState), so arming mid-Advanced-pull would pin
+        // the party at a stale camp while the tank fights the event alone. Latched
+        // as `eventForced` so the handback below can never clobber a player choice,
+        // exactly like scriptedForced one clause down.
+        if (!pull.eventForced)
+        {
+            pull.eventForced = true;
+            context->GetValue<bool>(DcKey::PullMode)->Set(false);
+            DcLeaderSignal::SetLeaderDazeImmunity(bot, false);
+        }
         return false;
+    }
+    if (pull.eventForced)
+    {
+        pull.eventForced = false;
+        // Same handback as the scripted stage's: Off/On go back in lock-step with
+        // the setting, Dynamic is left for the governor call at the bottom of this
+        // function to re-decide from the pack in front of the tank.
+        uint32 const setting = context->GetValue<uint32>(DcKey::PullSetting)->Get();
+        if (setting != 2u)
+        {
+            bool const active = (setting == 1u);
+            context->GetValue<bool>(DcKey::PullMode)->Set(active);
+            DcLeaderSignal::SetLeaderDazeImmunity(bot, active);
+        }
+    }
 
     // SCRIPTED PULL STAGE (ScriptedPullRegistry) — the mirror image of the override
     // above: force the pull system ON for the plan's duration, whatever the player's
@@ -50,7 +167,6 @@ bool DungeonClearPullModeCurrentValue::Calculate()
     // Leader-only, like the Dynamic governor: a follower's own copy of the bool
     // drives nothing, and writing it there would just add churn.
     bool const isLeader = DcLeaderSignal::IsDungeonClearLeader(bot);
-    DcPullContext& pull = context->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
     if (isLeader && DcTickMemoAccess::ScriptedStage(bot, context) != nullptr)
     {
         if (!pull.scriptedForced)

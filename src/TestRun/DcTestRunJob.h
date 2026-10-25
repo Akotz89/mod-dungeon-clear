@@ -18,11 +18,14 @@
 #include "TestRun/DcTestDungeonRegistry.h"
 #include "TestRun/DcTestGearTiers.h"
 #include "TestRun/DcTestAreaTriggers.h"
+#include "TestRun/DcTestComp.h"
 #include "TestRun/DcTestRunLiveJson.h"
 #include "TestRun/DcTestRunRecord.h"
 #include "TestRun/DcTestRunVerdict.h"
 #include "TestRun/DcWipeContext.h"
 
+class AiObjectContext;
+class DcLabRecorder;
 class Player;
 
 // One `.dc test` run in flight: a single 5-bot party driven through the full
@@ -42,6 +45,51 @@ class Player;
 class DcTestRunJob
 {
 public:
+    // Pull Lab seam (src/Lab, pull-lab plan §4.1). A job created with a driver
+    // runs the ordinary setup — spawn, provision, group, teleport the party into
+    // a fresh instance — and then hands the party to the driver instead of
+    // starting a dungeon clear: no `dc on`, no boss roster, no watchdog, and no
+    // dc_testruns.jsonl record (the Lab writes its own). Every teardown
+    // guarantee (revive, send home, log out, unbind) is unchanged.
+    struct LabParty
+    {
+        ObjectGuid gm;
+        std::vector<ObjectGuid> members;   // slot order; [0] is the DC tank
+        std::vector<char const*> roles;    // "tank" | "heal" | "dps", per slot
+        uint32 mapId = 0;
+        uint32 instanceId = 0;
+        std::string runId;                 // the hosting tr- id
+    };
+
+    class LabDriver
+    {
+    public:
+        virtual ~LabDriver() = default;
+        // Every world tick while the job is in its Lab stage. Return false once
+        // the driver has nothing more to run: the job then tears down.
+        virtual bool Tick(LabParty const& party, uint32 diff) = 0;
+        // The job is tearing down (driver finished, abort, GM logout): release
+        // anything armed — traces, overrides, spawned actors.
+        virtual void OnTeardown(LabParty const& party, std::string const& reason) = 0;
+        // Keep re-installing the GM as every bot's master (the react-delay fast
+        // path)? A driver running a masterless profile turns this off.
+        virtual bool KeepGmMaster() const { return true; }
+        virtual std::string Status() const = 0;
+    };
+
+    // Lab factory: a party of exactly `comp`, handed to `driver` once it has
+    // arrived in its instance. Same pool rules as Create.
+    static std::unique_ptr<DcTestRunJob> CreateLab(Player* gm, DcTestDungeonRegistry::Row const& row,
+                                                   uint32 level, uint32 seed, bool heroic,
+                                                   DcTestGearTiers::Spec const& gear,
+                                                   std::vector<DcTestComp::Slot> const& comp,
+                                                   std::shared_ptr<LabDriver> driver,
+                                                   std::unordered_set<ObjectGuid> const& reservedGuids,
+                                                   std::string* err);
+
+    // The roster a row/level may draw from (death knights only on WotLK 55+).
+    static DcTestComp::Roster RosterFor(DcTestDungeonRegistry::Row const& row, uint32 level);
+
     // Factory: today's Start body after registry/GM validation. Rolls a random
     // comp from `seed` (DcTestComp::BuildComp), then picks one offline
     // addclass-pool character per slot (skipping reservedGuids, the guids
@@ -52,12 +100,16 @@ public:
     // stored in the record so the comp can be replayed.
     //
     // `gear` is the run's own gear ceiling (DcTestGearTiers::Spec); a default
-    // Spec means "whatever AiPlayerbot.AutoGearScoreLimit / AutoGearQualityLimit
+    // Spec means "whatever Playerbots.AutoGearScoreLimit / AutoGearQualityLimit
     // say", which is what every run did before the option existed. It is
     // resolved against the conf ONCE here, so a mid-run `.reload config` cannot
     // change what a run was geared to.
+    // `size` = party size (raid-support Plan D): 0 keeps the classic 5-man
+    // comp; 2-40 draws a sized comp with role quotas (DcTestComp::RoleQuota),
+    // grouped as a RAID past 5 members.
     static std::unique_ptr<DcTestRunJob> Create(Player* gm, DcTestDungeonRegistry::Row const& row,
-                                                 uint32 levelOverride, uint32 seed, bool heroic,
+                                                 uint32 levelOverride, uint32 seed, uint32 size,
+                                                 bool heroic,
                                                  DcTestGearTiers::Spec const& gear,
                                                  std::unordered_set<ObjectGuid> const& reservedGuids,
                                                  std::string const& planId, std::string* err);
@@ -97,14 +149,23 @@ public:
                                                           std::string const& planId,
                                                           std::string* err);
 
-    // Drive from the world thread. provisionBudget is shared across all runs
-    // this tick: the one heavyweight PlayerbotFactory::Randomize roll a run
-    // performs consumes it (sets it false), so at most one factory roll runs
-    // per world tick across the whole registry.
-    void Tick(uint32 diff, bool& provisionBudget);
+    // Drive from the world thread. The one heavyweight PlayerbotFactory::
+    // Randomize roll a run performs claims DcProvisionBudget, the realm-wide
+    // one-roll-per-world-tick ration, so at most one factory roll runs per tick
+    // across every run AND every other provisioning subsystem.
+    void Tick(uint32 diff);
+
+    ~DcTestRunJob();
 
     bool Done() const { return _done; }
+
+    // `.dc test start ... trace=1`: arm a Pull Lab trace (src/Lab) when the run
+    // reaches Monitoring, and score it with the ten oracles at teardown. Call
+    // before Monitoring; a no-op afterwards.
+    void EnableTrace() { _traceRequested = true; }
     bool IsMonitoring() const { return _stage.load() == Stage::Monitoring; }
+    bool IsLab() const { return _lab != nullptr; }
+    bool InLabStage() const { return _stage.load() == Stage::Lab; }
 
     // Stop while Monitoring: async verdict path (the monitor tick picks up the
     // abort flag and runs Finish).
@@ -146,6 +207,7 @@ private:
         Teleporting,
         Starting,
         Monitoring,
+        Lab,
         TearingDown
     };
 
@@ -178,6 +240,19 @@ private:
 
     DcTestRunJob() = default;
 
+    // Create's body after the comp is chosen (shared with CreateLab).
+    static std::unique_ptr<DcTestRunJob> CreateWithComp(Player* gm, DcTestDungeonRegistry::Row const& row,
+                                                        uint32 level, uint32 seed, bool heroic,
+                                                        DcTestGearTiers::Spec const& gear,
+                                                        std::vector<DcTestComp::Slot> const& comp,
+                                                        std::unordered_set<ObjectGuid> const& reservedGuids,
+                                                        std::string const& planId, std::string* err);
+
+    // Lab stage: hand the party to the driver each tick.
+    void TickLab(uint32 diff);
+    LabParty MakeLabParty() const;
+    std::shared_ptr<LabDriver> _lab;
+
     // Shared prologue of both factories: identity, watchdog limits, record
     // header. Everything that does not depend on how the party was chosen.
     void InitIdentity(Player* gm, DcTestDungeonRegistry::Row const& row, uint32 level,
@@ -187,7 +262,7 @@ private:
     static char const* StageName(Stage s);
 
     void TickSpawning();
-    void TickProvisioning(bool& provisionBudget);
+    void TickProvisioning();
     // Roster variant: read the characters out into the record and leave them
     // otherwise untouched. No factory roll, so no per-tick budget.
     void TickProvisioningRoster();
@@ -212,6 +287,17 @@ private:
     void TickTeleporting();
     void TickStarting();
     void TickMonitoring(uint32 dt);
+    // SCENARIO runs: put every roster entry outside the row's focus into the
+    // tank's DcKey::Skipped — the same set a hand-typed `dc skip` builds.
+    // Idempotent and cheap, so it is re-asserted every monitor tick: DC wipes
+    // Skipped on a run-instance change (DcTargeting::
+    // ResetCompletionLatchesForNewInstance), and a fill that lapsed would send
+    // the raid off to clear the whole map. No-op on a full-dungeon run.
+    void ApplyScenarioSkips(Player* tank, AiObjectContext* ctx);
+    // Copy the event-published extras (DcRunState::testExtras on the tank) into
+    // the record. Called every monitor tick and once more at Finish, so a
+    // leader that vanishes at the end still leaves the last values it wrote.
+    void CaptureExtras(Player* tank);
     void TrackDeaths(Player* tank);
     void TrackEngagement(Player* tank);
     void TrackPulls(Player* tank);
@@ -288,6 +374,13 @@ private:
     Player* FindGm() const;
     Player* FindTank() const;
 
+    // Pull Lab trace (trace=1): armed at Monitoring entry, closed and scored
+    // first thing in Teardown while the party is still standing in the dungeon.
+    void ArmTrace(Player* tank, AiObjectContext* ctx);
+    void FinishTrace();
+    bool _traceRequested = false;
+    std::unique_ptr<DcLabRecorder> _trace;
+
     // --- run identity (set in Create) --------------------------------------
     std::atomic<Stage> _stage{Stage::SpawningBots};
     bool _done = false;             // world-thread only; manager erases on true
@@ -296,6 +389,18 @@ private:
     float _x = 0.f, _y = 0.f, _z = 0.f, _o = 0.f;
     uint32 _level = 0;
     bool _heroic = false;  // run at DUNGEON_DIFFICULTY_HEROIC
+
+    // Is the run's map a RAID map (drives raid grouping, raid difficulty,
+    // bind hygiene and the budget check's difficulty read)? Derived once from
+    // the map store at InitIdentity.
+    bool _isRaidMap = false;
+    bool IsRaidMap() const { return _isRaidMap; }
+
+    // Setup-stage timeout scaled to the party size (see the bases in the .cpp).
+    uint32 Scaled(uint32 baseMs) const
+    {
+        return baseMs + 3000u * static_cast<uint32>(_slots.size());
+    }
     // Gear ceiling this run's bots are rolled to, already resolved against the
     // playerbots conf (ilvl 0 = no cap, quality 0 = factory default). Frozen at
     // Create so the run is reproducible from its own record. Unused on roster
@@ -311,6 +416,25 @@ private:
     DcTestRunRecord::Record _record;
     DcTestRun::Limits _limits;
 
+    // --- scenario (Karazhan chess plan, T1; all inert on a full-dungeon row) --
+    // Copied off the registry row at InitIdentity so the job never holds a
+    // pointer into the catalogue.
+    bool _isScenario = false;
+    std::vector<uint32> _focus;             // roster entries the run is scoped to
+    DcTestDungeonRegistry::SuccessPredicate _success;
+    uint32 _successGraceMs = 0;
+    // The predicate's latch + grace clock (pure — DcTestRunVerdict.h).
+    DcTestRun::ScenarioGrace _grace;
+
+    // --- run wing (Blackrock Spire/Depths: a map whose wing is chosen per run) -
+    // The row's wing token when its map picks wings explicitly ("lbrs", "brd-uc"),
+    // "" otherwise. Latched on the tank before the roster is read, so the roster,
+    // bossesTotal and the run all see only that wing. `_wingMask` is the wing's
+    // DungeonEncounter bits (0 = count every bit): it scopes the kill count and
+    // the stale-instance guard, so an LBRS run never counts UBRS kills.
+    std::string _runWing;
+    uint32 _wingMask = 0;
+
     // --- stage bookkeeping --------------------------------------------------
     uint32 _stageMs = 0;      // time in current stage (stage timeouts)
     uint32 _totalMs = 0;      // time since Create (timeline t offsets)
@@ -318,7 +442,11 @@ private:
     uint32 _monitorAccumMs = 0;
     std::size_t _provisionIdx = 0;
     bool _groupFormed = false;
-    bool _teleportIssued = false;
+    // Teleporting goes in two waves — leader first, then the rest — so the
+    // party cannot be split across instance copies. See TickTeleporting.
+    bool _teleportIssued = false;      // wave 1 (the leader) has been sent
+    bool _followersTeleported = false; // wave 2 (everybody else) has been sent
+    uint32 _destInstanceId = 0;        // the copy the leader landed in; 0 until it does
     bool _dcOnIssued = false;
     // One-shot so ReassertMaster's diagnostic names the first repair per run
     // instead of once a second forever.
@@ -333,6 +461,11 @@ private:
     std::vector<BossRef> _roster;
     uint32 _lastMask = 0;
     std::size_t _lastAnchors = 0;
+    // The no-progress clock (pure — DcTestRunVerdict.h), which folds in the
+    // leader's DcRunState::eventProgressSeq so a long scripted event's own
+    // headway counts. _sinceProgressMs mirrors its value for the readers that
+    // predate it (the freeze dump, the live snapshot).
+    DcTestRun::ProgressClock _progressClock;
     uint32 _sinceProgressMs = 0;
 
     // One-shot live freeze dump, fired partway INTO the no-progress window

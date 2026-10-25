@@ -1,0 +1,43 @@
+{
+  "about": "Human players (issue #21, open and undiagnosed, a diagnosis tool): 'Patrols after Gilnid did not register for aggro ... the party and tank stayed OOC eating while I took them down slowly'. The post-Gilnid tunnel patrols are native waypoint walkers: Overseer 79361 leading Wizard 79260 (formation, path 793610), and Evoker 79360 (path 793600). Both loop from (-107,-649) up to the foundry exit at (-144,-580). The party starts on their path (path 793610 point 6), the foundry trash pre-cleared as 3daca820 does. Lead suspect, from code only: DcLeaderSignal.cpp AnyGroupMemberInCombat never counts the human, so a human-only fight arms no party assist, and a PatrolHold verdict may also keep the tank parked. Read the trace with lab_trace --actions Tank for which one it was. Not staged: the report has the party resting (eating/drinking) when the patrol walks in, and staging tops everyone up, so a rest-gated cause is not exercised here.",
+  "schema": 1,
+  "geometry": {
+    "map": 36,
+    "dungeon": "deadmines",
+    "heroic": false,
+    "region": { "center": [-125.0, -620.0, 13.0], "radius": 60.0 },
+    "objective": 646,
+    "objectiveName": "Mr. Smite"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [79361, 79260, 79360]
+      }
+    }
+  },
+  "party": {
+    "comp": "paladin-prot,priest-holy,warrior-arms,mage-frost,rogue-combat",
+    "level": 24,
+    "start": [-130.3, -612.7, 13.6, -1.056],
+    "react": "fast",
+    "seedTarget": false,
+    "human": { "slot": 2, "script": "humans/deadmines-human-fights-patrol" }
+  },
+  "settings": {
+    "PullSetting": 2
+  },
+  "goal": { "kill": "pack:target", "timeoutS": 120 },
+  "expect": {
+    "oracles": {
+      // #21 is 'the party stayed OOC while I fought': hold O9 to 8s so the normal
+      // 2-4s join (stock dps-assist cadence, a frostbolt in flight, a rogue's
+      // stealth+sprint opener) is not counted as reproducing it. In
+      // lb-20261003-155828-1 run 1 the tank was in combat 0.4s after the human
+      // and the last bot at 4.3s, which tripped the old 4s default.
+      "O9": { "humanFightS": 8, "expect": "fail" },
+      "O10": "fail"
+    },
+    "knownFailure": "open:#21"
+  }
+}

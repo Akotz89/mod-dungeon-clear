@@ -31,8 +31,24 @@ namespace DcRegroupDecision
             // stock `reach spell` closes toward the TARGET, which regroup-to-tank
             // used to fight (defect D1). A melee chasing a runner keeps a visible
             // attacker the whole chase => None until the hard tether.
-            return in.hasVisibleAttacker ? RegroupVerdict::None
-                                         : RegroupVerdict::Reconnect;
+            //
+            // hasLosTarget is the second half of "can contribute", and it is the one
+            // that keeps this rung from MUTING a working DPS. `attackers` only ever
+            // contains mobs the bot or a groupmate holds real THREAT on (stock
+            // AttackersValue walks GetThreatenedByMeList), so it reads empty in every
+            // window where the party is combat-flagged but nobody has landed threat
+            // yet — including the one DC manufactures itself, where the camp assist
+            // seeds a target and SetInCombatWith()s the bot without any threat
+            // relationship. In that window the bot HAS a live, valid, in-LOS target
+            // its rotation could shoot, but a Reconnect verdict here latches and the
+            // action (rel 29, above reach spell at 20 and the whole rotation at 5-20)
+            // eats the tick — so the bot never casts, never gains threat, and the
+            // empty-attackers state that armed the rung sustains itself. Standing
+            // down whenever something shootable is in sight breaks that loop and
+            // costs nothing: the around-the-corner case this rung exists for has no
+            // in-LOS target by definition.
+            return (in.hasVisibleAttacker || in.hasLosTarget) ? RegroupVerdict::None
+                                                              : RegroupVerdict::Reconnect;
         }
 
         // Healer. HealReposition (rel 41) owns the hurt-target case — do not

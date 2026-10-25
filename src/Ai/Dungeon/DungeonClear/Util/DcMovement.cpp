@@ -4,6 +4,7 @@
  */
 
 #include "Ai/Dungeon/DungeonClear/Util/DcMovement.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcPbCompat.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 
 #include <algorithm>
@@ -15,33 +16,66 @@
 #include "PlayerbotAIConfig.h"
 #include "Playerbots.h"
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
+#include "Util/DcPlayerbotsConfig.h"
 
 namespace DcMovement
 {
-    // Zero the escort spline's LastMovement wait. When the spline was issued,
-    // LastMovement was Set with a delay sized to the window travel time (capped
-    // at maxWaitForMove, up to ~5s). The advance re-issue guard early-outs while
-    // IsWaitingForLastMove() is true, so after a glide is halted the bot would
-    // otherwise idle for the remainder of that delay before re-issuing. Zeroing
-    // lastdelayTime makes IsWaitingForLastMove() false immediately.
+    // Drop the escort spline's arbitration block. When the spline was issued,
+    // SplinePath recorded it with a duration sized to the window travel time
+    // (capped at maxWaitForMove, up to ~5s), and the framework refuses an
+    // equal-or-lower priority move for that long — as a delay window before
+    // mod-playerbots #2747, as a hold after it. After a glide is halted the bot
+    // would otherwise idle for the remainder of that duration before the next
+    // move is accepted. DcPbCompat spells the clear for both versions.
     static void ZeroLastMovementWait(Player* bot)
     {
         if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot))
             if (AiObjectContext* ctx = botAI->GetAiObjectContext())
-                ctx->GetValue<LastMovement&>(DcKey::Stock::LastMovement)->Get().lastdelayTime = 0.0f;
+                DcPbCompat::ClearMovementHold(
+                    ctx->GetValue<LastMovement&>(DcKey::Stock::LastMovement)->Get());
     }
 
-    // Kill an in-flight ESCORT glide so a forced rebuild/reset starts from a
-    // standstill. Without this a now-stale EscortMovementGenerator keeps driving
-    // the bot down the OLD route while the rebuilt path is ignored. Only touches
-    // our own escort glide; no-op otherwise.
+    static DcGlideRecord* GlideRecordOf(Player* bot)
+    {
+        if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot))
+            if (AiObjectContext* ctx = botAI->GetAiObjectContext())
+                return &ctx->GetValue<DcGlideRecord&>(DcKey::GlideRecord)->Get();
+        return nullptr;
+    }
+
+    bool OwnsRunningEscort(Player* bot)
+    {
+        if (!bot)
+            return false;
+        MotionMaster* mm = bot->GetMotionMaster();
+        if (!mm || mm->GetCurrentMovementGeneratorType() != ESCORT_MOTION_TYPE)
+            return false;
+        DcGlideRecord const* rec = GlideRecordOf(bot);
+        if (!rec || !rec->issued)
+            return false;
+        Movement::MoveSpline const* spline = bot->movespline;
+        if (!spline || !spline->Initialized() || spline->Finalized())
+            return false;
+        // MovebyPath stores our points verbatim, so the final point is ours to the
+        // float; the tolerance only absorbs a z nudge. A stock glide that happens
+        // to end within half a yard of ours is going where we asked anyway.
+        return (spline->FinalDestination() - rec->end).squaredLength() < 0.25f;
+    }
+
+    // Kill an in-flight ESCORT glide of DC's OWN so a forced rebuild/reset starts
+    // from a standstill. Without this a now-stale EscortMovementGenerator keeps
+    // driving the bot down the OLD route while the rebuilt path is ignored. Never
+    // touches a stock spline (see DcGlideRecord); no-op otherwise.
     static void StopActiveSplineGlide(Player* bot)
     {
         if (!bot)
             return;
-        MotionMaster* mm = bot->GetMotionMaster();
-        if (mm && mm->GetCurrentMovementGeneratorType() == ESCORT_MOTION_TYPE)
+        if (OwnsRunningEscort(bot))
+        {
             bot->StopMoving();
+            if (DcGlideRecord* rec = GlideRecordOf(bot))
+                rec->issued = false;
+        }
         ZeroLastMovementWait(bot);
     }
 
@@ -52,15 +86,30 @@ namespace DcMovement
         ZeroLastMovementWait(bot);
     }
 
+    void ReleaseMoveLock(Player* bot)
+    {
+        if (!bot)
+            return;
+        if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot))
+            if (AiObjectContext* ctx = botAI->GetAiObjectContext())
+            {
+                LastMovement& last = ctx->GetValue<LastMovement&>(DcKey::Stock::LastMovement)->Get();
+                DcPbCompat::ClearMovementHold(last);
+                last.msTime        = 0;
+            }
+    }
+
     void ResolveEscortConflict(Player* bot)
     {
         if (!bot)
             return;
-        MotionMaster* mm = bot->GetMotionMaster();
-        // Only act when an escort glide is actually in flight, so a point-move at
-        // a site with no glide is not perturbed (in particular the LastMovement
-        // wait is left untouched there).
-        if (mm && mm->GetCurrentMovementGeneratorType() == ESCORT_MOTION_TYPE)
+        // Only act when one of OUR escort glides is actually in flight, so a
+        // point-move at a site with no glide is not perturbed (in particular the
+        // LastMovement block is left untouched there) — and so a stock spline is
+        // never cancelled. Live (2026-09-04, Bero): eight
+        // "closing to aggro edge" re-issues in 1.5s, 0.8yd apart, each one a
+        // StopMoving here followed by a fresh spline from a standstill.
+        if (OwnsRunningEscort(bot))
             StopActiveSplineGlide(bot);
     }
 
@@ -140,11 +189,13 @@ namespace DcMovement
 
         if (bot->IsSitState())
             bot->SetStandState(UNIT_STAND_STATE_STAND);
+        // Unit::CastStop() interrupts CURRENT_GENERIC/CHANNELED/AUTOREPEAT and lets
+        // Spell::cancel() send the real client packets. PlayerbotAI::InterruptSpell()
+        // used to be called here too; it is a no-op after CastStop (every slot it
+        // scans is already cleared) and its hand-rolled SMSG_SPELL_FAILURE /
+        // SMSG_SPELL_FAILED_OTHER would only duplicate what cancel() already sent.
         if (bot->IsNonMeleeSpellCast(true))
-        {
             bot->CastStop();
-            botAI->InterruptSpell();
-        }
 
         float windowLen = 0.0f;
         for (size_t i = 1; i < pts.size(); ++i)
@@ -197,21 +248,30 @@ namespace DcMovement
             return false;
         }
 
+        // Remember what we just issued so the stop helpers can recognise it later.
+        if (DcGlideRecord* rec = GlideRecordOf(bot))
+        {
+            rec->issued = true;
+            rec->end = pts.back();
+        }
+
         // Record movement so AttackAction::Attack still clears the spline when a
         // patrol aggros mid-glide (its interrupt gate is priority <
         // MOVEMENT_COMBAT). The re-issue guards key off splineRunning, not this
-        // delay, so its only remaining job is priority arbitration; sizing it to
+        // duration, so its only remaining job is priority arbitration; sizing it to
         // the window travel time keeps it a faithful "this move lasts ~this long"
         // for the framework's other movement consumers without gating our re-issue.
+        // It is recorded as a delay window before mod-playerbots #2747 and as a
+        // hold after it (DcPbCompat::RecordMovement) — the same gate either way.
         float const runSpeed = std::max(0.1f, bot->GetSpeed(MOVE_RUN));
         float delay = 1000.0f * (windowLen / runSpeed);
-        delay = std::min(delay, static_cast<float>(sPlayerbotAIConfig.maxWaitForMove));
-        delay = std::max(delay, static_cast<float>(sPlayerbotAIConfig.reactDelay));
+        delay = std::min(delay, static_cast<float>(DC_PB_CONFIG(MaxWaitForMove, maxWaitForMove)));
+        delay = std::max(delay, static_cast<float>(DC_PB_CONFIG(ReactDelay, reactDelay)));
 
         G3D::Vector3 const& dest = pts.back();
-        botAI->GetAiObjectContext()->GetValue<LastMovement&>(DcKey::Stock::LastMovement)
-            ->Get().Set(bot->GetMapId(), dest.x, dest.y, dest.z, bot->GetOrientation(),
-                        delay, recordPrio);
+        DcPbCompat::RecordMovement(
+            botAI->GetAiObjectContext()->GetValue<LastMovement&>(DcKey::Stock::LastMovement)->Get(),
+            bot->GetMapId(), dest.x, dest.y, dest.z, bot->GetOrientation(), delay, recordPrio);
 
         // The cadence of these lines IS the step-pause signature: consecutive
         // issues spaced ~= their own `delay` mean seamless chaining; a gap much

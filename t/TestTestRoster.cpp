@@ -68,14 +68,32 @@ namespace
 
     TEST(DcTestRoster, RejectsWrongCountAndSaysHowMany)
     {
-        Result const few = Parse("Tanky,Healy,Stabby");
-        EXPECT_EQ(Kind::WrongCount, few.kind);
-        EXPECT_NE(std::string::npos, few.detail.find('3'));
-        EXPECT_TRUE(few.members.empty());
+        // Bounds are 2-40 now (raid rosters). One name is too few...
+        Result const one = Parse("Tanky");
+        EXPECT_EQ(Kind::WrongCount, one.kind);
+        EXPECT_NE(std::string::npos, one.detail.find('1'));
+        EXPECT_TRUE(one.members.empty());
 
-        Result const many = Parse("A,B,C,D,E,F");
-        EXPECT_EQ(Kind::WrongCount, many.kind);
-        EXPECT_NE(std::string::npos, many.detail.find('6'));
+        // ...41 too many...
+        std::string many;
+        for (int i = 0; i < 41; ++i)
+            many += (i ? std::string(",N") : std::string("N")) + std::to_string(i);
+        Result const over = Parse(many);
+        EXPECT_EQ(Kind::WrongCount, over.kind);
+        EXPECT_NE(std::string::npos, over.detail.find("41"));
+
+        // ...and the once-rejected counts inside the bounds now parse, with
+        // positional roles (tank, heal, dps...).
+        Result const three = Parse("Tanky,Healy,Stabby");
+        EXPECT_EQ(Kind::Ok, three.kind);
+        ASSERT_EQ(three.members.size(), 3u);
+        EXPECT_STREQ(three.members[0].role, "tank");
+        EXPECT_STREQ(three.members[1].role, "heal");
+        EXPECT_STREQ(three.members[2].role, "dps");
+
+        Result const six = Parse("A,B,C,D,E,F");
+        EXPECT_EQ(Kind::Ok, six.kind);
+        EXPECT_EQ(six.members.size(), 6u);
     }
 
     // WoW names are unique up to case, so "Bob" and "bob" are one character being

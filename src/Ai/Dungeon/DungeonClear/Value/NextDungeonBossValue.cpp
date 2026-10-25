@@ -16,7 +16,10 @@
 #include "InstanceScript.h"
 #include "Log.h"
 #include "Map.h"
+#include "Ai/Dungeon/DungeonClear/Data/DungeonWingRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcAnchorDone.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcBossOrdering.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRunWing.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearUtil.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearStateValues.h"
 #include "Playerbots.h"
@@ -124,6 +127,22 @@ std::optional<DungeonBossInfo> NextDungeonBossValue::Calculate()
         wantedEntries.insert(info.entry);
     std::unordered_map<uint32, BossLiveState> const liveness = BuildLiveness(map, wantedEntries);
 
+    // TERMINAL BOSS = WING COMPLETE. A wing chosen per run (Blackrock Spire) ends
+    // at its last boss: once Overlord Wyrmthalak is down an LBRS run is finished,
+    // whatever else in the wing was skipped or never reachable — it must not go
+    // on looking for more. An empty result is the all-cleared contract, so the run
+    // disables with kReasonAllCleared exactly as a fully-cleared list would.
+    if (DungeonWing const* wing = DcRunWing::Resolve(bot); wing && wing->terminalBossEntry)
+    {
+        BossLiveState const terminal = LookupLive(liveness, wing->terminalBossEntry);
+        if (DcRunWing::TerminalDone(*wing, bosses, completedMask, terminal.present && !terminal.alive))
+        {
+            DcRun::Of(context).selectedBossEntry = 0u;
+            context->GetValue<uint32>(DcKey::StickyBoss)->Set(0u);
+            return std::nullopt;
+        }
+    }
+
     // Check if there is a manually selected boss target override
     uint32 const selectedEntry = DcRun::Of(context).selectedBossEntry;
     if (selectedEntry != 0)
@@ -133,13 +152,12 @@ std::optional<DungeonBossInfo> NextDungeonBossValue::Calculate()
             if (info.entry == selectedEntry)
             {
                 bool invalid = false;
-                if (cleared.count(info.entry))
+                if (cleared.count(info.entry) || info.skipByDesign)
                     invalid = true;
                 else if (info.kind == DungeonAnchorKind::Boss &&
                          info.encounterIndex < 32 && (completedMask & (1u << info.encounterIndex)))
                     invalid = true;
-                else if (info.kind == DungeonAnchorKind::Boss && info.doneBossStateIndex >= 0 &&
-                         inst && inst->GetBossState(static_cast<uint32>(info.doneBossStateIndex)) == DONE)
+                else if (DcAnchorDoneByInstanceScript(info, inst))
                     invalid = true;
 
                 if (!invalid)
@@ -193,6 +211,11 @@ std::optional<DungeonBossInfo> NextDungeonBossValue::Calculate()
         if (skipped.count(info.entry))
             continue;
 
+        // Authored "present but skipped by design" (vehicle bosses, external
+        // set pieces) — same treatment as a player skip, but from data.
+        if (info.skipByDesign)
+            continue;
+
         // Travel objective already reached this run (latched on arrival). Its
         // encounterIndex is just an ordering hint, not a real DBC bit, so it
         // must be filtered here rather than via the completion mask below.
@@ -212,8 +235,13 @@ std::optional<DungeonBossInfo> NextDungeonBossValue::Calculate()
         // read from the instance script's own boss-state slot instead. Persistent
         // for the instance's life, so a re-enable after the kill won't re-target
         // a boss whose corpse has long despawned. See doneBossStateIndex.
-        if (info.kind == DungeonAnchorKind::Boss && info.doneBossStateIndex >= 0 &&
-            inst && inst->GetBossState(static_cast<uint32>(info.doneBossStateIndex)) == DONE)
+        // Objectives honour it too: an objective whose event runs a whole
+        // encounter (Karazhan's Opera, the Nightbane urn) is finished when that
+        // encounter's slot is DONE, including in a re-entered instance. The same
+        // rung reads doneInstanceData, for an encounter the script tracks only in
+        // a GetData value (Karazhan's chess) — live, so an unsaved one that reads
+        // NOT_STARTED again after a reload is a candidate again.
+        if (DcAnchorDoneByInstanceScript(info, inst))
             continue;
 
         BossLiveState const state = LookupLive(liveness, info.entry);

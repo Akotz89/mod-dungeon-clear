@@ -54,7 +54,7 @@ void DcPathWorker::WorkerLoop()
             // job.mesh keeps the navmesh alive for the whole call.
             raw = LongRangePathfinder::BuildCoreFromMesh(job.mesh.get(), job.mapId,
                                                          job.sx, job.sy, job.sz,
-                                                         job.tx, job.ty, job.tz);
+                                                         job.tx, job.ty, job.tz, job.runWing);
         }
         catch (...)
         {
@@ -88,7 +88,8 @@ void DcPathWorker::WorkerLoop()
 
 uint64 DcPathWorker::Submit(uint32 mapId, uint32 forEntry, ObjectGuid botGuid,
                             std::shared_ptr<dtNavMesh> mesh,
-                            float sx, float sy, float sz, float tx, float ty, float tz)
+                            float sx, float sy, float sz, float tx, float ty, float tz,
+                            std::string runWing)
 {
     EnsureStarted();
 
@@ -100,6 +101,7 @@ uint64 DcPathWorker::Submit(uint32 mapId, uint32 forEntry, ObjectGuid botGuid,
     job.mesh = std::move(mesh);
     job.sx = sx; job.sy = sy; job.sz = sz;
     job.tx = tx; job.ty = ty; job.tz = tz;
+    job.runWing = std::move(runWing);
 
     uint64 const id = job.jobId;
     _queue.Push(job);

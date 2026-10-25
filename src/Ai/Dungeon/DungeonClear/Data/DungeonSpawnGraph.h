@@ -6,6 +6,7 @@
 #ifndef _PLAYERBOT_DUNGEONSPAWNGRAPH_H
 #define _PLAYERBOT_DUNGEONSPAWNGRAPH_H
 
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -43,16 +44,18 @@ public:
                                                float tx, float ty, float tz,
                                                float corridorRadius = 25.0f);
 
-    // Build the per-dungeon spawn graph once. Called from DungeonClearLoader's
-    // WorldScript::OnStartup. Walks sObjectMgr->GetAllCreatureData(), filters
-    // to dungeon maps, attempts a navmesh snap (best-effort — many maps
-    // aren't loaded yet at startup, so snap may fail and we fall back to the
-    // raw spawn coord). Subsequent calls are no-ops.
+    // Build the per-dungeon spawn graph once, lazily from the first
+    // FindCorridor. Walks sObjectMgr->GetAllCreatureData(), filters to dungeon
+    // maps, attempts a navmesh snap (best-effort — the map may not be loaded,
+    // so snap may fail and we fall back to the raw spawn coord). Thread-safe:
+    // the first caller builds, concurrent callers on other map-update threads
+    // wait for it; subsequent calls are no-ops.
     static void Build();
 
 private:
+    static void BuildStore();
     static std::unordered_map<uint32, std::vector<SpawnNode>>& Store();
-    static bool _built;
+    static std::once_flag _once;
 };
 
 #endif

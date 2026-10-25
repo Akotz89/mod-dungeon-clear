@@ -163,6 +163,11 @@ namespace DcActionShared
     // read, announced once per reason change.
     void StallDungeonClear(PlayerbotAI* botAI, std::string const& reason);
 
+    // StallDungeonClear for the door-blocked action: the reason is marked as the
+    // door's, so the blocking-door value clears it the moment it stops naming a
+    // door (see DcApproachState::doorOwnsStallReason).
+    void StallDungeonClearForDoor(PlayerbotAI* botAI, std::string const& reason);
+
     // Clear the stall + last-said reason.
     void ClearStall(AiObjectContext* ctx);
 

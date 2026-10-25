@@ -40,6 +40,12 @@ enum class DcType
 // out can never change normal-difficulty behaviour by accident.
 inline constexpr double kDcNoHeroic = std::numeric_limits<double>::quiet_NaN();
 
+// Sentinel for `DcSettingDef::raidVal`: this row has NO raid layer. Same NaN
+// trick, same rationale — the raid profile is a deliberately small set (spread,
+// recovery budgets: numbers that must scale with 10-40 members), and a row that
+// opts out resolves identically on raid maps and dungeon maps.
+inline constexpr double kDcNoRaid = std::numeric_limits<double>::quiet_NaN();
+
 struct DcSettingDef
 {
     char const* key;          // config key suffix, e.g. "BossEngageRangeFloor"
@@ -57,7 +63,19 @@ struct DcSettingDef
     // not admin input, and a value outside the row's own range would be one the
     // addon could never reproduce as an override. Pinned by a gtest.
     double      heroicVal = kDcNoHeroic;
+    // Default used instead of `defVal` while the run's map is a RAID (any raid
+    // difficulty). kDcNoRaid = no raid layer (the common case). Resolution sits
+    // ABOVE the heroic layer: conf "DungeonClear.<key>.Raid" -> raidVal -> the
+    // heroic path -> conf -> defVal (see GetRaw in DcSettings.cpp). Same range
+    // contract as heroicVal: raid values MUST sit inside [minVal, maxVal].
+    double      raidVal = kDcNoRaid;
 };
+
+// True when the row carries an authored raid default (NaN-compare, as above).
+inline bool DcHasRaidDefault(DcSettingDef const& d)
+{
+    return !std::isnan(d.raidVal);
+}
 
 // True when the row carries an authored heroic default. NaN compares unequal to
 // itself, which is exactly the "unset" test wanted here.
@@ -71,6 +89,23 @@ inline bool DcHasHeroicDefault(DcSettingDef const& d)
 // rejects overrides for them and the addon hides them).
 inline constexpr DcSettingDef kDcSettings[] =
 {
+    // Module master switch. 1 (default): mod-dungeon-clear runs. 0: the module
+    // is compiled in but completely inert — it registers NO strategies, actions,
+    // triggers or values into mod-playerbots' shared contexts, installs no
+    // strategy on any bot, and every hook, `.dc` command and addon message is a
+    // no-op. A server that wants the code present but the behaviour off sets
+    // this rather than rebuilding without the module.
+    //
+    // Read ONCE, at the first world tick, and latched for the process lifetime
+    // (DcModule::IsEnabled) — the context registration is a one-way append into
+    // registries that already-built bots hold by reference, so it cannot be
+    // undone on `.reload config`. Flipping the conf line live logs a warning and
+    // takes effect on the next worldserver restart.
+    //
+    // Server-only: a master switch is an admin decision, never something an
+    // addon override may reach.
+    { "Enable",                DcType::Bool,   1,   0,   1,  false },
+
     { "LootMinQuality",        DcType::UInt,   0,   0,   6,  true  },
 
     // Better Loot Rolling. Master toggle for a set of fixes to mod-playerbots'
@@ -133,7 +168,10 @@ inline constexpr DcSettingDef kDcSettings[] =
     // cover the rezzer drinking back the mana to afford the cast. OFF restores
     // the classic disable-on-first-death. See Util/DcRezDecision.h.
     { "PostCombatRez",            DcType::Bool,   1,  0,   1,  true  },
-    { "PostCombatRezTimeoutSecs", DcType::UInt,  90, 10, 600,  true  },
+    // Raid layer: many more corpses to walk between and drink for — the 5-man
+    // budget ends winnable raid recoveries early (Plan B's multi-rezzer election
+    // scales the work, this scales the clock).
+    { "PostCombatRezTimeoutSecs", DcType::UInt,  90, 10, 600,  true, kDcNoHeroic, 180 },
 
     // Stranded-member recovery failsafe. The dominant way a run stalls now is a
     // party member falling THROUGH the world geometry (or wedging where the
@@ -142,7 +180,9 @@ inline constexpr DcSettingDef kDcSettings[] =
     // run freezes. With StrandedRecovery on, when the run has shown NO progress —
     // no boss/objective completed and the tank not closing on the next anchor —
     // for StrandedRecoveryNoProgressSecs while a BOT member is stuck beyond
-    // PartyMaxSpread of the tank, that member is teleported to the tank (bots
+    // the tank's live advance-gate spread (PartyMaxSpread, or a sealed
+    // encounter's tighter muster clump — DcStrandedDecision::RescueSpread), that
+    // member is teleported to the tank (bots
     // only; a human is never relocated). The long clock is deliberate: it must
     // never fire during a legitimately slow pull/rest, only a true freeze, and
     // combat re-arms it (a fight is progress) so a long boss fight never trips it.
@@ -150,6 +190,26 @@ inline constexpr DcSettingDef kDcSettings[] =
     // DcStrandedRecovery.
     { "StrandedRecovery",              DcType::Bool,   1,   0,    1,  true  },
     { "StrandedRecoveryNoProgressSecs", DcType::UInt,  60,  60, 3600,  true  },
+
+    // Unreachable-holder combat purge. The other half of "the run has frozen":
+    // not a member stranded out of range, but a MOB stranded out of reach that
+    // has the party in combat and can never be killed, never be reached, and
+    // never evade (Gundrak's Drakkari Raiders, ejected off a drop into water by
+    // SmartAI and re-homed where they land). Nothing in the core ends that fight,
+    // so the party stays flagged for the rest of the run.
+    //
+    // When the run has shown NO progress — no boss/objective completed and the
+    // tank not closing on the next anchor — for this many seconds, and a creature
+    // listed in DcCombatPurgeRegistry is holding the party in combat, that
+    // creature's combat and threat are dropped and its entry is barred from
+    // target selection for the same window. The clock is deliberately COMBAT-BLIND
+    // (unlike StrandedRecoveryNoProgressSecs, which a fight re-arms): the fight is
+    // the thing being detected. 0 disables the purge entirely.
+    //
+    // Only a hand-vetted (mapId, entry) can ever be dropped, so the window is not
+    // a safety bound on WHAT gets purged — just on how long a deadlock is allowed
+    // to run before the failsafe answers it. See Util/DcCombatPurge.h.
+    { "UnreachableCombatPurgeSecs",    DcType::UInt,  60,   0, 3600,  true  },
 
     // Wait at Boss: auto-pause the run at the moment the tank would commit a
     // boss pull and hold for the human's resume (the addon Pause/Resume button
@@ -166,7 +226,90 @@ inline constexpr DcSettingDef kDcSettings[] =
     // capture path is dungeonclear_decisions.jsonl in the worldserver's working
     // dir, overridable via the DUNGEONCLEAR_DECISIONS_FILE env var.
     { "RecordDecisions",       DcType::Bool,   0,   0,   1,  true  },
-    { "PartyMaxSpread",        DcType::Float, 25,  10,  60,  true  },
+    // Raid-only knobs (read only while the run's map is a raid; plain defaults,
+    // not raidVal rows, because no dungeon path consults them at all).
+    //
+    // Quorum for the raid form of IsPartyReady: the run advances when every
+    // tank + healer meets the readiness bars and at least this percentage of
+    // living members does; a wedged straggler below the quorum is left to the
+    // stranded-recovery ladder instead of pinning 24 others. 100 restores the
+    // strict every-member gate.
+    { "RaidReadyQuorumPct",    DcType::UInt,  90,  50, 100,  true  },
+    // Pre-boss muster budgets (Plan C). Resting is parallel — 25 bots eat at
+    // once — so the bound covers the slowest drinker plus the stragglers still
+    // walking in; Rebuffing covers a full ForceRebuff round of group buffs.
+    // None of them are targets: on expiry the muster advances with what it has
+    // and says so. Total is the HARD ceiling on the whole stand-around — it
+    // fires from any phase, cancels the open rebuff windows and releases the
+    // pull, so the raid can never spend longer buffing than fighting. The two
+    // phase bounds are authored to sum to it; raise Total first if you widen
+    // either.
+    { "RaidMusterRestTimeoutSecs",   DcType::UInt,  35,  10, 900,  true  },
+    { "RaidMusterRebuffTimeoutSecs", DcType::UInt,  25,   5, 300,  true  },
+    { "RaidMusterTotalTimeoutSecs",  DcType::UInt,  60,  15, 1200, true  },
+
+    // Raid form of the wipe verdict: the fraction of the raid that must be dead
+    // (with nobody left engaged) before the run treats the fight as a WIPE. A
+    // literal everyone-dead test never fires at 25-40 — one pet-classed
+    // survivor hiding at range would hold the verdict open forever.
+    { "RaidWipeFractionPct",   DcType::UInt,  90,  50, 100,  true  },
+
+    // Blackwing Lair, the Suppression Rooms transit: how far off the leader's
+    // route cursor a member may be before the pack rung walks it back in.
+    //
+    // 25 is the ordinary party spread and it is the right order of magnitude for
+    // the same reason it is there: it is about how wide a cylinder of a room the
+    // raid sweeps. On this leg that is not a comfort question — the two rooms hold
+    // 160 whelps on a 30s respawn, and every straggler independently holds the
+    // WHOLE party in combat, which is what leaves the clear with no driver at all.
+    //
+    // Deliberately NOT scaled up for a raid the way PartyMaxSpread is (25 -> 40).
+    // A 40-member column is legitimately longer than a 5-man file when it is
+    // walking a corridor nobody is fighting in; here the length IS the failure,
+    // and the pack rung is inert inside the leash, so a tight number costs a bot
+    // in position nothing at all.
+    { "TransitPackLeash",      DcType::Float, 25,  10,  60,  true  },
+
+    // The rest of the transit's knobs. SuppressionTransit is the master switch and
+    // the rollback: with it off, Phases A/B/D stay (a route is data, the whelp
+    // rows only remove targets, and the pack rung is inert without the cursor this
+    // driver publishes) and the leg behaves exactly as it did before.
+    { "SuppressionTransit",    DcType::Bool,   1,   0,   1,  true  },
+
+    // THE GATHER GATE at the staging point — the one place on this leg the raid
+    // can wait for its stragglers for free (nearest whelp 40.8yd, nearest device
+    // 50.1yd, no whelp within 30yd).
+    //
+    // Radius 20 is tighter than PartyMaxSpread on purpose: this is the ball the
+    // raid enters the gauntlet as, and the whole argument for the transit is that
+    // a wide ball sweeps more of a room whose spawns are the problem. Quorum 0.85
+    // rather than 1.0 for the reason RaidReadyQuorumPct exists — one bot that
+    // cannot path in must not hold thirty-nine at the door — and the timeout is
+    // the backstop under both: on expiry the crossing starts anyway and says so.
+    { "TransitGatherRadius",   DcType::Float, 20,   8,  60,  true  },
+    { "TransitGatherQuorum",   DcType::Float, 0.85, 0.5, 1.0, true },
+    { "TransitGatherTimeoutMs", DcType::UInt, 60000, 10000, 300000, true },
+
+    // HOW CLOSE AN ELITE HAS TO BE before the driver stands and fights it instead
+    // of walking past. 20yd is a little over the aggro band of the level-61/62
+    // elites on this leg, so the hold arms as the pack pulls them rather than
+    // after they are already in the middle of the column — the six Taskmasters on
+    // the ramp cannot be walked past at all, and the Hatchers are worth 600s each.
+    { "TransitEliteHoldRadius", DcType::Float, 20,  0,  60,  true  },
+
+    // ...and how close an ARMED Suppression Device has to be before the driver
+    // spends a tick letting mod-playerbots' disarm rung fire. 15 is that rung's
+    // own reach (BwlTurnOffSuppressionDeviceAction), so a wider number here would
+    // hold for devices it will not take and a narrower one would walk past devices
+    // it would have. Zero disables the hold without disabling the disarm — the
+    // rung still fires whenever it wins a tick of its own.
+    { "TransitDisarmHoldRadius", DcType::Float, 15,  0,  30,  true  },
+
+    // Clamp ceiling 120 (was 60) so a raid run can widen the straggler gate by
+    // override; the authored raid default is 40 — a 25-40 member column is
+    // legitimately longer than a 5-man file, and holding raids to the 25yd
+    // dungeon spread would freeze the advance behind every straggler.
+    { "PartyMaxSpread",        DcType::Float, 25,  10, 120,  true, kDcNoHeroic, 40 },
 
     // In-combat regroup (contribution-gated, Option B): reconnect a follower to the
     // fight ONLY when it truly can't contribute from where it stands — a DPS with no
@@ -218,10 +361,10 @@ inline constexpr DcSettingDef kDcSettings[] =
     // stops holding and pulls the boss anyway, noting it in chat. The clock only
     // runs WHILE the tank is at the boss and actively clearing (it's re-armed
     // during the walk-in), so this measures a true stall — an unreachable
-    // straggler or respawn churn — not the time to clear. It must therefore
-    // tolerate a slow pack plus a between-pulls drink/rest, hence the generous
-    // default. 0 = never give up. Max 600s. (Old 30s default tripped before the
-    // tank even reached the room.)
+    // straggler or respawn churn — not the time to clear. It is also PAUSED while
+    // the party fights, rests, loots or regroups between pulls, so only ready
+    // time counts (DungeonClearMath::RoomClearGiveUpDue). 0 = never give up.
+    // Max 600s. (Old 30s default tripped before the tank even reached the room.)
     { "ClearRoomBeforeBoss",   DcType::Bool,   1,   0,    1,  true  },
     { "RoomClearTimeout",      DcType::UInt, 180,   0,  600,  true  },
     // Extra yards added to a room-aggro boss's avoid-sphere when the tank routes
@@ -662,18 +805,66 @@ inline constexpr DcSettingDef kDcSettings[] =
     // MaxConcurrent / MaxPlans / Plan.MaxTotal all take 0 = unlimited, hence the
     // 0 floor — and all three DEFAULT to 0. The harness deliberately imposes no
     // ceiling of its own: how many runs the box can field is a property of the
-    // box (AiPlayerbot.MaxAddedBots, the addclass pool, CPU), and those limits
-    // already refuse an over-budget start with a named message. A second,
+    // box (the addclass pool, CPU), and the pool already refuses an
+    // over-budget start with a named message. A second,
     // harness-local cap only ever refused starts the machine could have served.
     { "TestRun.MaxConcurrent",   DcType::UInt,      0,  0, 100000, false },
     { "TestRun.MaxPlans",        DcType::UInt,      0,  0, 100000, false },
     { "TestRun.PauseGraceS",     DcType::UInt,     60,  0,   3600, false },
     { "TestRun.StallGraceS",     DcType::UInt,    120,  0,   3600, false },
     { "TestRun.NoProgressS",     DcType::UInt,    600,  0,  86400, false },
-    { "TestRun.OverallTimeoutS", DcType::UInt,   3600, 60,  86400, false },
+    { "TestRun.OverallTimeoutS", DcType::UInt,   7200, 60,  86400, false },
     { "TestRun.Plan.MaxTotal",   DcType::UInt,      0,  0, 100000, false },
+    // Pull Lab (src/Lab): how many warm lab parties run scenarios at once. Each
+    // is an ordinary test-run party in its own instance, so it also counts
+    // against TestRun.MaxConcurrent and draws from the addclass pool. The plan
+    // sized the dev box at 15-20 concurrent parties.
+    { "Lab.MaxParties",          DcType::UInt,     15,  1,     20, false },
     { "TestRun.Plan.BackoffMs",  DcType::UInt,   5000,  0, 600000, false },
     { "TestRun.Plan.DriverWaitMs", DcType::UInt, 120000, 0, 600000, false },
+    // Endless (pool=, total=0) plans: minutes between checkpoint summary lines
+    // (0 = none), and how long before the global instance reset heroic / raid
+    // pool entries stop launching (0 = no guard).
+    { "TestRun.Plan.CheckpointMin", DcType::UInt,  15,  0,   1440, false },
+    { "TestRun.Plan.ResetGuardMin", DcType::UInt,  45,  0,    720, false },
+
+    // RDF instant queue fill (DungeonClear.DungeonQueueFill.*). Server policy,
+    // not a per-run tunable: a player cannot ask for it from the addon, so
+    // every row is playerFacing=false. Read once per world tick by the fill
+    // manager, so it goes through DcSettings for the same anti-spam reason the
+    // TestRun rows do.
+    //
+    // The DungeonClear.BgQueueFill.* rows below are the battleground
+    // counterpart — a separate feature with a separate switch, because an
+    // operator must be able to run dungeon fill without battleground fill.
+    // Nothing is ever named plain QueueFill.
+    { "DungeonQueueFill.Enable",          DcType::Bool,   0,  0,      1, false },
+    // Bounds the fills SETTING UP, not the parties out — see the conf.dist.
+    { "DungeonQueueFill.MaxConcurrent",   DcType::UInt,   3,  0,    100, false },
+    { "DungeonQueueFill.SetupTimeoutSec", DcType::UInt,  60, 10,    600, false },
+    { "DungeonQueueFill.MatchTimeoutSec", DcType::UInt, 120, 10,   1800, false },
+    { "DungeonQueueFill.MinPlayerLevel",  DcType::UInt,  15,  1,     80, false },
+    { "DungeonQueueFill.GearIlvl",        DcType::UInt,   0,  0, 100000, false },
+    { "DungeonQueueFill.GearQuality",     DcType::UInt,   0,  0,      7, false },
+    { "DungeonQueueFill.AutoClear",       DcType::Bool,   0,  0,      1, false },
+    { "DungeonQueueFill.LogoutOnRelease", DcType::Bool,   1,  0,      1, false },
+
+    // Battleground instant queue fill (DungeonClear.BgQueueFill.*). Same
+    // server-policy / read-every-tick shape as the dungeon fill above, and a
+    // separate switch so either can run without the other.
+    { "BgQueueFill.Enable",          DcType::Bool,   0,  0,      1, false },
+    // Bounds the fills SETTING UP; a fill whose player is in the match does
+    // not count — see the conf.dist.
+    { "BgQueueFill.MaxConcurrent",   DcType::UInt,   2,  0,    100, false },
+    // 0 = auto: one healer per five seats of the battleground's maximum.
+    { "BgQueueFill.HealersPerSide",  DcType::UInt,   0,  0,     40, false },
+    { "BgQueueFill.LevelSpread",     DcType::UInt,   2,  0,     10, false },
+    { "BgQueueFill.MinPlayerLevel",  DcType::UInt,  10,  1,     80, false },
+    { "BgQueueFill.SetupTimeoutSec", DcType::UInt,  90, 10,    600, false },
+    { "BgQueueFill.MatchTimeoutSec", DcType::UInt, 180, 10,   1800, false },
+    { "BgQueueFill.GearIlvl",        DcType::UInt,   0,  0, 100000, false },
+    { "BgQueueFill.GearQuality",     DcType::UInt,   0,  0,      7, false },
+    { "BgQueueFill.LogoutOnRelease", DcType::Bool,   1,  0,      1, false },
 
     // Server-only (not overridable from the addon).
     { "AsyncPathfinding",      DcType::Bool,   1,   0,   1,  false },
@@ -688,10 +879,19 @@ inline constexpr std::size_t kDcSettingCount =
 
 // Linear lookup by key suffix; nullptr if the key is not registered. The table
 // is tiny, so a scan is cheaper than any map and keeps it constexpr-friendly.
+//
+// The first-character test is not a micro-optimisation for its own sake: `d.key`
+// is a `char const*`, so `key == d.key` builds a string_view from it, which is a
+// strlen — one per ROW, on every settings read, and settings are read several
+// times per bot per tick from the trigger ladder and the follower movers. The
+// guard skips the strlen for ~96% of the table and cannot change the result (a
+// row whose first byte differs can never compare equal).
 inline DcSettingDef const* FindDcSetting(std::string_view key)
 {
+    if (key.empty())
+        return nullptr;
     for (DcSettingDef const& d : kDcSettings)
-        if (key == d.key)
+        if (d.key[0] == key[0] && key == d.key)
             return &d;
     return nullptr;
 }

@@ -9,20 +9,21 @@
 #include "Define.h"
 
 // Static registry of PULL-BACK bosses: bosses that must never be fought where
-// they stand, because the ground they stand on kills the party.
+// they stand, because what happens there kills the party.
 //
-// THE TABLE IS CURRENTLY EMPTY — read BossPullbackRegistry.cpp before adding to
-// it. Its one and only row (Ghaz'an, 18105, The Underbog 546) was retired in
-// S1593 once the actual cause was fixed upstream: he was only ever in the water
-// because a headless party never fired areatrigger 4302, the sole caller of his
-// ACTION_MOVE_TO_PLATFORM. He climbs onto meshed, connected ground now and is
-// fought like any other boss. The machinery stays because the facility is
-// general and its invariants are pinned by tests.
+// ONE ROW TODAY (Plugger Spazzring, whose death turns the Grim Guzzler's patrons
+// hostile) — read BossPullbackRegistry.cpp before adding to it. Its first row
+// (Ghaz'an, 18105, The Underbog 546) was retired in S1593 once the actual cause
+// was fixed upstream: he was only ever in the water because a headless party
+// never fired areatrigger 4302, the sole caller of his ACTION_MOVE_TO_PLATFORM.
+// He climbs onto meshed, connected ground now and is fought like any other boss.
+// The machinery stays because the facility is general and its invariants are
+// pinned by tests.
 //
 // That history is the main thing to take from this file: a pull-back row is a
 // POSITIONAL WORKAROUND, and the first question for a new one is always whether
 // the boss is standing in a bad place because of an upstream defect that can be
-// fixed instead. This row spent a long time treating a symptom.
+// fixed instead. Ghaz'an's row spent a long time treating a symptom.
 //
 // The fix is positional and hand-authored, in the same spirit as
 // FightInPlaceRegistry (which forbids a pull) — this is its mirror image: it
@@ -68,9 +69,10 @@ struct BossPullback
     // Ghaz'an was the case it was built for, on the belief that his platform was
     // off-mesh and he never finished his lap — so no reachable spot existed
     // inside his aggro bubble. Both were consequences of him being stuck in the
-    // water, and both went away with the areatrigger fix (S1593). No row uses
-    // this today, and "the tag leg keeps timing out" is a reason to find out WHY
-    // before it is a reason to set this.
+    // water, and both went away with the areatrigger fix (S1593). Plugger
+    // Spazzring uses it now for a different reason — he is neutral, so no
+    // proximity tag can ever land (see his row) — and "the tag leg keeps timing
+    // out" is still a reason to find out WHY before it is a reason to set this.
     float  forceAggroRange{0.0f};
 
     // SUMMON-IF-STUCK opt-in, and like forceAggroRange it defaults OFF and should

@@ -1,0 +1,102 @@
+{
+  "about": "Tank engage: a ranged Stratholme pack (Malor's approach) pulled with LOS-break; same ownership/dwell checks as the RFD case on a different geometry. Calibration: strat pull #14 of tr-20260922-185206-5 \u2014 predicted 7, observed 7 (outside, los); target 10419#54081.",
+  "schema": 1,
+  "source": {
+    "snapshot": "tr-20260922-185206-5#14",
+    "joined": [
+      54081,
+      54088,
+      54077,
+      54139,
+      54053,
+      54085,
+      54071,
+      0
+    ],
+    "outsideJoined": [
+      0,
+      54071,
+      54077,
+      54085,
+      54088,
+      54139
+    ],
+    "predicted": 7,
+    "observed": 7
+  },
+  "geometry": {
+    "map": 329,
+    "dungeon": "strat",
+    "heroic": false,
+    "region": {
+      "center": [
+        3637.3,
+        -3086.0,
+        134.1
+      ],
+      "radius": 60.0
+    },
+    "objective": 11032,
+    "objectiveName": "Malor the Zealous"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [
+          54053,
+          54081
+        ],
+        "near": [
+          52122,
+          54066,
+          54067,
+          54068,
+          54071,
+          54072,
+          54077,
+          54083,
+          54084,
+          54085,
+          54086,
+          54088,
+          54089,
+          54115,
+          54116,
+          54137,
+          54139,
+          54220
+        ]
+      }
+    }
+  },
+  "party": {
+    "comp": "druid-bear,shaman-resto,warrior-fury,priest-shadow,rogue-as",
+    "level": 60,
+    // Snapshot start (3655.3,-3092.1) is 17.7-23.6yd from the 'near' trio
+    // 54088/54139/54077 (lvl 57 vs 60), which aggroed at 1-3s in both runs of
+    // lb-20261003-155828-1 before the target patrol was pulled. Start 10yd back
+    // down the approach (pull #13 -> #14 tank line), 27yd+ from every kept mob.
+    "start": [
+      3656.6,
+      -3102.5,
+      133.5,
+      2.815
+    ],
+    "react": "fast",
+    "seedTarget": true
+  },
+  "settings": {
+    "PullSetting": 2
+  },
+  "goal": {
+    "kill": "pack:target",
+    "timeoutS": 90
+  },
+  "expect": {
+    "oracles": {
+      "O1": "pass",
+      "O6": "pass",
+      "O10": "pass"
+    }
+  }
+}

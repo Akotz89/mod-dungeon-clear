@@ -6,9 +6,11 @@
 #include "gtest/gtest.h"
 #include "DungeonClearUtil.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcDoorIndex.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcEncounterChests.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTickMemo.h"
 #include "PlayerbotAIConfig.h"
 #include "Player.h"
+#include "Util/DcPlayerbotsConfig.h"
 #include "WorldSession.h"
 #include "ObjectGuid.h"
 #include "Group.h"
@@ -35,10 +37,14 @@
 class DungeonClearWorldMock : public WorldMock
 {
 public:
+#ifdef DC_CORE_IWORLD_HAS_QUERYHOLDER
+    // The upstream-shaped core moved this onto WorldSession (DcCoreCompat.h).
     MOCK_METHOD(SQLQueryHolderCallback&, AddQueryHolderCallback, (SQLQueryHolderCallback&& callback), (override));
-#ifdef MOD_PLAYERBOTS
-    MOCK_METHOD(char const*, GetPlayerbotsDBRevision, (), (const, override));
 #endif
+    // GetPlayerbotsDBRevision is gone: the core stopped carrying a playerbots
+    // database (core PR #253, 2026-09-18). mod-playerbots now opens its own via
+    // the generic OnModuleDatabasesLoading hook and reports its revision through
+    // OnDatabaseGetDBRevision, so IWorld no longer declares anything to override.
 };
 
 class DungeonClearTestBase : public ::testing::Test
@@ -238,35 +244,35 @@ protected:
 // Test clamping of RestMinHpPct based on almostFullHealth config
 TEST_F(DungeonClearUtilTest, RestMinHpPctClamping)
 {
-    uint32 originalValue = sPlayerbotAIConfig.almostFullHealth;
+    uint32 originalValue = DC_PB_CONFIG(AlmostFullHealth, almostFullHealth);
 
     // Below ceiling (90.0) -> should return the configured value
-    sPlayerbotAIConfig.almostFullHealth = 80;
+    DC_PB_CONFIG(AlmostFullHealth, almostFullHealth) = 80;
     EXPECT_FLOAT_EQ(DcPartyState::RestMinHpPct(), 80.0f);
 
     // Above ceiling (90.0) -> should clamp to 90.0f
-    sPlayerbotAIConfig.almostFullHealth = 95;
+    DC_PB_CONFIG(AlmostFullHealth, almostFullHealth) = 95;
     EXPECT_FLOAT_EQ(DcPartyState::RestMinHpPct(), 90.0f);
 
     // Restore
-    sPlayerbotAIConfig.almostFullHealth = originalValue;
+    DC_PB_CONFIG(AlmostFullHealth, almostFullHealth) = originalValue;
 }
 
 // Test clamping of RestMinMpPct based on highMana config
 TEST_F(DungeonClearUtilTest, RestMinMpPctClamping)
 {
-    uint32 originalValue = sPlayerbotAIConfig.highMana;
+    uint32 originalValue = DC_PB_CONFIG(HighMana, highMana);
 
     // Below ceiling (75.0) -> should return the configured value
-    sPlayerbotAIConfig.highMana = 60;
+    DC_PB_CONFIG(HighMana, highMana) = 60;
     EXPECT_FLOAT_EQ(DcPartyState::RestMinMpPct(), 60.0f);
 
     // Above ceiling (75.0) -> should clamp to 75.0f
-    sPlayerbotAIConfig.highMana = 85;
+    DC_PB_CONFIG(HighMana, highMana) = 85;
     EXPECT_FLOAT_EQ(DcPartyState::RestMinMpPct(), 75.0f);
 
     // Restore
-    sPlayerbotAIConfig.highMana = originalValue;
+    DC_PB_CONFIG(HighMana, highMana) = originalValue;
 }
 
 // Test party readiness and waiting descriptions for a solo player (no group)
@@ -716,4 +722,23 @@ TEST(DcTickMemoTest, EnsureFreshResetsFieldsOnNewTick)
     EXPECT_EQ(m.atBossEngage, -1);
     EXPECT_EQ(m.betweenPullsReadyStrict, -1);
     EXPECT_EQ(m.betweenPullsReadyLoose, -1);
+}
+
+// The Chest of the Seven holds the Tomb of the Seven's whole reward, and with
+// IgnoreChests on (the default) it was skipped like a trash chest. Encounter
+// chests bypass that; ordinary trash chests and the hook-owned chests do not.
+TEST(DcEncounterChestsTest, BossRewardChestsAreListed)
+{
+    EXPECT_TRUE(DcEncounterChests::IsEncounterChest(169243));  // Chest of The Seven
+    EXPECT_TRUE(DcEncounterChests::IsEncounterChest(190663));  // Dark Runed Chest (CoS)
+    EXPECT_TRUE(DcEncounterChests::IsEncounterChest(193603));  // Cache of Eregos (H)
+}
+
+TEST(DcEncounterChestsTest, TrashAndHookOwnedChestsAreNot)
+{
+    EXPECT_FALSE(DcEncounterChests::IsEncounterChest(75298));   // Large Solid Chest
+    EXPECT_FALSE(DcEncounterChests::IsEncounterChest(160845));  // Dark Coffer (key lock)
+    EXPECT_FALSE(DcEncounterChests::IsEncounterChest(184465));  // Cache of the Legion (Mechanar hook)
+    EXPECT_FALSE(DcEncounterChests::IsEncounterChest(185119));  // Dust Covered Chest (chess conductor)
+    EXPECT_FALSE(DcEncounterChests::IsEncounterChest(0));
 }

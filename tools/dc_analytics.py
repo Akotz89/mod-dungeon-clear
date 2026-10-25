@@ -503,6 +503,42 @@ CREATE TABLE IF NOT EXISTS plan_trash_wipes (
     count           INTEGER,
     PRIMARY KEY (plan_id, idx)
 );
+
+-- Pull Lab runs (dc_labruns.jsonl): one row per scenario run, one row per
+-- oracle verdict. Joins to nothing in `runs` — the hosting tr- job is plumbing
+-- and writes no dc_testruns record.
+CREATE TABLE IF NOT EXISTS labruns (
+    run_id          TEXT PRIMARY KEY,
+    batch_id        TEXT,
+    scenario        TEXT,
+    sweep           TEXT,
+    seed            INTEGER,
+    repeat_idx      INTEGER,
+    host_run        TEXT,
+    map_id          INTEGER,
+    ended_at        TEXT,
+    duration_ms     INTEGER,
+    end_reason      TEXT,
+    verdict         TEXT,
+    known_failure   TEXT,
+    module_sha      TEXT,
+    pb_sha          TEXT,
+    trace_file      TEXT,
+    summary         TEXT,
+    ingested_at     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS labrun_oracles (
+    run_id          TEXT NOT NULL REFERENCES labruns (run_id) ON DELETE CASCADE,
+    oracle          TEXT NOT NULL,
+    res             TEXT,
+    t_ms            INTEGER,
+    unit            TEXT,
+    n               INTEGER,
+    detail          TEXT,
+    expected        TEXT,
+    PRIMARY KEY (run_id, oracle)
+);
 """
 
 VIEWS = """
@@ -1297,6 +1333,31 @@ def ingest_plan(conn, rec, now):
 # ---------------------------------------------------------------------------
 # commands
 # ---------------------------------------------------------------------------
+LABRUNS_FILE = "dc_labruns.jsonl"
+
+
+def ingest_labrun(conn, rec, now):
+    run_id = rec.get("runId")
+    if not run_id:
+        return False
+    ended = rec.get("endedAt")
+    conn.execute("DELETE FROM labruns WHERE run_id = ?", (run_id,))
+    conn.execute(
+        "INSERT INTO labruns (run_id, batch_id, scenario, sweep, seed, repeat_idx, host_run, map_id, ended_at, "
+        "duration_ms, end_reason, verdict, known_failure, module_sha, pb_sha, trace_file, summary, ingested_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (run_id, rec.get("batchId"), rec.get("scenario"), rec.get("sweep"), rec.get("seed"), rec.get("repeat"),
+         rec.get("host"), rec.get("map"), iso(ended) if ended else None, rec.get("durationMs"),
+         rec.get("end"), rec.get("verdict"), rec.get("knownFailure"), rec.get("sha"), rec.get("pbSha"),
+         rec.get("trace"), rec.get("summary"), now))
+    expected = rec.get("expected") or {}
+    for oid, o in (rec.get("oracles") or {}).items():
+        conn.execute(
+            "INSERT INTO labrun_oracles (run_id, oracle, res, t_ms, unit, n, detail, expected) VALUES (?,?,?,?,?,?,?,?)",
+            (run_id, oid, o.get("res"), o.get("t"), o.get("unit"), o.get("n"), o.get("detail"), expected.get(oid)))
+    return True
+
+
 def cmd_ingest(conn, data_dir, ws_root, args):
     import datetime
     now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1328,6 +1389,17 @@ def cmd_ingest(conn, data_dir, ws_root, args):
         if ingest_plan(conn, rec, now):
             new_plans += 1
 
+    labruns_path = data_dir / LABRUNS_FILE
+    new_lab = 0
+    if labruns_path.exists():
+        print(f"reading {labruns_path}")
+        existing_lab = set() if args.force else {r[0] for r in conn.execute("SELECT run_id FROM labruns")}
+        for rec in iter_jsonl(labruns_path):
+            if rec.get("runId") in existing_lab:
+                continue
+            if ingest_labrun(conn, rec, now):
+                new_lab += 1
+
     deploy_rows = collect_git_deploys(ws_root, args.deploy_branch)
     conn.executemany(
         "INSERT OR IGNORE INTO deploys (sha, repo, committed_at_ms, subject, source) "
@@ -1345,6 +1417,7 @@ def cmd_ingest(conn, data_dir, ws_root, args):
 
     print(f"\n  runs:    +{new_runs} new, {skipped_runs} already present")
     print(f"  plans:   +{new_plans} new, {skipped_plans} already present")
+    print(f"  labruns: +{new_lab} new")
     print(f"  deploys: {len(deploy_rows)} commit markers scanned")
 
 

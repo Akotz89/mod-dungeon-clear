@@ -55,6 +55,15 @@ base = "/home/youruser/azerothcore"
 # DataDir in worldserver.conf.
 #dbc_dir = "/home/youruser/azerothcore/env/dist/bin/dbc"
 
+# A WoW 3.3.5a client, used ONLY by `python3 -m testdeck mappack` to read the
+# dungeon map art the Live page draws bot positions on. Nothing at runtime
+# touches it, and no art ships with the Test Deck — you generate it here from
+# your own client. Leave unset and the WotLK dungeons simply have no map.
+#client_dir = "C:/Games/World of Warcraft 3.3.5a"
+
+# Where that generated art lands. Default: <data_dir>/mappack.
+#mappack_dir = ""
+
 # Runtime state (saved rosters, session secret).
 # Default: ~/.local/share/ac-testdeck, or %LOCALAPPDATA%\\ac-testdeck on Windows.
 #data_dir = ""
@@ -83,6 +92,26 @@ port = 8790
 # a LAN address that allowed_nets is right to trust. Rebinding needs a NAME, so
 # requiring an address — or a name you listed — is what closes it.
 #allowed_hosts = ["testdeck.lan", "deck.example.com"]
+
+# Origins allowed to show Test Deck inside an <iframe> — e.g. a WoWMin admin
+# panel. Empty (the default) refuses every framer: CSP frame-ancestors 'none'
+# plus X-Frame-Options: DENY. With entries, frame-ancestors names exactly these
+# origins and X-Frame-Options is left off (DENY would still block the frame).
+#
+# Each entry is a bare origin: http:// or https://, a host, an optional port.
+# No paths (not even a trailing "/"), queries, fragments, user:pass@ or "*".
+# It must match the address bar of the EMBEDDING page exactly — scheme, host
+# and port. Login, the Host check and allowed_nets still apply inside the frame.
+#
+# Two things decide whether the embedded deck actually works:
+#  * Mixed content: an https:// page cannot frame an http:// deck. Serve both
+#    over HTTPS, or both over plain HTTP on the LAN.
+#  * The login cookie is SameSite=Strict, so the browser only sends it when the
+#    embedding page and the deck are the same SITE (same registrable domain,
+#    e.g. wowmin.example.com + deck.example.com, or one hostname on two ports).
+#    Embedded from a different site, the frame loads but login never sticks.
+#    Serve WoWMin and Test Deck under the same hostname/site.
+#allowed_frame_ancestors = ["http://server-address:3000"]
 
 [auth]
 # Login uses real game accounts, verified against the auth database (SRP6).
@@ -166,3 +195,10 @@ status_check = "auto"
 #testplans_file = "dc_testplans.jsonl"
 #live_file = "dc_testrun_live.json"
 #dungeons_file = "dc_test_dungeons.json"
+
+#[soak]
+# Continuous mode snapshots the evidence for every failed run (a report plus
+# per-run log slices) with the module's tools/dc_test_run.py, before the next
+# worldserver restart truncates the logs. Found beside this checkout; set this
+# only if Test Deck was copied somewhere without the module's tools/.
+#dc_test_run = "/home/youruser/azerothcore/modules/mod-dungeon-clear/tools/dc_test_run.py"

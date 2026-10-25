@@ -1,0 +1,45 @@
+{
+  "about": "DPS too soon (Leeroy threat lead): a 3-mob Dark Rune pack in Halls of Stone walked in on under a forced Leeroy verdict (pack from snapshot tr-20260922-192020-25#1). The Leeroy/walk-in path has no passive hold; its only gate is the threat lead in DcLeaderSignal::IsLeaderFightAssistWanted, which clocks PullPlayerReleaseDelay from the leader's combat FLAG (LeaderCombatSince), not from the tank's first hit that O2 measures. The tank is stunned for 2.5s the moment the pack engages, so the flag-to-first-hit gap exceeds the release delay and the followers are released onto mobs the tank has not touched.",
+  "schema": 1,
+  "source": { "snapshot": "tr-20260922-192020-25#1" },
+  "geometry": {
+    "map": 599,
+    "dungeon": "hos",
+    "heroic": false,
+    "region": { "center": [1150.9, 758.0, 195.8], "radius": 60.0 },
+    "objective": 27977,
+    "objectiveName": "Krystallus"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [126692, 126693, 126709],
+        "near": [126710, 126740, 126741]
+      }
+    }
+  },
+  "party": {
+    "comp": "paladin-prot,priest-holy,mage-frost,warlock-affli,hunter-mm",
+    "level": 78,
+    "start": [1153.2, 806.2, 195.9, -1.618],
+    "react": "fast",
+    "seedTarget": true
+  },
+  "settings": {
+    "PullSetting": 2,
+    "PullDynamicMaxLeeroyMobs": 5
+  },
+  "injections": [
+    // Stun BEFORE the tank's opener (Avenger's Shield lands on the same tick as
+    // packEngaged, so a stun keyed on packEngaged never opened a flag-to-first-hit
+    // gap: lb-20261003-155828-1 run -13). The pack is put on the stunned tank so its
+    // combat flag rises ~4s before it can land a hit.
+    { "when": { "predicate": "tankDistToPack <= 32" }, "do": { "stun": "tank", "durationMs": 4000 } },
+    { "when": { "predicate": "tankDistToPack <= 32" }, "do": { "aggro": "pack:target", "on": "tank" } }
+  ],
+  "goal": { "kill": "pack:target", "timeoutS": 90 },
+  "expect": {
+    "oracles": { "O2": "fail", "O10": "pass" },
+    "knownFailure": "open:DcLeaderSignal::IsLeaderFightAssistWanted threat lead keyed on LeaderCombatSince (combat flag), not the tank's first hit"
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "about": "Outside adds from a lone waypoint patroller arriving mid-pull. Shadow Labyrinth Malicious Instructor 146200 is a native MovementType-2 patroller with no formation (path 1462000, 11 points). Its loop circles the Cabal formation 146080 (target, pred 5 obs 5 in tr-20260922-201412-47#9) and runs along x -241, 5yd from that run's real tank start. So it can walk into the camp naturally about 15-20s after staging, and the swept injection makes it engage the healer at a chosen phase and delay. Run sweep=all for the phase x delay heat-map. 'x' cells are windows where the pull loses the add (O1), wedges (O6) or loses someone (O10); 'U' cells are windows it absorbs. Same failure class live: UK Dragonflayer Overseer patrol 125976 joined the 3-mob Strategist pull in tr-20260922-191117-19#22 and tr-20260922-185328-8#23. That geometry was not used because staging resets the Overseer 15yd from the party.",
+  "schema": 1,
+  "geometry": {
+    "map": 555,
+    "dungeon": "shadow-labs",
+    "heroic": false,
+    "region": { "center": [-258.0, -42.0, 8.2], "radius": 60.0 },
+    "objective": 18667,
+    "objectiveName": "Blackheart the Inciter"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [146032, 146041, 146042, 146062, 146080],
+        "patrol": [146200]
+      }
+    }
+  },
+  "party": {
+    // Comp and start of tr-20260922-201412-47#9.
+    "comp": "warrior-prot,paladin-holy,hunter-mm,druid-balance,priest-shadow",
+    "level": 70,
+    "start": [-236.2, -33.0, 8.1, -2.708],
+    "react": "fast",
+    "seedTarget": true
+  },
+  "settings": {
+    "PullSetting": 2,
+    // The real pull (tr-20260922-201412-47#9) was a 5-mob Leeroy, which has no
+    // Returning phase, so the swept drag-back injection never fired
+    // (lb-20261003-155828-1: verdict ApproachAsLeeroy both runs). Force the drag.
+    "PullForceAdvanced": 1
+  },
+  "injections": [
+    {
+      "label": "patrol arrives on the healer during the drag-back",
+      "sweep": true,
+      "when": { "phaseEnter": "Returning", "delayMs": 400 },
+      "do": { "aggro": "pack:patrol", "on": "heal" }
+    }
+  ],
+  "goal": { "kill": "pack:target", "timeoutS": 90 },
+  "expect": {
+    "oracles": {
+      // One patroller joining is the scenario, not the failure.
+      "O7": { "outsideMax": 1, "joinersMax": 1, "expect": "pass" },
+      "O1": "fail",
+      "O6": "fail",
+      "O10": "fail"
+    },
+    "knownFailure": "open:tr-20260922-191117-19#22 patrol 125976 joined the pull (UK); sweep locates the windows"
+  }
+}

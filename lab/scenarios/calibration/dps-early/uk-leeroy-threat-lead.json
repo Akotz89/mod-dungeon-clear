@@ -1,0 +1,75 @@
+{
+  "about": "DPS too soon (Leeroy): a 2-mob Utgarde Keep pack walked in on under a forced Leeroy verdict. Followers must wait for the tank's first hit plus PullPlayerReleaseDelay (O2). Calibration: uk pull #0 of tr-20260922-185328-8 \u2014 predicted 2, observed 2; target 23961#126048.",
+  "schema": 1,
+  "source": {
+    "snapshot": "tr-20260922-185328-8#0",
+    "joined": [
+      126048,
+      126047
+    ],
+    "outsideJoined": [],
+    "predicted": 2,
+    "observed": 2
+  },
+  "geometry": {
+    "map": 574,
+    "dungeon": "uk",
+    "heroic": false,
+    "region": {
+      "center": [
+        213.4,
+        -70.2,
+        24.8
+      ],
+      "radius": 60.0
+    },
+    "objective": 24201,
+    "objectiveName": "Skarvold & Dalronn"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [
+          126047,
+          126048
+        ],
+        "near": [
+          125894,
+          125895,
+          125899,
+          125900,
+          125906,
+          125907,
+          125908
+        ]
+      }
+    }
+  },
+  "party": {
+    "comp": "deathknight-blood,shaman-resto,rogue-combat,warlock-demo,mage-fire",
+    "level": 70,
+    "start": [
+      158.9,
+      -85.1,
+      12.6,
+      0.267
+    ],
+    "react": "fast",
+    "seedTarget": true
+  },
+  "settings": {
+    "PullSetting": 2,
+    "PullDynamicMaxLeeroyMobs": 5
+  },
+  "goal": {
+    "kill": "pack:target",
+    "timeoutS": 90
+  },
+  "expect": {
+    "oracles": {
+      "O2": "pass",
+      "O4": "pass",
+      "O10": "pass"
+    }
+  }
+}

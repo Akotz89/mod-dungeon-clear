@@ -6,6 +6,7 @@
 #ifndef _PLAYERBOT_DC_MOVEMENT_H
 #define _PLAYERBOT_DC_MOVEMENT_H
 
+#include "G3D/Vector3.h"
 #include "MoveSplineInitArgs.h"
 #include "Ai/Base/Value/LastMovementValue.h"
 
@@ -33,6 +34,23 @@ class PlayerbotAI;
 // method.
 namespace DcMovement
 {
+    // The endpoint of the last escort glide DC itself issued through SplinePath.
+    // mod-playerbots #2747 dispatches every multi-point MoveTo through
+    // MotionMaster::MoveSplinePath — an EscortMovementGenerator, the same generator
+    // DC's glides use — so "an ESCORT generator is running" stopped meaning "my
+    // glide is running". The stop helpers compare the live spline's final point
+    // against this before cancelling anything; stock's splines are left alone.
+    // (Pre-#2747 stock issued MovePoint, a POINT generator, and the check is moot.)
+    struct DcGlideRecord
+    {
+        bool issued = false;
+        G3D::Vector3 end;
+    };
+
+    // Is the ESCORT generator currently driving `bot` one DC issued (SplinePath)
+    // and still in flight? False for stock's own MoveSplinePath glides.
+    bool OwnsRunningEscort(Player* bot);
+
     // Stop strengths, by intent.
     enum class Stop
     {
@@ -59,13 +77,15 @@ namespace DcMovement
     // Stop the bot at the requested strength.
     void StopBot(Player* bot, Stop strength);
 
-    // Drop the "I am still travelling" wait recorded by the last movement, WITHOUT
+    // Drop the "I am still travelling" block recorded by the last movement, WITHOUT
     // stopping the bot or touching any generator.
     //
-    // MovementAction::MoveTo records a LastMovement delay sized to the leg's travel
-    // time, and MovementAction::IsWaitingForLastMove refuses any later move whose
-    // priority is not STRICTLY GREATER than the recorded one. Everything the pull
-    // issues is MOVEMENT_COMBAT, so one leg's leftover wait silently refuses the
+    // The framework refuses a later move whose priority is not STRICTLY GREATER
+    // than the one on record for as long as that record says the move lasts —
+    // before mod-playerbots #2747 as the delay window every MoveTo armed, after it
+    // as a hold (stock still arms MOVEMENT_FORCED holds from SetNextMovementDelay,
+    // and our own SplinePath records one). Everything the pull issues is
+    // MOVEMENT_COMBAT, so one leg's leftover block silently refuses the
     // NEXT leg for the remainder of its budget — the tank stands in the pack it
     // just aggroed instead of turning and running home. Stop::Hold / Stop::HardPin
     // already zero it as a side effect, but they also stop the bot, and Hold
@@ -74,13 +94,21 @@ namespace DcMovement
     // it": call it immediately before issuing the replacement move.
     void ClearMovementWait(Player* bot);
 
+    // ClearMovementWait plus the duplicate-destination guard: stock IsDuplicateMove
+    // refuses the SAME point for a flat MaxWaitForMove (5s) after it was issued,
+    // however short the leg and whether or not the bot is still walking it. For a
+    // standing bot re-issuing its own last point, that refusal guards nothing — the
+    // move it protects is over. Only call it for a bot that is not moving.
+    void ReleaseMoveLock(Player* bot);
+
     // Issue the upcoming polyline as ONE EscortMovementGenerator spline (the
     // continuous glide that replaces per-point stops). Absorbs the issuance
     // ritual that was hand-duplicated at the advance, swim, and pull-maneuver
     // sites: stand up, interrupt any cast, MoveSplinePath, then record a
-    // NORMAL-priority LastMovement sized to the window travel time (for priority
-    // arbitration only — the re-issue guards key off splineRunning, not this
-    // delay). `pts` must hold the live position at [0] and at least one more
+    // NORMAL-priority LastMovement sized to the window travel time (a delay window
+    // before mod-playerbots #2747, a hold after it; for priority arbitration only
+    // — the re-issue guards key off splineRunning, not this duration). `pts` must
+    // hold the live position at [0] and at least one more
     // point. Returns true iff the spline was issued (pts.size() >= 2).
     bool SplinePath(PlayerbotAI* botAI, Movement::PointsArray& pts,
                     MovementPriority recordPrio = MovementPriority::MOVEMENT_NORMAL);
@@ -90,9 +118,13 @@ namespace DcMovement
     // the few actions that bail before doing non-movement work too.
     bool DcMovementAllowed(PlayerbotAI* botAI);
 
-    // Cancel a stale escort-spline glide. No-op unless an ESCORT glide is
-    // actually in flight (so it never perturbs the LastMovement wait at sites
-    // with no glide). Folded into DcMovementAction::DcMoveTo (so a point move is
+    // Cancel a stale escort-spline glide of DC's OWN. No-op unless one of our
+    // glides is actually in flight (OwnsRunningEscort), so it never perturbs the
+    // LastMovement block at sites with no glide — and never touches a stock
+    // spline: since mod-playerbots #2747 every multi-point stock MoveTo is an
+    // escort glide too, and cancelling that before each DcMoveTo re-issue was a
+    // stop/start per tick — the half-step stutter on the pull approach. Folded
+    // into DcMovementAction::DcMoveTo (so a point move is
     // never left coasting under an old glide); also called directly at the bare
     // glide-kill sites that drop a stale glide before a non-move (swim hand-back,
     // posStuck rebuild, off-path resnap).

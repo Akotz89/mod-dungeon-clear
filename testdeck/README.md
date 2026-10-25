@@ -203,7 +203,7 @@ The two conf keys, if you want to change either:
   up again, and `python3 -m testdeck check` catches an existing mismatch by
   name.
 - `DungeonClear.TestRun.DriverAccount` — the account to put it on. It must not
-  be one of `AiPlayerbot.RandomBotAccounts` and must not be an addclass pool
+  be one of `Playerbots.RandomBotAccounts` and must not be an addclass pool
   account, or the bot rotation would log the driver out from under a live run;
   the module refuses such an account rather than using it. Set it to `""` to
   turn provisioning off and supply the character yourself — then a missing
@@ -257,6 +257,31 @@ checked by resolving the path and confirming containment. Every response
 carries a strict CSP, `X-Frame-Options: DENY` and `nosniff`. Do not expose it
 to the internet without a TLS reverse proxy in front.
 
+**Embedding in another page** (e.g. WoWMin) is off by default: the deck sends
+`frame-ancestors 'none'` and `X-Frame-Options: DENY`, so no page can frame it.
+To allow specific embedders, list their exact origins:
+
+```toml
+[server]
+allowed_frame_ancestors = ["https://wowmin.example.com"]
+```
+
+Then CSP `frame-ancestors` names exactly those origins and `X-Frame-Options`
+is omitted (DENY would still win, and `ALLOW-FROM` is obsolete). Every other
+header, the Host and LAN checks, login, CSRF and the audit log are unchanged.
+Entries must be complete `http://` or `https://` origins — credentials,
+paths (even a trailing `/`), queries, fragments and wildcards are refused at
+startup. Two requirements for it to work in practice:
+
+- **Mixed content.** An `https://` page cannot frame an `http://` deck; put
+  both behind HTTPS (or both on plain HTTP on the LAN).
+- **Same site.** The session cookie is `SameSite=Strict`, so it is only sent
+  when the embedding page and the deck share a site (registrable domain —
+  `wowmin.example.com` and `deck.example.com`, or one hostname on two ports).
+  From a different site the frame loads but login never sticks. Serve WoWMin
+  and Test Deck under the same hostname/site. If testers reach the deck by
+  that hostname, it also needs to be in `allowed_hosts`.
+
 **Revoking access** is `account set gmlevel <user> 0 -1`, and it takes effect
 within about a minute: authorization re-reads the account's GM level and ban
 state from the auth database on every request rather than trusting the level
@@ -281,6 +306,55 @@ a name it controls at your server and driving it from their browser.
 readable copy of that file is enough to forge an admin session, so do not
 relax it or place it somewhere shared.
 
+## Continuous mode
+
+The **Continuous** page runs tests around the clock. Pick dungeons (each with
+Normal, Heroic or Both), a concurrency, and press **Start continuous**: the
+worldserver keeps that many runs in flight, drawing each launch from your pool,
+until you stop it. *Balanced* order runs every dungeon once per round in a
+shuffled order; *Pure random* draws independently. Pools can be saved as
+presets, and "Re-run failures from…" builds a pool from a past session's
+failed dungeons.
+
+What keeps it honest over hours or days:
+
+- **Every failure stays listed** — the page pages through the session's own
+  ledger, never a capped tail — and each gets its **evidence** captured as it
+  lands: `tools/dc_test_run.py`'s report plus the run's log slices, saved
+  before the next worldserver restart truncates the logs.
+- **Restarts are survived.** A session outlives the worldserver: after a
+  restart it re-issues its plan (`auto-resume`, on by default), and every run
+  that was live when the server went away gets a synthesized `lost` record
+  with its last known state and timeline — crashes do not vanish.
+- **The nightly instance reset is avoided.** Around `Instance.ResetTimeHour`
+  heroic and raid entries stop launching (`DungeonClear.TestRun.Plan.ResetGuardMin`,
+  default 45 min) and resume two minutes after it.
+- **A broken setup does not spin.** Five `setup_failed` runs in a row pause
+  the session with the reason; one click resumes.
+
+One session runs at a time (it owns the bot budget). Anyone who can log in may
+start one; its owner or an admin may pause, edit, stop and delete it. Sessions
+live under `<data_dir>/soaks/<sk-id>/` (`state.json`, `ledger.jsonl`,
+`evidence/`), are never pruned automatically, and are listed under History →
+Continuous. From a shell, `python3 tools/dc_test_run.py sk-<id>` prints a
+session's per-dungeon table and failure clusters.
+
+The server side is an ordinary endless pool plan, usable from the console too:
+
+```
+.dc test plan start pool=rfc,wc,uk:heroic,kara total=0 concurrent=3 [pick=random]
+.dc test plan edit <planId> pool=…|add=… concurrent=N
+.dc test plan pause|resume|stop <planId>
+```
+
+A console line is short (the bridge takes 300 characters; a screen session
+silently drops anything past ~750), so the deck starts a long pool `paused`
+with the first part, `add=`s the rest, and resumes once the plan holds it all.
+
+Evidence capture needs the module's `tools/` next to this checkout; set
+`[soak] dc_test_run` in `testdeck.toml` if it is elsewhere. The page is hidden
+behind an explanation on a worldserver built before pool plans existed.
+
 ## Development
 
 ```sh
@@ -293,6 +367,40 @@ npm run build      # writes ../dist — COMMIT the result
 Tests: `bash t/run_tests.sh` (backend pytest; plus the dist smoke and a
 build-as-type-check when `web/node_modules` exists). No root, no live
 worldserver, no database needed.
+
+## The Live page's dungeon map
+
+Each live run card has a **dungeon map** section — collapsed by default, above
+the timeline — that draws the party on the real Blizzard map art. The transform
+is exact rather than fitted: `DungeonMap.dbc` states the world rectangle each
+floor's image covers, so there is nothing to calibrate.
+
+No art ships with the Test Deck. You generate it on your own host, from your
+own WoW client:
+
+```sh
+pip install pillow mpyq                  # or: pip install -e ".[maps]"
+python3 -m testdeck mappack --client "C:/Games/World of Warcraft 3.3.5a"
+```
+
+Set `[paths] client_dir` in `testdeck.toml` and you can drop the `--client`
+flag. The pack lands in `<data_dir>/mappack` (~22 MB for all 82 maps) and
+`python3 -m testdeck check` reports it. Rebuild any time — the server notices
+without a restart.
+
+The 3.3.5a client has maps for the WotLK dungeons only, so for Classic and TBC
+the command downloads the [WDM-patch](https://github.com/Trimitor/WDM-patch)
+release once (~47 MB, cached under `<data_dir>/cache`). Pass `--offline` to
+skip that and build the WotLK half alone; pass `--maps 389,574` to build a
+couple of dungeons rather than everything.
+
+Neither Pillow nor mpyq is needed to *serve* a pack — only to build one.
+
+Multi-floor dungeons get a floor picker, and the shown floor follows the tank.
+Bots on another floor stay visible but faint, which is the case worth seeing:
+the healer who never came down the stairs. A position no floor draws counts as
+"off-map" rather than being snapped to floor 1 — Ulduar, Sunwell and Black
+Temple all have areas Blizzard never mapped.
 
 ## API
 

@@ -127,7 +127,24 @@ namespace DcTestRunRecord
         //     holder list: pre-10 records have neither, and treating an absent
         //     list as an empty one reports "nothing was holding them" about the
         //     freezes this was added to explain.
-        std::uint32_t schema = 10;
+        // 11: added size (requested party size; comp[] length is the actual).
+        // 12: added combatHolders[].trigger, and with it a CHANGE OF MEANING in
+        //     the sibling `legitimate` field: a CREATURE_FLAG_EXTRA_TRIGGER
+        //     holder now sinks the verdict, because no bot can target one and so
+        //     the party can never resolve the reference (see DungeonClearMath::
+        //     IsUnresolvableCombatHolder). Records at schema <= 11 scored those
+        //     holders LEGITIMATE — do not compare `legitimate` across the
+        //     boundary without checking the version first; tr-20260902-121659-12
+        //     and -13 are the reference pre-12 records where it reads LEGIT about
+        //     a Flame Breath Trigger that wedged the run for ten minutes.
+        // 13: added the SCENARIO block (Karazhan chess plan, T1): scenario
+        //     (row token, "" on a full-dungeon run), scenarioOf, focus,
+        //     successBy ("allCleared" | "predicate" | "grace", "" unless the run
+        //     succeeded), tailPending, and extras (the flat key/value map the
+        //     running event filled — DcRunState::SetTestExtra). On a scenario
+        //     run bossesTotal / bossRoster count the FOCUS only, so do not
+        //     compare them with a full-dungeon run of the same map.
+        std::uint32_t schema = 13;
         std::string runId;
         std::string planId;       // owning `.dc test plan`, "" for ad-hoc runs
         std::string dungeon;      // registry token
@@ -137,6 +154,9 @@ namespace DcTestRunRecord
         std::uint32_t instanceId = 0;
         std::uint32_t level = 0;  // requested level
         bool heroic = false;      // run at DUNGEON_DIFFICULTY_HEROIC
+        // Party size the run fielded (raid-support Plan D). 0 in pre-11
+        // records; read comp[].length there.
+        std::uint32_t size = 0;
         std::uint32_t compSeed = 0;  // seed BuildComp rolled this comp from (for replay)
         // Gear ceiling the bots were rolled to, already resolved against the
         // AutoGear* conf values (0 ilvl = uncapped; quality is 1..5). Both stay
@@ -185,6 +205,11 @@ namespace DcTestRunRecord
         std::string stallAtEnd;
         std::string phaseAtEnd;
 
+        // `trace=1` runs only (Pull Lab P0): where the LabTrace JSONL landed and
+        // the one-line oracle summary. Omitted from the JSON when empty.
+        std::string traceFile;
+        std::string oracles;
+
         // What the party was fighting when it went down. The first question
         // anyone asks of a failed run is "did we lose the boss fight, or did a
         // trash pack eat us?", and neither the verdict token nor the status
@@ -203,6 +228,30 @@ namespace DcTestRunRecord
         std::uint32_t wipeOpponentEntry = 0;
         std::string wipeOpponent;  // boss or trash-mob name
 
+        // --- scenario block (schema 13) -----------------------------------
+        // `dungeon` stays the row token (so a plan summary groups scenario runs
+        // under their own token); `scenario` repeats it only when the row IS a
+        // scenario, and `scenarioOf` names the parent dungeon.
+        std::string scenario;
+        std::string scenarioOf;
+        std::vector<std::uint32_t> focus;
+        std::string successPredicate;  // DescribePredicate(), "" = none
+        std::string successBy;         // DcTestRun::SuccessBy token
+        // Success reached before the event finished its tail (the grace ran
+        // out, or the run ended inside it) — the objective was met but, e.g.,
+        // the chest may still be on the floor.
+        bool tailPending = false;
+        // Flat key/value map the running event filled on the leader's
+        // DcRunState (see DcRunState::SetTestExtra). Written for every run —
+        // an empty object when no event published anything.
+        struct Extra
+        {
+            std::string key;
+            std::string value;
+            bool numeric = false;
+        };
+        std::vector<Extra> extras;
+
         // Full end-of-run diagnostic snapshot, captured before teardown
         // disbands the party. Serialized under "diag"; absent on records
         // written before schema 3 and on setup failures (no party existed).
@@ -220,6 +269,9 @@ namespace DcTestRunRecord
     inline constexpr std::size_t kPullLog = 500;
 
     std::string EscapeJson(std::string_view s);
+    // Strict JSON number grammar check (a numeric extra is emitted bare only
+    // when this holds).
+    bool IsJsonNumber(std::string_view v);
     std::string ToJsonl(Record const& rec);
 
     std::string CapturePath();

@@ -1,0 +1,48 @@
+{
+  "about": "Pit of Saron gauntlet wave 1 (tp-20260907-113722-1, 2 of 5 runs). Ymirjar Wrathbringer/Flamebearer (36840/36893) spawn REACT_PASSIVE (smart_scripts AI_INIT) and flip aggressive after 3.5s (event 60, not repeatable). AzerothCore proximity aggro is relocation-driven only, so after the flip nothing aggroes unless someone moves. DC held the party still 8yd away with no clock, and nothing happened for 6m23s. The four lower wave-1 mobs are summoned at their pit_of_saron.cpp positions; they have no creature row. The party starts on gate 1 (DcPosGauntlet GATE_1, the route anchor before the ambush ramp). The objective is Ick, because Tyrannus 36658 has no spawn to anchor a route; seedTarget pins the pull on the wave. Caveat: the Lab does not set DATA_INSTANCE_PROGRESS, so the gauntlet driver's hold is not armed. This checks that the generic pipeline engages a pack that turned aggressive at rest. Fixed in b7338bc5 (S2330 squash): WAVE_STANDOFF_MS 5s, then force-pull.",
+  "schema": 1,
+  "geometry": {
+    "map": 658,
+    "dungeon": "pos",
+    "heroic": false,
+    "region": { "center": [880.0, 52.0, 522.0], "radius": 60.0 },
+    "objective": 36476,
+    "objectiveName": "Ick"
+  },
+  "actors": {
+    "synthetic": [
+      { "tag": "wrath1", "entry": 36840, "pos": [879.464, 41.1997, 521.394, 3.735], "spawn": "onInject", "pack": "target" },
+      { "tag": "wrath2", "entry": 36840, "pos": [885.715, 65.5156, 533.631, 3.857], "spawn": "onInject", "pack": "target" },
+      { "tag": "flame1", "entry": 36893, "pos": [876.884, 61.0139, 527.715, 3.578], "spawn": "onInject", "pack": "target" },
+      { "tag": "flame2", "entry": 36893, "pos": [889.49, 45.2865, 527.233, 3.979], "spawn": "onInject", "pack": "target" }
+    ]
+  },
+  "party": {
+    "comp": "warrior-prot,priest-holy,mage-frost,rogue-combat,hunter-mm",
+    "level": 80,
+    "start": [861.03, 47.09, 516.74, 0.276],
+    "react": "fast",
+    "seedTarget": true
+  },
+  "settings": {
+    "PullSetting": 2
+  },
+  "injections": [
+    { "when": { "atMs": 0 }, "do": { "spawn": "wrath1" } },
+    { "when": { "atMs": 0 }, "do": { "spawn": "wrath2" } },
+    { "when": { "atMs": 0 }, "do": { "spawn": "flame1" } },
+    { "when": { "atMs": 0 }, "do": { "spawn": "flame2" } },
+    { "when": { "atMs": 3600 }, "do": { "note": "wave flipped REACT_AGGRESSIVE (SmartAI event 60 @3500ms) with no proximity scan" } }
+  ],
+  "goal": { "kill": "pack:target", "timeoutS": 90 },
+  "expect": {
+    "oracles": { "O1": "pass", "O6": "pass", "O10": "pass",
+                 // The four wave mobs are scattered summons with no creature row or
+                 // formation, so the governor sizes the seed alone (predicted 1) while
+                 // the whole wave is one encounter that always comes together (4/4 in
+                 // both runs of lb-20261003-155828-1). Sizing waves belongs to the
+                 // gauntlet driver, which the Lab does not arm; accept the full wave.
+                 "O7": { "joinersMax": 3 } },
+    "knownFailure": "fixed:b7338bc5"
+  }
+}

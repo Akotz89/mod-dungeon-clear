@@ -17,7 +17,7 @@ class DcPartyState
 public:
     // The HP/mana percentages the between-pulls rest gate (IsPartyReady) holds
     // for. These default to mod-playerbots' own drink/eat stop thresholds
-    // (AiPlayerbot.AlmostFullHealth / AiPlayerbot.HighMana): a stock bot only eats
+    // (Playerbots.AlmostFullHealth / Playerbots.HighMana): a stock bot only eats
     // back up to AlmostFullHealth and drinks back up to HighMana, then stops, so
     // we clamp the gate to those targets to keep it reachable by resting alone.
     //
@@ -101,6 +101,22 @@ public:
     //
     // Falls back to the bot's own setting when there is no resolvable leader.
     static float LeaderEffectiveMaxSpread(Player* bot);
+
+    // The LEADER's live gate WHOLE — radius and anchor together — for a caller
+    // that has to know which ORIGIN the radius was sized for.
+    //
+    // LeaderEffectiveMaxSpread hands back the radius alone, which is all a
+    // follower clamping its own standoff needs (it is positioning relative to
+    // the tank either way). A caller that measures from a DIFFERENT origin than
+    // the gate does cannot use a bare radius safely: in pull mode the gate is
+    // camp-anchored, so comparing a tank-relative distance against it mixes two
+    // frames. DcStrandedRecovery measures from the tank and needs exactly this
+    // distinction — see DcStrandedDecision::RescueSpread.
+    //
+    // Falls back to the bot's own setting, tank-anchored, when there is no
+    // resolvable bot leader (a real-player leader runs no DC gate to be inside
+    // of, and a dead tank leaves FindLeaderTank empty).
+    static SpreadGate LeaderGate(Player* bot);
 
     // The HP/mana floors the between-pulls gate is ACTUALLY enforcing for `bot`
     // right now. ONE body shared by the gate and every "waiting on…" line, the

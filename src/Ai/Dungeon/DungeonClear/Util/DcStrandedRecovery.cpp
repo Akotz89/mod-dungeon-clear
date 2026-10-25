@@ -5,14 +5,18 @@
 
 #include "DcStrandedRecovery.h"
 
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Ai/Dungeon/DungeonClear/DcPullContext.h"
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcBossStandDown.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcCombatFlag.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcLeaderSignal.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcPartyState.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcPullPlanner.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRunProgress.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcStatusPublisher.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcStrandedDecision.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTargeting.h"
@@ -35,11 +39,6 @@
 
 namespace
 {
-    // Progress epsilon (yards): the tank must close on the next anchor by at least
-    // this much versus its closest-ever approach to count as progress. Matches the
-    // harness livelock net so the two agree on what "closing distance" means.
-    constexpr float DC_STRANDED_PROGRESS_EPSILON_YD = 1.0f;
-
     // Walk the leader's same-map group into kernel rows and report whether the
     // party is FIGHTING. Recover re-walks the live group itself, so a plain value
     // snapshot is all the kernel needs here.
@@ -53,12 +52,12 @@ namespace
     // (Arcatraz heroic, tr-20260801-194932-20: followers parked 30yd back for 15
     // minutes, run killed by the no-progress watchdog). A real fight still blocks
     // the teleport and still counts as progress — that is what engagement means.
-    void BuildSnapshot(Player* leader, std::vector<DcStrandedDecision::Member>& out,
-                       bool& partyEngaged)
+    void BuildSnapshot(Player* anchor, Position const* camp,
+                       std::vector<DcStrandedDecision::Member>& out, bool& partyEngaged)
     {
-        partyEngaged = DcCombatFlag::AnyPartyEngagement(leader);
+        partyEngaged = DcCombatFlag::AnyPartyEngagement(anchor);
 
-        Group* group = leader->GetGroup();
+        Group* group = anchor->GetGroup();
         if (!group)
             return;
 
@@ -67,66 +66,104 @@ namespace
             Player* member = ref->GetSource();
             if (!member || !member->IsInWorld())
                 continue;
+            // A rider is never rescued (see Recover), so it is never a stray
+            // either — otherwise Decide would ask for a rescue Recover refuses,
+            // and ask again every tick.
+            if (member != anchor && member->GetVehicle())
+                continue;
 
             DcStrandedDecision::Member m;
             m.isBot = GET_PLAYERBOT_AI(member) != nullptr;
             m.isAlive = member->IsAlive();
-            m.onMap = member->GetMapId() == leader->GetMapId();
-            m.isTank = member == leader;
-            m.distToTank = leader->GetDistance(member);
+            m.onMap = member->GetMapId() == anchor->GetMapId();
+            m.isTank = member == anchor;
+            m.distToTank = anchor->GetDistance(member);
+            m.distToGate = camp ? member->GetDistance(*camp) : -1.0f;
             out.push_back(m);
         }
     }
 
-    // Out-of-combat progress detector, mirroring DcTestRunJob's livelock net but
-    // ticked live on the leader: a completed encounter, a new cleared anchor, or
-    // the tank closing on the next anchor each re-stamps the clock. Updates the
-    // last-seen snapshot on the leader's run state and returns whether progress
-    // was observed this tick.
-    bool DetectProgress(Player* leader, PlayerbotAI* leaderAI, DcRunState& run)
+    // Who runs this failsafe's tick, whose run state it reads, and the point the
+    // strays are gathered on. One resolver so Evaluate and Recover can never
+    // disagree about any of the three.
+    //
+    // HEALTHY RUN: the elected leader tank, gathering on itself. Byte-for-byte the
+    // old behaviour.
+    //
+    // TANK DEAD: FindLeaderTank elects only among ALIVE tank bots, so in a 5-man it
+    // returns nullptr the instant the tank dies — and this failsafe, gated on
+    // IsDungeonClearLeader, switched itself off in the one state it exists for.
+    // Gundrak tp-20260830-231921-1: five runs wiped on Slad'ran, the survivors sat
+    // 122yd from the corpse for ten minutes each, and every one died to the 600s
+    // no-progress watchdog with the rescue never once evaluated. FindTerminalDriver
+    // is the module's existing answer to the same shape (see its header) and is
+    // reused verbatim here, so every member computes the same driver and exactly
+    // one fires.
+    //
+    // The anchor is then the run OWNER'S CORPSE, not the driver. That is the whole
+    // point: the survivors' only way out is a rez, a rez is cast at the body, and a
+    // rescue that gathers them anywhere else leaves the run exactly as stuck. It
+    // also means the driver may be a stray itself — the sole survivor 122yd out is
+    // both — so Recover moves the anchor's group, never "everyone but me".
+    // The rescue's out-of-range threshold, matched to the gate the tank's
+    // advance is ACTUALLY enforcing rather than to the raw setting. See
+    // DcStrandedDecision::RescueSpread for the dead band this closes and why the
+    // tank-anchored test is load-bearing. Resolved once per tick by Evaluate and
+    // again by Recover; both go through this one body so they can never disagree
+    // about who is stranded.
+    //
+    // A CAMP-anchored gate adds its own origin and radius alongside: the member
+    // the gate is waiting on is the one past its spread of the camp, wherever the
+    // tank stands (DcStrandedDecision::IsStranded).
+    struct RescueBounds
     {
-        AiObjectContext* ctx = leaderAI->GetAiObjectContext();
-        bool progressed = false;
+        float maxSpread = 0.0f;             // past this from the tank: stranded
+        Position const* camp = nullptr;     // a camp-anchored gate's origin; nullptr = tank-anchored
+        float campSpread = 0.0f;            // ...and its radius
+    };
 
-        uint32 mask = run.progressMask;
-        if (InstanceScript* inst = DcTargeting::GetInstanceScript(leader))
-            mask = inst->GetCompletedEncounterMask();
-        if (mask != run.progressMask)
+    RescueBounds ResolveRescueBounds(Player* bot)
+    {
+        DcPartyState::SpreadGate const gate = DcPartyState::LeaderGate(bot);
+        RescueBounds b;
+        b.maxSpread = DcStrandedDecision::RescueSpread(
+            DcSettings::GetFloat(bot, "PartyMaxSpread"), gate.maxSpread,
+            /*gateIsTankAnchored*/ gate.anchor == nullptr);
+        if (gate.anchor)
         {
-            run.progressMask = mask;
-            progressed = true;
+            b.camp = gate.anchor;
+            b.campSpread = gate.maxSpread;
+        }
+        return b;
+    }
+
+    struct Driver
+    {
+        Player* clockOwner = nullptr;  // whose tick runs this
+        Player* runOwner   = nullptr;  // whose DcRunState IS this run
+        Player* anchor     = nullptr;  // where the strays are gathered
+    };
+
+    Driver ResolveDriver(Player* bot)
+    {
+        Driver d;
+        if (!bot)
+            return d;
+
+        d.runOwner = DcLeaderSignal::FindRunOwner(bot);
+        if (!d.runOwner)
+            return d;
+
+        if (Player* leader = DcLeaderSignal::FindLeaderTank(bot))
+        {
+            d.clockOwner = leader;
+            d.anchor = leader;
+            return d;
         }
 
-        std::size_t const anchors =
-            ctx->GetValue<std::unordered_set<uint32>&>(DcKey::ClearedAnchors)->Get().size();
-        if (static_cast<uint32>(anchors) != run.progressAnchors)
-        {
-            run.progressAnchors = static_cast<uint32>(anchors);
-            progressed = true;
-        }
-
-        std::optional<DungeonBossInfo> const next =
-            ctx->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)->Get();
-        if (next.has_value() && next->mapId == leader->GetMapId())
-        {
-            // Re-arm on target change: distance to a NEW anchor is unrelated to the
-            // best held for the old one, and would otherwise read as an instant
-            // regression that never recovers.
-            if (next->entry != run.progressAnchorEntry)
-            {
-                run.progressAnchorEntry = next->entry;
-                run.progressBestDist = -1.0f;
-            }
-            float const dist = leader->GetDistance(next->x, next->y, next->z);
-            if (run.progressBestDist < 0.0f ||
-                dist < run.progressBestDist - DC_STRANDED_PROGRESS_EPSILON_YD)
-            {
-                run.progressBestDist = dist;
-                progressed = true;
-            }
-        }
-
-        return progressed;
+        d.clockOwner = DcLeaderSignal::FindTerminalDriver(bot);
+        d.anchor = d.runOwner;
+        return d;
     }
 }
 
@@ -141,12 +178,15 @@ namespace DcStrandedRecovery
     {
         if (!bot || bot->isDead())
             return false;
-        PlayerbotAI* leaderAI = GET_PLAYERBOT_AI(bot);
-        if (!leaderAI)
+
+        // Single clock owner, alive tank or dead one (see ResolveDriver). A no-op
+        // on every other bot.
+        Driver const driver = ResolveDriver(bot);
+        if (!driver.runOwner || !driver.anchor || driver.clockOwner != bot)
             return false;
-        // Leader-only: the failsafe teleports members TO the tank, so the elected
-        // leader is the sole clock owner. No-op on every other bot.
-        if (!DcLeaderSignal::IsDungeonClearLeader(bot))
+
+        PlayerbotAI* leaderAI = GET_PLAYERBOT_AI(driver.runOwner);
+        if (!leaderAI)
             return false;
 
         DcRunState& run = DcRun::Of(leaderAI);
@@ -159,46 +199,76 @@ namespace DcStrandedRecovery
         // long Wait-at-Boss / door pause never makes the run look frozen on resume.
         if (run.paused)
         {
-            run.progressMs = now ? now : 1;
+            DcRunProgress::Stamp(run.progress, now);
             return false;
         }
 
+        // Raid boss stand-down: a live encounter is the playerbots strategy's
+        // fight — a rescue teleport mid-encounter would yank fighters out of
+        // position (and engagement alone can't be trusted through submerge /
+        // phase-flip signal gaps). Same clock treatment as a pause, so the
+        // failsafe re-arms clean when the fight ends.
+        if (DcBossStandDown::IsActive(bot))
+        {
+            DcRunProgress::Stamp(run.progress, now);
+            return false;
+        }
+
+        // Karazhan's chess game: ten minutes with no kill, no anchor and the raid
+        // parked on a sideline far from the tank is the game, not a strand — and a
+        // rescue teleport would pull controllers off their pieces. Stamped, so the
+        // failsafe re-arms clean when the game ends.
+        if (DcKarazhan::ChessIsOn(bot))
+        {
+            DcRunProgress::Stamp(run.progress, now);
+            return false;
+        }
+
+        RescueBounds const bounds = ResolveRescueBounds(bot);
         std::vector<DcStrandedDecision::Member> members;
         bool partyEngaged = false;
-        BuildSnapshot(bot, members, partyEngaged);
+        BuildSnapshot(driver.anchor, bounds.camp, members, partyEngaged);
 
         // A FIGHT re-arms the clock wholesale — a fight is progress, so neither a
         // long boss fight nor a between-pulls skirmish ever burns the budget. A
         // bare combat FLAG with nothing fighting is not progress and must not
         // re-arm it; see BuildSnapshot. Otherwise fall to the closing-distance /
         // encounter detector.
-        bool const progressed = partyEngaged || DetectProgress(bot, leaderAI, run);
-        if (progressed || run.progressMs == 0)
-            run.progressMs = now ? now : 1;
+        bool const progressed =
+            partyEngaged || DcRunProgress::Detect(driver.runOwner, leaderAI, run.progress);
+        if (progressed || run.progress.stampMs == 0)
+            DcRunProgress::Stamp(run.progress, now);
 
         DcStrandedDecision::Inputs in;
         in.enabled = true;
         in.nowMs = now;
-        in.lastProgressMs = run.progressMs;
+        in.lastProgressMs = run.progress.stampMs;
         in.noProgressTimeoutMs = DcSettings::GetUInt(bot, "StrandedRecoveryNoProgressSecs") * 1000;
         in.partyEngaged = partyEngaged;
-        in.maxSpread = DcSettings::GetFloat(bot, "PartyMaxSpread");
+        in.maxSpread = bounds.maxSpread;
+        in.gateSpread = bounds.campSpread;
 
         return DcStrandedDecision::Decide(in, members).recover;
     }
 
-    void Recover(Player* leader)
+    void Recover(Player* bot)
     {
-        if (!leader || leader->isDead())
+        if (!bot || bot->isDead())
             return;
-        PlayerbotAI* leaderAI = GET_PLAYERBOT_AI(leader);
-        if (!leaderAI || !DcLeaderSignal::IsDungeonClearLeader(leader))
+
+        Driver const driver = ResolveDriver(bot);
+        if (!driver.runOwner || !driver.anchor || driver.clockOwner != bot)
+            return;
+
+        Player* const leader = driver.anchor;
+        PlayerbotAI* leaderAI = GET_PLAYERBOT_AI(driver.runOwner);
+        if (!leaderAI)
             return;
         Group* group = leader->GetGroup();
         if (!group)
             return;
 
-        float const maxSpread = DcSettings::GetFloat(leader, "PartyMaxSpread");
+        RescueBounds const bounds = ResolveRescueBounds(bot);
         float const lx = leader->GetPositionX();
         float const ly = leader->GetPositionY();
         float const lz = leader->GetPositionZ();
@@ -207,6 +277,10 @@ namespace DcStrandedRecovery
         for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
         {
             Player* member = ref->GetSource();
+            // Never the anchor itself. When the tank is alive that is the old
+            // `member == leader` skip; when it is a corpse the anchor is already
+            // where everyone is being sent, and the DRIVER is not excluded — it is
+            // routinely one of the strays.
             if (!member || member == leader)
                 continue;
             if (!member->IsInWorld() || !member->IsAlive())
@@ -215,8 +289,16 @@ namespace DcStrandedRecovery
                 continue;
             if (!GET_PLAYERBOT_AI(member))       // bots only, never a human
                 continue;
+            // Never a rider. NearTeleportTo ejects a passenger and leaves the
+            // vehicle where it stood — on Trial of the Champion that is a horse at
+            // the arena wall and a lance-armed bot on foot in the middle of a
+            // joust, which is a strand this recovery would be CAUSING.
+            if (member->GetVehicle())
+                continue;
             float const strandedDist = leader->GetDistance(member);
-            if (strandedDist <= maxSpread)
+            float const campDist = bounds.camp ? member->GetDistance(*bounds.camp) : -1.0f;
+            if (!DcStrandedDecision::IsStranded(strandedDist, campDist, bounds.maxSpread,
+                                                bounds.campSpread))
                 continue;                       // in range — not stranded
 
             // Fan the strays out a little around the tank so they don't stack on
@@ -234,8 +316,12 @@ namespace DcStrandedRecovery
 
             LOG_INFO("playerbots.dungeonclear",
                      "[DC:{}] stranded-recovery: no progress past the timeout with {} out of "
-                     "range ({:.0f}yd) -> teleported to the tank",
-                     leader->GetName(), member->GetName(), strandedDist);
+                     "range ({:.0f}yd from the tank / {:.0f}; {:.0f}yd from the camp / {:.0f}) "
+                     "-> teleported to the {}",
+                     leader->GetName(), member->GetName(), strandedDist, bounds.maxSpread,
+                     campDist, bounds.campSpread,
+                     leader->isDead() ? "tank's corpse (driver " + bot->GetName() + ")"
+                                      : "tank");
         }
 
         if (moved == 0)
@@ -265,11 +351,19 @@ namespace DcStrandedRecovery
         if (!DcLeaderSignal::IsPullPhaseHolding(static_cast<uint32>(pull.phase)) &&
             pull.HasCamp())
         {
-            float const setback = DcSettings::GetFloat(leader, "PullSetback");
-            float const maxDrag = DcSettings::GetFloat(leader, "PullMaxDrag");
+            float const setback = DcSettings::GetFloat(bot, "PullSetback");
+            float const maxDrag = DcSettings::GetFloat(bot, "PullMaxDrag");
             std::optional<Position> const trail =
                 DcPullPlanner::ComputeTrailCamp(leaderAI, setback, maxDrag);
             pull.camp = trail ? *trail : leader->GetPosition();
+            // A room-clear lane republishes its own camp every tick it is walked
+            // (DcPullActions, "PublishCamp(pull.laneCamp"), so the re-anchor lasted
+            // one tick and the party was recalled to the stranding camp again:
+            // seven rescues in a row on the Emperor's balcony lane
+            // (tr-20261019-183728-12). The lane is spent; keep laneTarget so the
+            // cache resolves this pack to "close on it the old way" instead of
+            // measuring the same lane again.
+            pull.laneOk = false;
             LOG_INFO("playerbots.dungeonclear",
                      "[DC:{}] stranded-recovery: camp re-anchored to ({:.1f},{:.1f},{:.1f}) so "
                      "the rescued members aren't sent back to the old one",
@@ -283,8 +377,8 @@ namespace DcStrandedRecovery
         // real progress. Re-seed the closing-distance mark from the tank's current
         // spot too, so a re-measure isn't fooled by the old best.
         DcRunState& run = DcRun::Of(leaderAI);
-        run.progressMs = getMSTime();
-        run.progressBestDist = -1.0f;
+        DcRunProgress::Stamp(run.progress, getMSTime());
+        run.progress.bestDist = -1.0f;
 
         DcStatusPublisher::SendAddonMessage(
             leaderAI,

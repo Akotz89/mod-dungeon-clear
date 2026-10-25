@@ -4,6 +4,7 @@ import LoginPage from "./auth/LoginPage";
 import AppShell from "./layout/AppShell";
 import LaunchPage from "./pages/LaunchPage";
 import LivePage from "./pages/LivePage";
+import ContinuousPage from "./pages/ContinuousPage";
 import RosterPage from "./pages/RosterPage";
 import HistoryPage from "./pages/HistoryPage";
 import LogsPage from "./pages/LogsPage";
@@ -23,6 +24,8 @@ function Gate() {
       <Route element={<AppShell />}>
         <Route index element={<LaunchPage />} />
         <Route path="live" element={<LivePage />} />
+        <Route path="continuous" element={<ContinuousPage />} />
+        <Route path="continuous/:soakId" element={<ContinuousPage />} />
         <Route path="roster" element={<RosterPage />} />
         <Route path="history" element={<HistoryPage />} />
         <Route path="logs" element={<LogsPage />} />

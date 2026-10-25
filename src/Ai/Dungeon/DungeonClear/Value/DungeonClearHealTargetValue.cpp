@@ -12,6 +12,7 @@
 #include "Ai/Dungeon/DungeonClear/Util/DcLeaderSignal.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearMath.h"
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
+#include "Util/DcPlayerbotsConfig.h"
 
 ObjectGuid DungeonClearHealTargetValue::Calculate()
 {
@@ -31,7 +32,7 @@ ObjectGuid DungeonClearHealTargetValue::Calculate()
     float const tankBias = DcSettings::GetFloat(bot, "HealRepositionTankBias");
     // Mirror the stock heal-candidate radius (healDistance * 2) but WITHOUT the
     // LOS filter — keeping the out-of-sight member in candidacy is the whole point.
-    float const maxDist = sPlayerbotAIConfig.healDistance * 2.0f;
+    float const maxDist = DC_PB_CONFIG(HealDistance, healDistance) * 2.0f;
 
     std::vector<DungeonClearMath::HealCandidate> candidates;
     std::vector<ObjectGuid> guids;

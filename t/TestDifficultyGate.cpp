@@ -21,14 +21,14 @@
 
 TEST(DcDifficultyGateTest, GateMatchesTruthTable)
 {
-    EXPECT_TRUE(DcGateMatches(DcDifficultyGate::Any, DUNGEON_DIFFICULTY_NORMAL));
-    EXPECT_TRUE(DcGateMatches(DcDifficultyGate::Any, DUNGEON_DIFFICULTY_HEROIC));
+    EXPECT_TRUE(DcGateMatches(DcDifficultyGate::Any, DcDiffKey::Dungeon(DUNGEON_DIFFICULTY_NORMAL)));
+    EXPECT_TRUE(DcGateMatches(DcDifficultyGate::Any, DcDiffKey::Dungeon(DUNGEON_DIFFICULTY_HEROIC)));
 
-    EXPECT_TRUE(DcGateMatches(DcDifficultyGate::NormalOnly, DUNGEON_DIFFICULTY_NORMAL));
-    EXPECT_FALSE(DcGateMatches(DcDifficultyGate::NormalOnly, DUNGEON_DIFFICULTY_HEROIC));
+    EXPECT_TRUE(DcGateMatches(DcDifficultyGate::NormalOnly, DcDiffKey::Dungeon(DUNGEON_DIFFICULTY_NORMAL)));
+    EXPECT_FALSE(DcGateMatches(DcDifficultyGate::NormalOnly, DcDiffKey::Dungeon(DUNGEON_DIFFICULTY_HEROIC)));
 
-    EXPECT_FALSE(DcGateMatches(DcDifficultyGate::HeroicOnly, DUNGEON_DIFFICULTY_NORMAL));
-    EXPECT_TRUE(DcGateMatches(DcDifficultyGate::HeroicOnly, DUNGEON_DIFFICULTY_HEROIC));
+    EXPECT_FALSE(DcGateMatches(DcDifficultyGate::HeroicOnly, DcDiffKey::Dungeon(DUNGEON_DIFFICULTY_NORMAL)));
+    EXPECT_TRUE(DcGateMatches(DcDifficultyGate::HeroicOnly, DcDiffKey::Dungeon(DUNGEON_DIFFICULTY_HEROIC)));
 }
 
 // --- BossRosterRegistry::Apply is difficulty-aware ------------------------
@@ -58,9 +58,9 @@ TEST(DcDifficultyGateTest, AnyGatedPatchAppliesOnBothDifficulties)
     };
 
     std::vector<DungeonBossInfo> normal =
-        BossRosterRegistry::Apply(543, DUNGEON_DIFFICULTY_NORMAL, base);
+        BossRosterRegistry::Apply(543, DcDiffKey::Dungeon(DUNGEON_DIFFICULTY_NORMAL), base);
     std::vector<DungeonBossInfo> heroic =
-        BossRosterRegistry::Apply(543, DUNGEON_DIFFICULTY_HEROIC, base);
+        BossRosterRegistry::Apply(543, DcDiffKey::Dungeon(DUNGEON_DIFFICULTY_HEROIC), base);
 
     ASSERT_EQ(normal.size(), heroic.size());
     for (size_t i = 0; i < normal.size(); ++i)
@@ -114,7 +114,7 @@ TEST(DcDifficultyGateTest, ShatteredHallsHeroicReordersHallwaySweep)
         GateBoss(16808, 3, "Warchief Kargath Bladefist", 540),
     };
     std::vector<DungeonBossInfo> const out =
-        BossRosterRegistry::Apply(540, DUNGEON_DIFFICULTY_HEROIC, heroicBase);
+        BossRosterRegistry::Apply(540, DcDiffKey::Dungeon(DUNGEON_DIFFICULTY_HEROIC), heroicBase);
 
     auto indexOf = [&](uint32 entry) -> std::size_t
     {
@@ -132,6 +132,16 @@ TEST(DcDifficultyGateTest, ShatteredHallsHeroicReordersHallwaySweep)
     // ...and the gauntlet objective still precedes Porung.
     EXPECT_LT(indexOf(BossRosterRegistry::ObjectiveEntry(2)), indexOf(20923));
 
+    // The lone O'mrogg-approach sentinel (OBJ(4), normal key 1) must be re-keyed
+    // to 2 on heroic so it lands AFTER Porung. Left on key 1 it sorts ahead of
+    // him, which would send the tank ~260yd south through the training yard with
+    // Porung still alive — and only his death cancels the scout's 45s zealot
+    // summons, so the party would walk that whole leg with waves chasing and
+    // then walk back north for him.
+    uint32 const objSentinel = BossRosterRegistry::ObjectiveEntry(4);
+    EXPECT_LT(indexOf(20923), indexOf(objSentinel));
+    EXPECT_LT(indexOf(objSentinel), indexOf(16809));
+
     // On NORMAL (no Porung row, hallway keeps key 2) the sweep still precedes
     // Kargath — the heroic patch must not leak into normal ordering.
     std::vector<DungeonBossInfo> normalBase = {
@@ -140,7 +150,7 @@ TEST(DcDifficultyGateTest, ShatteredHallsHeroicReordersHallwaySweep)
         GateBoss(16808, 2, "Warchief Kargath Bladefist", 540),
     };
     std::vector<DungeonBossInfo> const normalOut =
-        BossRosterRegistry::Apply(540, DUNGEON_DIFFICULTY_NORMAL, normalBase);
+        BossRosterRegistry::Apply(540, DcDiffKey::Dungeon(DUNGEON_DIFFICULTY_NORMAL), normalBase);
     auto normalIndexOf = [&](uint32 entry) -> std::size_t
     {
         for (std::size_t i = 0; i < normalOut.size(); ++i)
@@ -151,6 +161,13 @@ TEST(DcDifficultyGateTest, ShatteredHallsHeroicReordersHallwaySweep)
     };
     EXPECT_LT(normalIndexOf(16809), normalIndexOf(objHallway));
     EXPECT_LT(normalIndexOf(objHallway), normalIndexOf(16808));
+
+    // And on normal the sentinel keeps its own key-1 slot: gauntlet -> sentinel
+    // -> O'mrogg, with no Porung row in between. The heroic re-key must not have
+    // moved it here.
+    EXPECT_LT(normalIndexOf(BossRosterRegistry::ObjectiveEntry(2)),
+              normalIndexOf(objSentinel));
+    EXPECT_LT(normalIndexOf(objSentinel), normalIndexOf(16809));
 }
 
 // --- Route registry falls back to normal ----------------------------------
@@ -204,15 +221,15 @@ TEST(DcDifficultyGateTest, ConditionalOverloadFiltersExactlyByGate)
         size_t expectHeroic = 0;
         for (DungeonEvent const* ev : all)
         {
-            if (DcGateMatches(ev->gate, DUNGEON_DIFFICULTY_NORMAL))
+            if (DcGateMatches(ev->gate, DcDiffKey::Dungeon(DUNGEON_DIFFICULTY_NORMAL)))
                 ++expectNormal;
-            if (DcGateMatches(ev->gate, DUNGEON_DIFFICULTY_HEROIC))
+            if (DcGateMatches(ev->gate, DcDiffKey::Dungeon(DUNGEON_DIFFICULTY_HEROIC)))
                 ++expectHeroic;
         }
 
-        EXPECT_EQ(DungeonEventRegistry::Conditional(seed.mapId, DUNGEON_DIFFICULTY_NORMAL).size(),
+        EXPECT_EQ(DungeonEventRegistry::Conditional(seed.mapId, DcDiffKey::Dungeon(DUNGEON_DIFFICULTY_NORMAL)).size(),
                   expectNormal) << "map " << seed.mapId;
-        EXPECT_EQ(DungeonEventRegistry::Conditional(seed.mapId, DUNGEON_DIFFICULTY_HEROIC).size(),
+        EXPECT_EQ(DungeonEventRegistry::Conditional(seed.mapId, DcDiffKey::Dungeon(DUNGEON_DIFFICULTY_HEROIC)).size(),
                   expectHeroic) << "map " << seed.mapId;
     }
 }

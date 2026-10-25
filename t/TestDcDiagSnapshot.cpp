@@ -6,6 +6,7 @@
 #include "gtest/gtest.h"
 
 #include <sstream>
+#include <string>
 
 #include "TestRun/DcDiagSnapshot.h"
 
@@ -392,4 +393,307 @@ TEST(DcDiagSnapshotTest, PhantomVerdictUsesPveRefsOnly)
     EXPECT_FALSE(DcDiag::HasLegitimatePvECombatHolder(true, false));
     EXPECT_TRUE(DcDiag::HasLegitimatePvECombatHolder(false, false));
     EXPECT_TRUE(DcDiag::HasLegitimatePvECombatHolder(true, true));
+}
+
+// ---- the DC heartbeat ------------------------------------------------------
+//
+// The field exists to separate two freezes that every OTHER column reports
+// identically: a tank whose DC rungs all stood down, and a tank whose AI is not
+// being updated at all. Both show a frozen phase token, zeroed watchdogs and a
+// stale route. Only the tick age tells them apart, so the serializer has to
+// carry it — and has to carry "never ran" as something other than zero, because
+// zero is also what a bot that ticked one millisecond ago reports.
+
+TEST(DcDiagSnapshotTest, HeartbeatIsSerializedForTankAndMembers)
+{
+    Snapshot snap = Sample();
+    snap.dcTickSeen = true;
+    snap.dcTickAgeMs = 601102;   // the Gundrak Colossus-altar freeze
+
+    MemberSnapshot live;
+    live.name = "Follower";
+    live.online = true;
+    live.alive = true;
+    live.dcStrategy = true;
+    live.dcTickSeen = true;
+    live.dcTickAgeMs = 180;
+    snap.members.push_back(live);
+
+    // A bot whose ladder has never run reports -1, NOT 0 — 0 is a bot that
+    // ticked this millisecond, which is the opposite conclusion.
+    MemberSnapshot never;
+    never.name = "Newcomer";
+    never.online = true;
+    never.alive = true;
+    never.dcStrategy = true;
+    never.dcTickSeen = false;
+    snap.members.push_back(never);
+
+    std::string const json = Json(snap);
+
+    EXPECT_NE(json.find("\"dcTickAgeMs\":601102"), std::string::npos);
+    EXPECT_NE(json.find("\"dcTickAgeMs\":180"), std::string::npos);
+    EXPECT_NE(json.find("\"dcTickAgeMs\":-1"), std::string::npos);
+}
+
+TEST(DcDiagSnapshotTest, SummarizeStaysQuietOnAHealthyHeartbeat)
+{
+    Snapshot snap = Sample();
+    snap.dcTickSeen = true;
+    snap.dcTickAgeMs = 180;      // one ordinary AI tick ago
+
+    // A line that shouted on every healthy capture would be ignored on the one
+    // capture that matters.
+    EXPECT_EQ(DcDiag::Summarize(snap).find("DC-TICK"), std::string::npos);
+}
+
+TEST(DcDiagSnapshotTest, SummarizeFlagsAStaleTankBesideLiveFollowers)
+{
+    Snapshot snap = Sample();
+    snap.dcTickSeen = true;
+    snap.dcTickAgeMs = 601102;
+
+    // The signature this was written for: the tank silent for ten minutes while
+    // its four followers keep ticking. The companion count is what says the
+    // world is still turning and only this ONE bot stopped.
+    MemberSnapshot tank;
+    tank.name = "Wuachiw";
+    tank.dcStrategy = true;
+    tank.dcTickSeen = true;
+    tank.dcTickAgeMs = 601102;
+    snap.members.push_back(tank);
+    for (int i = 0; i < 4; ++i)
+    {
+        MemberSnapshot f;
+        f.name = "Follower" + std::to_string(i);
+        f.dcStrategy = true;
+        f.dcTickSeen = true;
+        f.dcTickAgeMs = 200;
+        snap.members.push_back(f);
+    }
+
+    std::string const line = DcDiag::Summarize(snap);
+
+    EXPECT_NE(line.find("DC-TICK-STALE 601s"), std::string::npos);
+    EXPECT_NE(line.find("(ticking 4/5)"), std::string::npos);
+}
+
+TEST(DcDiagSnapshotTest, SummarizeSaysNeverWhenTheLadderHasNotRun)
+{
+    Snapshot snap = Sample();
+    snap.dcTickSeen = false;
+
+    EXPECT_NE(DcDiag::Summarize(snap).find("DC-TICK-NEVER"), std::string::npos);
+}
+
+// ---- under-the-floor and escortee blocks (tp-20260910-121847-3) -------------
+
+namespace
+{
+    // Brackets and braces balance outside string literals, and the text ends
+    // exactly where the outermost object does. The escort block is optional and
+    // spliced in before the final brace, so this is the test that catches a
+    // splice that closes the object early or not at all.
+    bool ClosesCleanly(std::string const& json)
+    {
+        int depth = 0;
+        bool inString = false;
+        for (std::size_t i = 0; i < json.size(); ++i)
+        {
+            char const c = json[i];
+            if (inString)
+            {
+                if (c == '\\')
+                    ++i;
+                else if (c == '"')
+                    inString = false;
+                continue;
+            }
+            if (c == '"')
+                inString = true;
+            else if (c == '{' || c == '[')
+                ++depth;
+            else if (c == '}' || c == ']')
+            {
+                if (--depth < 0)
+                    return false;
+                if (depth == 0 && i + 1 != json.size())
+                    return false;
+            }
+        }
+        return depth == 0 && !inString;
+    }
+
+    DcDiag::FloorProbe Floor(float meshZ, bool meshOk = true)
+    {
+        DcDiag::FloorProbe f;
+        f.probed = true;
+        f.meshOk = meshOk;
+        f.meshZ = meshZ;
+        f.groundZ = 0.14f;
+        f.gridZ = 0.14f;
+        return f;
+    }
+}
+
+TEST(DcDiagSnapshotTest, UnderMeshNeedsAMeasuredFloorWellAboveTheUnit)
+{
+    // The King's Square tanks: 122.1 and 125.2 under a street at 134.5.
+    EXPECT_TRUE(DcDiag::IsUnderMesh(Floor(134.5f), 122.1f));
+    EXPECT_TRUE(DcDiag::IsUnderMesh(Floor(134.5f), 125.2f));
+    // Standing on the street, or a step below its rounded edge, is not under it.
+    EXPECT_FALSE(DcDiag::IsUnderMesh(Floor(134.5f), 134.6f));
+    EXPECT_FALSE(DcDiag::IsUnderMesh(Floor(134.5f), 132.0f));
+    // No poly in the column, or never probed, is "unknown", never "under".
+    EXPECT_FALSE(DcDiag::IsUnderMesh(Floor(134.5f, /*meshOk*/ false), 122.1f));
+    EXPECT_FALSE(DcDiag::IsUnderMesh(DcDiag::FloorProbe{}, 122.1f));
+}
+
+TEST(DcDiagSnapshotTest, FloorIsSerializedOnlyWhenProbed)
+{
+    Snapshot snap = Sample();
+    MemberSnapshot sunk;
+    sunk.name = "Oschue";
+    sunk.online = true;
+    sunk.z = 125.2f;
+    sunk.floor = Floor(134.5f);
+    snap.members.push_back(sunk);
+
+    MemberSnapshot offline;
+    offline.name = "Gone";
+    snap.members.push_back(offline);
+
+    std::string const json = Json(snap);
+
+    EXPECT_NE(json.find("\"floor\":{\"meshOk\":true,\"meshZ\":134.5,\"groundZ\":0.140000001,"
+                        "\"gridZ\":0.140000001}"),
+              std::string::npos);
+    // One member probed, one not: exactly one floor object.
+    EXPECT_EQ(json.find("\"floor\""), json.rfind("\"floor\""));
+    EXPECT_TRUE(ClosesCleanly(json));
+}
+
+TEST(DcDiagSnapshotTest, HolderFloorRidesOnTheHolderRow)
+{
+    using DcDiag::CombatHolderSnapshot;
+    Snapshot snap = Sample();
+    MemberSnapshot m;
+    m.name = "Oschue";
+    m.online = true;
+    m.inCombat = true;
+    m.z = 125.2f;
+    m.floor = Floor(134.5f);
+    CombatHolderSnapshot h;
+    h.name = "Devouring Ghoul";
+    h.entry = 28249;
+    h.z = 124.0f;
+    h.floor = Floor(134.5f);
+    m.combatHolders.push_back(h);
+    m.holderRefCount = 1;
+    snap.members.push_back(m);
+
+    std::string const json = Json(snap);
+    EXPECT_NE(json.find("\"floor\"", json.find("\"combatHolders\"")), std::string::npos);
+    EXPECT_TRUE(ClosesCleanly(json));
+
+    std::string const blame = DcDiag::SummarizeCombat(snap);
+    EXPECT_NE(blame.find("Oschue UNDER-MESH"), std::string::npos);
+    EXPECT_NE(blame.find("Devouring Ghoul(28249)"), std::string::npos);
+    EXPECT_NE(blame.find(" UNDER-MESH -> "), std::string::npos);
+}
+
+TEST(DcDiagSnapshotTest, SummarizeCountsMembersUnderTheMesh)
+{
+    Snapshot snap = Sample();
+    MemberSnapshot sunk;
+    sunk.name = "Oschue";
+    sunk.online = true;
+    sunk.z = 122.1f;
+    sunk.floor = Floor(134.5f);
+    snap.members.push_back(sunk);
+    MemberSnapshot fine;
+    fine.name = "Ziceijun";
+    fine.online = true;
+    fine.z = 134.5f;
+    fine.floor = Floor(134.5f);
+    snap.members.push_back(fine);
+
+    EXPECT_NE(DcDiag::Summarize(snap).find("UNDER-MESH=1"), std::string::npos);
+
+    snap.members.front().z = 134.4f;
+    EXPECT_EQ(DcDiag::Summarize(snap).find("UNDER-MESH"), std::string::npos);
+}
+
+TEST(DcDiagSnapshotTest, EscortBlockIsAbsentWithoutAnActiveEscort)
+{
+    std::string const json = Json(Sample());
+    EXPECT_EQ(json.find("\"escort\""), std::string::npos);
+    EXPECT_TRUE(ClosesCleanly(json));
+    EXPECT_EQ(DcDiag::Summarize(Sample()).find("ESCORTEE"), std::string::npos);
+}
+
+TEST(DcDiagSnapshotTest, EscortBlockCarriesTheDriverViewAndEveryCopy)
+{
+    Snapshot snap = Sample();
+    DcDiag::EscortSnapshot& e = snap.escort;
+    e.active = true;
+    e.eventId = 6;
+    e.eventName = "Arthas: the Town Hall and Chrono-Lord Epoch";
+    e.stepIndex = 1;
+    e.entry = 26499;
+    e.searchRadius = 200.0f;
+    e.driverSees = false;
+    e.deadAirSeen = true;
+    e.deadAirMs = 137000;
+    e.instanceDataId = 1;
+    e.instanceData = 6;
+    e.instanceDataMin = 9;
+    e.copyCount = 1;
+    DcDiag::EscorteeCopy arthas;
+    arthas.guid = 123;
+    arthas.spawnId = 99;
+    arthas.alive = true;
+    arthas.distToTank = 92.5f;
+    arthas.updateNeeded = true;
+    arthas.gridLoaded = true;
+    arthas.seenByGridScan = false;
+    e.copies.push_back(arthas);
+
+    std::string const json = Json(snap);
+    EXPECT_NE(json.find("\"escort\":{\"eventId\":6,"), std::string::npos);
+    EXPECT_NE(json.find("\"searchRadius\":200"), std::string::npos);
+    EXPECT_NE(json.find("\"driverSees\":false"), std::string::npos);
+    EXPECT_NE(json.find("\"deadAirMs\":137000"), std::string::npos);
+    EXPECT_NE(json.find("\"copyCount\":1"), std::string::npos);
+    EXPECT_NE(json.find("\"seenByGridScan\":false"), std::string::npos);
+    EXPECT_TRUE(ClosesCleanly(json));
+
+    // The one-line summary says which way the driver and the map disagree.
+    std::string const line = DcDiag::Summarize(snap);
+    EXPECT_NE(line.find("ESCORTEE-UNSEEN copies=1 nearest=92.5yd alive GRID-BLIND"),
+              std::string::npos);
+
+    // A dead copy, or one dropped off the update list, says so instead.
+    snap.escort.copies.front().alive = false;
+    snap.escort.copies.front().updateNeeded = false;
+    snap.escort.copies.front().seenByGridScan = true;
+    std::string const dead = DcDiag::Summarize(snap);
+    EXPECT_NE(dead.find("nearest=92.5yd DEAD NOT-UPDATED"), std::string::npos);
+    EXPECT_EQ(dead.find("GRID-BLIND"), std::string::npos);
+
+    // The driver seeing him is the healthy case: no token at all.
+    snap.escort.driverSees = true;
+    EXPECT_EQ(DcDiag::Summarize(snap).find("ESCORTEE"), std::string::npos);
+}
+
+TEST(DcDiagSnapshotTest, EscortWithNoCopyOnTheMapSaysZero)
+{
+    Snapshot snap = Sample();
+    snap.escort.active = true;
+    snap.escort.entry = 26499;
+    std::string const json = Json(snap);
+    EXPECT_NE(json.find("\"copies\":[]"), std::string::npos);
+    EXPECT_NE(json.find("\"deadAirMs\":-1"), std::string::npos);
+    EXPECT_TRUE(ClosesCleanly(json));
+    EXPECT_NE(DcDiag::Summarize(snap).find("ESCORTEE-UNSEEN copies=0"), std::string::npos);
 }

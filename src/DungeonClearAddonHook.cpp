@@ -27,6 +27,7 @@
 #include "Playerbots.h"
 #include "PlayerbotAI.h"
 
+#include "DcModuleEnable.h"
 #include "DungeonClearDispatch.h"
 #include "StringFormat.h"
 #include "Util/DcSpectator.h"
@@ -43,9 +44,9 @@ namespace
             return;
 
         WorldPacket data;
-        ChatHandler::BuildChatPacket(data, CHAT_MSG_PARTY, payload.c_str(),
-                                     LANG_ADDON, CHAT_TAG_NONE,
-                                     player->GetGUID(), player->GetName());
+        ChatHandler::BuildChatPacket(data, CHAT_MSG_PARTY, LANG_ADDON, player->GetGUID(),
+                                     ObjectGuid::Empty, payload, CHAT_TAG_NONE,
+                                     player->GetName());
 
         ServerFacade::instance().SendPacket(player, &data);
     }
@@ -199,6 +200,8 @@ public:
     // player who never owned a run.
     void OnPlayerLogout(Player* player) override
     {
+        if (!DcModule::IsEnabled())
+            return;  // no run can exist, so no override store to clear
         if (player)
             DcSettings::ClearRun(player->GetGUID());
     }
@@ -225,6 +228,18 @@ public:
         // in OnPlayerCanUseChat above; here we only act on the command.
         if (!IsDcAddonCommand(type, lang, msg))
             return;
+
+        // Master switch: answer the panel instead of silently dropping every
+        // button it presses. The relay suppression in OnPlayerCanUseChat still
+        // applies (the payload is ours either way, and must not reach party
+        // chat as text). See DcModuleEnable.h.
+        if (!DcModule::IsEnabled())
+        {
+            SendAddonError(player,
+                           "mod-dungeon-clear is disabled on this server "
+                           "(DungeonClear.Enable = 0).");
+            return;
+        }
 
         // Parse "DC\tCMD\t<subcommand>[\t<param>]" — strip the 7-byte prefix.
         std::string const cmdPayload = msg.substr(7);
@@ -289,6 +304,7 @@ public:
         else if (subCmd == "status") action = "dc status";
         else if (subCmd == "bosses") action = "dc bosses";
         else if (subCmd == "go")    action = "dc go";
+        else if (subCmd == "wing")  action = "dc wing";
         else
         {
             LOG_DEBUG("module", "mod-dungeon-clear: unknown addon subcommand '{}' from {}",

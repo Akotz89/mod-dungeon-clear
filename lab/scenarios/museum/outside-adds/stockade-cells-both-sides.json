@@ -1,0 +1,41 @@
+{
+  "about": "Outside adds (issue #17): the first Stockade hall. The corridor pack on the central axis (Inmate 79054 / Prisoner 79046 / Prisoner 79064) has cells on both flanks (north 79059/79057/79055/79065, south 79035/79043/79044), all within a ~29yd aggro sphere of the axis, so any fight spot on the axis sits inside two neighbour spheres. Before 648f3b7a the Dynamic verdict walked in on 35 of 39 packs (LEEROY) and woke both sides. The fix forces ADVANCED on map 34 through RouteSweepRegistry, and the drag-back must land outside both cell banks. Memory: dc-en-route-pack-sweep. Live after the fix: tr-20261002-041334-699, 25 of 27 pulls advanced, first pull Inmate pred 3 obs 3.",
+  "schema": 1,
+  "geometry": {
+    "map": 34,
+    "dungeon": "stockade",
+    "heroic": false,
+    "region": { "center": [85.0, 0.0, -25.5], "radius": 60.0 },
+    "objective": 1696,
+    "objectiveName": "Targorr the Dread"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [79054, 79046, 79064],
+        "cells-north": [79059, 79057, 79055, 79065],
+        "cells-south": [79035, 79043, 79044]
+      }
+    }
+  },
+  "party": {
+    // Comp of the post-fix live run tr-20261002-041334-699; start = the instance
+    // entrance (areatrigger 101 target), 22yd west of 79054 on the axis.
+    "comp": "warrior,priest-disc,shaman-enh,hunter-bm,mage-fire",
+    "level": 24,
+    "start": [54.23, 0.28, -18.34, 6.26],
+    "react": "fast",
+    "seedTarget": true
+  },
+  "settings": {
+    "PullSetting": 2
+  },
+  "goal": { "kill": "pack:target", "timeoutS": 120 },
+  "expect": {
+    "oracles": {
+      "O7": { "outsideMax": 0, "expect": "pass" },
+      "O10": "pass"
+    },
+    "knownFailure": "fixed:648f3b7a"
+  }
+}

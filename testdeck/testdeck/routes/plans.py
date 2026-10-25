@@ -33,9 +33,12 @@ async def api_testdungeons():
 
 
 @router.get("/api/testplans")
-async def api_testplans(limit: int = 50):
-    """Completed test-plan summaries: tail dc_testplans.jsonl, newest first."""
-    return {"plans": tail_jsonl(ctx.cfg.testplans_file, limit)}
+async def api_testplans(limit: int = 50, checkpoints: bool = False):
+    """Completed test-plan summaries: tail dc_testplans.jsonl, newest first.
+    An endless (continuous-mode) plan also appends periodic checkpoint lines
+    while it runs; those are left out unless asked for."""
+    keep = None if checkpoints else (lambda row: not row.get("checkpoint"))
+    return {"plans": tail_jsonl(ctx.cfg.testplans_file, limit, keep)}
 
 
 @router.post("/api/testplans/clear")
@@ -55,8 +58,11 @@ class PlanStartRequest(BaseModel):
     level: int = 0
     seed: int = 0
     heroic: bool = False
+    # Party size for every run in the campaign: 0 = classic 5-man, 2..40 =
+    # raid comp. Raid rows only (catalogue "raid": true).
+    size: int = 0
     # Gear ceiling for every run in the campaign. 0 = inherit the server's
-    # AiPlayerbot.AutoGear* values, -1 = no limit, >0 = that item level.
+    # Playerbots.AutoGear* values, -1 = no limit, >0 = that item level.
     # quality is 0 (inherit) or 1..5.
     ilvl: int = 0
     quality: int = 0
@@ -64,6 +70,14 @@ class PlanStartRequest(BaseModel):
 
 class PlanStopRequest(BaseModel):
     planId: str
+
+
+def resolve_alias(cat, token):
+    """A retired dungeon token (the catalogue's "aliases": brs -> lbrs after the
+    Blackrock Spire split) as the token that replaced it; any other unchanged."""
+    aliases = cat.get("aliases") or {}
+    target = aliases.get(token)
+    return target if isinstance(target, str) and target else token
 
 
 async def catalogue_rows():
@@ -80,11 +94,44 @@ def check_dungeon(rows, token, heroic):
     """Shared by plan, single-run and roster starts."""
     if token not in rows:
         raise HTTPException(400, f"unknown dungeon '{token}'")
-    # heroicLevel 0/absent = no heroic mode (classic, and WotLK until its
-    # content pass lands — mirrors the module-side gate).
-    if heroic and not rows[token].get("heroicLevel"):
+    # heroicLevel 0/absent = no heroic mode: classic dungeons, which have no
+    # heroic difficulty at all (mirrors the module-side gate).
+    row = rows[token]
+    # Scenario rows (module T1): a slice of a parent dungeon, launched by its
+    # own token. The module refuses heroic on them (heroicLevel is always 0);
+    # the parent must be in the same catalogue, or the row is a stale sidecar.
+    if row.get("scenario"):
+        parent = row.get("scenarioOf") or ""
+        if parent not in rows or rows[parent].get("scenario"):
+            raise HTTPException(400, f"scenario '{token}' has no parent dungeon "
+                                     f"'{parent}' in the catalogue")
+        if heroic:
+            raise HTTPException(400, f"scenario '{token}' has no heroic mode")
+    if heroic and not row.get("heroicLevel"):
         raise HTTPException(400, f"'{token}' has no heroic mode "
-                                 "(TBC heroics only for now)")
+                                 "(classic dungeons have none)")
+
+
+def check_size(rows, token, size):
+    """size is a raid-row knob: the module fields any 2..40 comp there, and a
+    5-man dungeon can't be entered by a raid group at all — so the deck only
+    forwards a size the catalogue's own bounds for that row allow."""
+    if size == 0:
+        return
+    row = rows[token]
+    if not row.get("raid"):
+        raise HTTPException(400, f"'{token}' is not a raid — size only applies "
+                                 "to raid rows")
+    # A scenario runs at its parent's default size: its focus, grace and
+    # watchdog budget were authored for that raid, so the form locks it.
+    if row.get("scenario"):
+        locked = int(row.get("defaultSize") or 0)
+        if locked and size != locked:
+            raise HTTPException(400, f"scenario '{token}' runs at size {locked} only")
+    lo = int(row.get("sizeMin") or 2)
+    hi = int(row.get("sizeMax") or 40)
+    if not lo <= size <= hi:
+        raise HTTPException(400, f"size must be {lo}..{hi} for '{token}'")
 
 
 def check_gear(rows, token, heroic, ilvl, quality):
@@ -107,6 +154,7 @@ def check_gear(rows, token, heroic, ilvl, quality):
 @router.post("/api/testplans/start")
 async def api_testplans_start(req: PlanStartRequest, request: Request):
     cat, rows = await catalogue_rows()
+    req.dungeon = resolve_alias(cat, req.dungeon)
     check_dungeon(rows, req.dungeon, req.heroic)
     # planMaxTotal 0/absent = unlimited (the module's default). Only mirror a
     # positive cap — inventing a local one here just refused plans the
@@ -121,11 +169,14 @@ async def api_testplans_start(req: PlanStartRequest, request: Request):
         raise HTTPException(400, "level must be 0..80")
     if req.seed < 0:
         raise HTTPException(400, "seed must be >= 0")
+    check_size(rows, req.dungeon, req.size)
     check_gear(rows, req.dungeon, req.heroic, req.ilvl, req.quality)
 
     cmd = f".dc test plan start {req.dungeon} total={req.total}"
     if req.heroic:
         cmd += " heroic"
+    if req.size:
+        cmd += f" size={req.size}"
     if req.concurrent:
         cmd += f" concurrent={req.concurrent}"
     if req.level:

@@ -19,7 +19,7 @@
 // can be served the same list the console would accept.
 //
 // Why this exists: test bots are geared by PlayerbotFactory to
-// AiPlayerbot.AutoGearScoreLimit / AutoGearQualityLimit, which are server-wide.
+// Playerbots.AutoGearScoreLimit / AutoGearQualityLimit, which are server-wide.
 // Comparing a party in Karazhan-era gear against the same party in Sunwell gear
 // meant editing the conf and reloading between runs. A run now carries its own
 // ceiling.
@@ -60,7 +60,7 @@ namespace DcTestGearTiers
     // The ceilings worth offering for a run of `mapId` at `runLevel`.
     //
     // At (or above) an expansion's level cap the ladder is the named raid
-    // ceilings from the AiPlayerbot.AutoGearScoreLimit documentation, because
+    // ceilings from the Playerbots.AutoGearScoreLimit documentation, because
     // those are the numbers a person testing an endgame dungeon thinks in.
     // Below the cap none of those ceilings can be worn, so the ladder is three
     // steps around the dungeon-gear anchor instead — enough to run a leveling
@@ -75,9 +75,9 @@ namespace DcTestGearTiers
     struct Spec
     {
         // >0 caps at that item level, kNoLimit removes the cap for this run,
-        // 0 inherits AiPlayerbot.AutoGearScoreLimit.
+        // 0 inherits Playerbots.AutoGearScoreLimit.
         std::int32_t ilvl = 0;
-        // 1..5 (normal..legendary), 0 inherits AiPlayerbot.AutoGearQualityLimit.
+        // 1..5 (normal..legendary), 0 inherits Playerbots.AutoGearQualityLimit.
         std::uint32_t quality = 0;
 
         bool IsDefault() const { return ilvl == 0 && quality == 0; }

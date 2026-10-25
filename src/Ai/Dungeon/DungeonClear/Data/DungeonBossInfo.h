@@ -62,7 +62,7 @@ struct DungeonBossInfo
     // for completion detection. Resolved and cleared by BossRosterRegistry::Apply.
     uint32 inheritCompletionFrom{0};
 
-    // Boss only: completion via the instance script's OWN boss-state slot
+    // Completion via the instance script's OWN boss-state slot
     // (InstanceScript::GetBossState(index) == DONE), for a boss that has NO
     // DungeonEncounter.dbc entry — so it never sets a GetCompletedEncounterMask
     // bit and can't be tracked the normal way (e.g. The Mechanar's two
@@ -73,7 +73,27 @@ struct DungeonBossInfo
     // the index is authored EXPLICITLY from the instance header, not reused from
     // encounterIndex, so there is no index-space confusion. -1 => not used
     // (completion keys on the DBC mask / corpse as usual).
+    //
+    // Also valid on an OBJECTIVE whose event runs a whole encounter (Karazhan's
+    // Opera and Nightbane urn): the objective is finished once that slot is DONE,
+    // so a re-entered instance does not replay a completed event.
     int32 doneBossStateIndex{-1};
+
+    // Completion via an InstanceScript GetData() VALUE, for an encounter whose
+    // script tracks it in neither a boss-state slot nor a DBC kill bit — the
+    // anchor is finished while GetData(doneInstanceDataId) ==
+    // doneInstanceDataValue. Karazhan's chess event is the case: its script
+    // never calls SetBossState for it, its DBC credit (encounter 660, the Status
+    // Bar) is a creature that never dies, and the ONLY completion signal the
+    // core has is GetData(DATA_CHESS_EVENT) == DONE.
+    //
+    // READ LIVE, every time, never latched — the same contract as
+    // doneBossStateIndex. It matters more here: `_chessEvent` is not saved, so
+    // after an instance reload it reads NOT_STARTED again and the chess exit
+    // door is shut; an anchor that had latched "done" would walk the raid at
+    // Prince through a closed door. -1 => not used.
+    int32 doneInstanceDataId{-1};
+    uint32 doneInstanceDataValue{0};
 
     // Clear-ORDER override. When >= 0 the clear orders this anchor by this value
     // INSTEAD of encounterIndex, while completion still keys on encounterIndex
@@ -83,6 +103,14 @@ struct DungeonBossInfo
     // be reached BEFORE the ziggurats (bits 7-9). -1 => order by encounterIndex
     // (every auto-derived boss and every anchor that doesn't opt in).
     int32 orderOverride{-1};
+
+    // Present but SKIPPED BY DESIGN: the roster keeps the row (so the panel can
+    // show why the clear passes it over) but the target picker never selects it
+    // — authored for content bots cannot or must not drive (vehicle-piloted
+    // bosses, externally-controlled set pieces like Karazhan's Chess). Unlike
+    // the per-run `dc skip` set this is data, not player state: it applies to
+    // every run of the map. Stamped by a BossRosterPatch::skipByDesign entry.
+    bool skipByDesign{false};
 };
 
 // The value the clear ORDERS an anchor by: the explicit orderOverride when set,
@@ -92,6 +120,31 @@ inline uint32 BossOrderKey(DungeonBossInfo const& b)
 {
     return b.orderOverride >= 0 ? static_cast<uint32>(b.orderOverride)
                                 : b.encounterIndex;
+}
+
+// Which instance-script signal says an anchor is finished.
+enum class DcAnchorDoneVia : uint8
+{
+    None,
+    BossState,     // doneBossStateIndex reads DONE
+    InstanceData,  // GetData(doneInstanceDataId) == doneInstanceDataValue
+};
+
+// Does the instance script say this anchor is finished — by its boss-state slot
+// (doneBossStateIndex) or by a GetData value (doneInstanceData)? Pure: the caller
+// reads the two live values off the InstanceScript (DcAnchorDoneByInstance in
+// Util/DcAnchorDone.h) so the rule itself is testable without one. `bossState` is
+// the raw EncounterState of slot doneBossStateIndex (DONE == 3); `instanceData`
+// is GetData(doneInstanceDataId). Either configured signal reading done is enough.
+inline DcAnchorDoneVia AnchorDoneByInstanceValues(DungeonBossInfo const& b, uint32 bossState,
+                                                  uint32 instanceData)
+{
+    constexpr uint32 ENCOUNTER_DONE = 3;
+    if (b.doneBossStateIndex >= 0 && bossState == ENCOUNTER_DONE)
+        return DcAnchorDoneVia::BossState;
+    if (b.doneInstanceDataId >= 0 && instanceData == b.doneInstanceDataValue)
+        return DcAnchorDoneVia::InstanceData;
+    return DcAnchorDoneVia::None;
 }
 
 #endif

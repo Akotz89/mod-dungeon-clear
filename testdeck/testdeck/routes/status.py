@@ -58,6 +58,18 @@ async def _realm_state(cfg):
     return "UNKNOWN", ""
 
 
+def _soak_brief():
+    """The running continuous session's counters — cheap (no ledger scan),
+    for the nav badge and the tab-title failure count."""
+    sup = ctx.soak
+    s = sup.active() if sup is not None else None
+    if s is None:
+        return None
+    c = s.state.get("counters") or {}
+    return {"soakId": s.id, "status": s.state.get("status", ""),
+            "runs": c.get("runs", 0), "fail": c.get("fail", 0)}
+
+
 @router.get("/api/status")
 async def api_status():
     """The one payload the header polls: realm up/down, sidecar freshness,
@@ -93,6 +105,7 @@ async def api_status():
         "bridge": cfg.bridge_type,
         "health": cfg.health(),
         "version": __version__,
+        "soak": _soak_brief(),
     }
     _cache.update(t=now, data=data)
     return data

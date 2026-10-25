@@ -134,3 +134,102 @@ TEST(DungeonClearHealRepositionTest, StandoffDegenerate)
     EXPECT_NEAR(pts[0].GetPositionX(), 110.0f, 1e-2f);
     EXPECT_NEAR(pts[0].GetPositionY(), 100.0f, 1e-2f);
 }
+
+// --- the close-on-target fallback walks the ROUTE, not the chord -------------
+//
+// The fallback used to be a point on the straight bot->target line. On Karazhan's
+// Maiden hairpin the two legs of the corridor sit a few yards apart through a wall
+// with no navmesh in it, so that point was inside the wall and healers/DPS walked
+// through it (tr-20260927-184653-9, -190943-12). The point is now taken along the
+// route (DcEngageGeometry::PathedCloseOn -> PointShortOfPathEnd).
+
+// The hairpin: up one leg, through the doorway, back down the other. The target
+// at the end is 10yd from the start through the wall and 70yd along the route.
+// Stopping 5yd short lands on the far leg, never between the legs.
+TEST(DungeonClearHealRepositionTest, FallbackWalksBackAlongTheRouteNotTheChord)
+{
+    std::vector<G3D::Vector3> const hairpin = {
+        { 0.0f, 0.0f, 92.0f },   // bot, on the west leg
+        { 0.0f, 30.0f, 92.0f },  // up the west leg to the doorway
+        { 10.0f, 30.0f, 92.0f }, // through it
+        { 10.0f, 0.0f, 92.0f },  // down the east leg to the target
+    };
+    G3D::Vector3 const p = DungeonClearMath::PointShortOfPathEnd(hairpin, 5.0f);
+    EXPECT_NEAR(p.x, 10.0f, 1e-3f);  // on the east leg, not x 0..10 through the wall
+    EXPECT_NEAR(p.y, 5.0f, 1e-3f);
+    EXPECT_NEAR(p.z, 92.0f, 1e-3f);
+}
+
+// The walk-back crosses vertices: 12yd short of the end is 2yd before the
+// doorway corner on the leg before it.
+TEST(DungeonClearHealRepositionTest, FallbackCrossesRouteVertices)
+{
+    std::vector<G3D::Vector3> const path = {
+        { 0.0f, 0.0f, 0.0f }, { 0.0f, 20.0f, 0.0f }, { 10.0f, 20.0f, 0.0f } };
+    G3D::Vector3 const p = DungeonClearMath::PointShortOfPathEnd(path, 12.0f);
+    EXPECT_NEAR(p.x, 0.0f, 1e-3f);
+    EXPECT_NEAR(p.y, 18.0f, 1e-3f);
+}
+
+// Along a ramp the point stays on the ramp: z follows the route, so it is never
+// the target's floor over our own x/y (the Blackwing Lair ceiling clip,
+// tp-20260828-171530-1).
+TEST(DungeonClearHealRepositionTest, FallbackFollowsTheRampHeight)
+{
+    std::vector<G3D::Vector3> const ramp = {
+        { 0.0f, 0.0f, 424.5f }, { 0.0f, 20.0f, 424.5f }, { 0.0f, 40.0f, 449.3f } };
+    G3D::Vector3 const p = DungeonClearMath::PointShortOfPathEnd(ramp, 5.0f);
+    EXPECT_GT(p.z, 424.5f);
+    EXPECT_LT(p.z, 449.3f);
+    EXPECT_GT(p.y, 20.0f);
+}
+
+// A route no longer than the gap is already close enough: its first point (the
+// bot), so the caller issues nothing. Empty and zero-length inputs stay finite.
+TEST(DungeonClearHealRepositionTest, FallbackShortOrDegenerateRoute)
+{
+    std::vector<G3D::Vector3> const shortPath = { { 1.0f, 2.0f, 3.0f }, { 1.0f, 5.0f, 3.0f } };
+    G3D::Vector3 const a = DungeonClearMath::PointShortOfPathEnd(shortPath, 5.0f);
+    EXPECT_NEAR(a.y, 2.0f, 1e-3f);
+
+    std::vector<G3D::Vector3> const stacked = { { 4.0f, 4.0f, 4.0f }, { 4.0f, 4.0f, 4.0f } };
+    G3D::Vector3 const b = DungeonClearMath::PointShortOfPathEnd(stacked, 0.0f);
+    EXPECT_FALSE(std::isnan(b.x));
+    EXPECT_NEAR(b.z, 4.0f, 1e-3f);
+
+    G3D::Vector3 const c = DungeonClearMath::PointShortOfPathEnd({}, 5.0f);
+    EXPECT_FALSE(std::isnan(c.x));
+}
+
+// ---------------------------------------------------------------------------
+// HealLeashRegistry — the per-map camp leash (tr-20260926-192642-1).
+// ---------------------------------------------------------------------------
+
+#include "Ai/Dungeon/DungeonClear/Data/HealLeashRegistry.h"
+
+TEST(DungeonClearHealRepositionTest, LeashOnlyOnKarazhan)
+{
+    EXPECT_GT(HealLeashRegistry::Radius(532), 0.0f);
+    // Corridor dungeons and raids keep the unleashed reposition.
+    EXPECT_EQ(HealLeashRegistry::Radius(585), 0.0f);  // Magisters' Terrace
+    EXPECT_EQ(HealLeashRegistry::Radius(469), 0.0f);  // Blackwing Lair
+    EXPECT_EQ(HealLeashRegistry::Radius(0), 0.0f);
+}
+
+TEST(DungeonClearHealRepositionTest, LeashKeepsHealerOffTheBanquetFloor)
+{
+    // Camp and healer positions from the run: the camp on the landing, and the
+    // floor spots the two healers aggroed from.
+    float const campX = -11012.0f, campY = -1964.2f;
+    float const r = HealLeashRegistry::Radius(532);
+    EXPECT_TRUE(HealLeashRegistry::WithinLeash(campX, campY, r, -11006.0f, -1960.0f));
+    EXPECT_FALSE(HealLeashRegistry::WithinLeash(campX, campY, r, -10975.0f, -1970.0f));  // Zuntun
+    EXPECT_FALSE(HealLeashRegistry::WithinLeash(campX, campY, r, -10983.0f, -1995.0f));  // Laihmora
+    // The nearest idle floor pack must sit well outside the leash.
+    EXPECT_FALSE(HealLeashRegistry::WithinLeash(campX, campY, r + 10.0f, -10972.7f, -1969.2f));
+}
+
+TEST(DungeonClearHealRepositionTest, ZeroRadiusIsUnleashed)
+{
+    EXPECT_TRUE(HealLeashRegistry::WithinLeash(0.0f, 0.0f, 0.0f, 500.0f, 500.0f));
+}

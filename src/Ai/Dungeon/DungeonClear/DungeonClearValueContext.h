@@ -10,11 +10,14 @@
 #include "Value.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonBossesValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearBlockingDoorValue.h"
+#include "Ai/Dungeon/DungeonClear/Value/DungeonClearDpsTargetValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearFarTargetsValue.h"
+#include "Ai/Dungeon/DungeonClear/Value/DungeonClearGroundHazardsValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearHazardsValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearLiveBossValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearLongPathValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearPartyTankValue.h"
+#include "Ai/Dungeon/DungeonClear/Value/DungeonClearTrapHazardsValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearPullModeCurrentValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearHealTargetValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearPartyMemberToHealValue.h"
@@ -45,9 +48,13 @@ public:
         creators[DcKey::FallbackTarget] = &DungeonClearValueContext::dungeon_clear_fallback_target;
         creators[DcKey::PartyTank] = &DungeonClearValueContext::dungeon_clear_party_tank;
         creators[DcKey::LongPath] = &DungeonClearValueContext::dungeon_clear_long_path;
+        creators[DcKey::GlideRecord] = &DungeonClearValueContext::dungeon_clear_glide_record;
         creators[DcKey::CurrentHop] = &DungeonClearValueContext::dungeon_clear_current_hop;
+        creators[DcKey::LastTickMs] = &DungeonClearValueContext::dungeon_clear_last_tick_ms;
         creators[DcKey::FarTargets] = &DungeonClearValueContext::dungeon_clear_far_targets;
         creators[DcKey::Hazards] = &DungeonClearValueContext::dungeon_clear_hazards;
+        creators[DcKey::GroundHazards] = &DungeonClearValueContext::dungeon_clear_ground_hazards;
+        creators[DcKey::TrapHazards] = &DungeonClearValueContext::dungeon_clear_trap_hazards;
         creators[DcKey::RoomTrashRemaining] = &DungeonClearValueContext::dungeon_clear_room_trash_remaining;
         creators[DcKey::BlockingDoor] = &DungeonClearValueContext::dungeon_clear_blocking_door;
         creators[DcKey::EngageTrashTarget] = &DungeonClearValueContext::dungeon_clear_engage_trash_target;
@@ -65,6 +72,14 @@ public:
         // name so it fronts it (last-wins merge; see the value's header). Diverts to
         // the DC escortee only while an escort is active; else returns stock verbatim.
         creators[DcKey::Stock::PartyToHeal] = &DungeonClearValueContext::dungeon_clear_party_member_to_heal;
+        // Decorators over the two stock DPS pickers, registered under the STOCK
+        // names for the same last-wins reason. They exist because both pickers
+        // return the raid-icon target BEFORE the target-exclusion pass runs, which
+        // pointed a whole raid at a boss it must not kill. Off a map with exclusion
+        // rows they return the stock answer verbatim. See the value's header.
+        creators[DcKey::Stock::DpsTarget] = &DungeonClearValueContext::dungeon_clear_dps_target;
+        creators[DcKey::Stock::DpsAoeTarget] = &DungeonClearValueContext::dungeon_clear_dps_aoe_target;
+        creators[DcKey::NoRti] = &DungeonClearValueContext::dungeon_clear_no_rti;
         creators[DcKey::PullSetting] = &DungeonClearValueContext::dungeon_clear_pull_setting;
         creators[DcKey::PullContext] = &DungeonClearValueContext::dungeon_clear_pull_context;
         creators[DcKey::ApproachState] = &DungeonClearValueContext::dungeon_clear_approach_state;
@@ -90,11 +105,18 @@ private:
     static UntypedValue* dungeon_clear_fallback_target(PlayerbotAI* ai) { return new DungeonClearFallbackTargetValue(ai); }
     static UntypedValue* dungeon_clear_party_tank(PlayerbotAI* ai) { return new DungeonClearPartyTankValue(ai); }
     static UntypedValue* dungeon_clear_long_path(PlayerbotAI* ai) { return new DungeonClearLongPathValue(ai); }
+    static UntypedValue* dungeon_clear_glide_record(PlayerbotAI* ai) { return new DungeonClearGlideRecordValue(ai); }
     static UntypedValue* dungeon_clear_current_hop(PlayerbotAI* ai) { return new DungeonClearCurrentHopValue(ai); }
+    static UntypedValue* dungeon_clear_last_tick_ms(PlayerbotAI* ai) { return new DungeonClearLastTickMsValue(ai); }
     static UntypedValue* dungeon_clear_far_targets(PlayerbotAI* ai) { return new DungeonClearFarTargetsValue(ai); }
     static UntypedValue* dungeon_clear_hazards(PlayerbotAI* ai) { return new DungeonClearHazardsValue(ai); }
+    static UntypedValue* dungeon_clear_ground_hazards(PlayerbotAI* ai) { return new DungeonClearGroundHazardsValue(ai); }
+    static UntypedValue* dungeon_clear_trap_hazards(PlayerbotAI* ai) { return new DungeonClearTrapHazardsValue(ai); }
     static UntypedValue* dungeon_clear_room_trash_remaining(PlayerbotAI* ai) { return new DungeonClearRoomTrashValue(ai); }
     static UntypedValue* dungeon_clear_blocking_door(PlayerbotAI* ai) { return new DungeonClearBlockingDoorValue(ai); }
+    static UntypedValue* dungeon_clear_dps_target(PlayerbotAI* ai) { return new DungeonClearDpsTargetValue(ai); }
+    static UntypedValue* dungeon_clear_dps_aoe_target(PlayerbotAI* ai) { return new DungeonClearDpsAoeTargetValue(ai); }
+    static UntypedValue* dungeon_clear_no_rti(PlayerbotAI* ai) { return new DungeonClearNoRtiValue(ai); }
     static UntypedValue* dungeon_clear_engage_trash_target(PlayerbotAI* ai) { return new DungeonClearEngageTrashTargetValue(ai); }
     static UntypedValue* dungeon_clear_follower_state(PlayerbotAI* ai) { return new DungeonClearFollowerStateValue(ai); }
     static UntypedValue* dungeon_clear_swim_state(PlayerbotAI* ai) { return new DungeonClearSwimStateValue(ai); }

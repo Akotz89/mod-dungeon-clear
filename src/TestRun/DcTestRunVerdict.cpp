@@ -13,10 +13,33 @@ namespace DcTestRun
         // already knows why it ended, and a timer firing on the same tick must
         // not overwrite a real success with a timeout.
         if (o.disableFired)
-            return o.disableAllCleared ? Verdict::Success : Verdict::FailDisabled;
+        {
+            if (o.disableAllCleared)
+                return Verdict::Success;
+            // A scenario whose objective was already met: whatever disabled
+            // the run afterwards happened in the event's tail.
+            return o.scenarioSuccess ? Verdict::Success : Verdict::FailDisabled;
+        }
+
+        // Scenario predicate held and its grace ran out without all-cleared.
+        if (o.scenarioSuccess && o.graceExpired)
+            return Verdict::Success;
 
         if (o.abortRequested || o.leaderMissing || !o.gmOnline)
             return Verdict::FailAborted;
+
+        // Inside a scenario's grace every watchdog below would be failing a run
+        // that has already met its objective — the grace exists for the tail,
+        // and a tail that goes wrong is still a success (successBy "predicate").
+        if (o.scenarioSuccess)
+        {
+            bool const tripped = (o.partyWiped && o.wipedForMs >= l.wipeGraceMs) ||
+                                 (o.paused && o.pausedForMs >= l.pauseGraceMs) ||
+                                 (o.stalled && o.stalledForMs >= l.stallGraceMs) ||
+                                 o.sinceProgressMs >= l.noProgressMs ||
+                                 o.elapsedMs >= l.overallTimeoutMs;
+            return tripped ? Verdict::Success : Verdict::Continue;
+        }
 
         // Above pause/stall/no-progress: a corpse party reads as paused, stalled
         // AND frozen all at once, and "wipe" is the only one of the four that
@@ -37,6 +60,19 @@ namespace DcTestRun
             return Verdict::FailOverallTimeout;
 
         return Verdict::Continue;
+    }
+
+    char const* SuccessBy(Observation const& o, Verdict v)
+    {
+        if (v != Verdict::Success)
+            return "";
+        if (o.disableFired && o.disableAllCleared)
+            return "allCleared";
+        if (o.scenarioSuccess && o.graceExpired)
+            return "grace";
+        if (o.scenarioSuccess)
+            return "predicate";
+        return "allCleared";
     }
 
     char const* VerdictName(Verdict v)

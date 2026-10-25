@@ -1,7 +1,8 @@
-/* Roster builder: browse real characters, fill five positional slots
- * (tank, heal, dps ×3 — the order is the worldserver contract), save named
- * rosters, launch. Refusal reasons (online, no instance budget, cross-
- * faction) are shown before the launch button can be pressed. */
+/* Roster builder: browse real characters, fill positional slots (tank, heal,
+ * then DPS — the order is the worldserver contract), save named rosters,
+ * launch. The classic party is five slots; raid rosters grow it with extra
+ * DPS slots up to 40 (raid-support Plan D). Refusal reasons (online, no
+ * instance budget, cross-faction) are shown before launch. */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -105,6 +106,12 @@ export default function RosterPage() {
       .catch(() => {});
   }, []);
 
+  /* Slot POSITION is the role: 0 tank, 1 heal, everything after DPS. The
+   * first five match ROSTER_SLOTS; grown slots are all "dps". */
+  const roleFor = (i: number) =>
+    i < ROSTER_SLOTS.length ? ROSTER_SLOTS[i] : "dps";
+  const MAX_SLOTS = 40;
+
   const picked = new Set(slots.filter(Boolean).map((c) => c!.name.toLowerCase()));
   const full = slots.every(Boolean);
   const partyFaction = slots.find(Boolean)?.faction;
@@ -197,9 +204,11 @@ export default function RosterPage() {
       /* Fall back to what is already on screen rather than refusing to load. */
     }
     const byName = new Map(pool.map((c) => [c.name.toLowerCase(), c]));
-    setSlots(
-      r.members.map((n) => byName.get(n.toLowerCase()) ?? null) as Slots,
-    );
+    const loaded = r.members.map(
+      (n) => byName.get(n.toLowerCase()) ?? null,
+    ) as Slots;
+    while (loaded.length < ROSTER_SLOTS.length) loaded.push(null);
+    setSlots(loaded);
     const missing = r.members.filter((n) => !byName.has(n.toLowerCase()));
     if (missing.length)
       toast(
@@ -221,7 +230,8 @@ export default function RosterPage() {
       <h1 className="text-2xl font-semibold">Roster</h1>
       <p className="mt-1 text-sm text-ink-400">
         Send a hand-picked party of real characters instead of pool bots. Slots
-        are positional: tank, healer, then three DPS.
+        are positional: tank, healer, then DPS — add slots past five for a
+        raid roster (up to 40).
       </p>
       {session?.authenticated && !session.admin && (
         <p className="mt-1 text-sm text-ink-500">
@@ -404,7 +414,7 @@ export default function RosterPage() {
           <Card>
             <CardTitle>Party</CardTitle>
             <div className="space-y-2">
-              {ROSTER_SLOTS.map((role, i) => (
+              {slots.map((_, i) => (
                 <div
                   key={i}
                   draggable={slots[i] !== null}
@@ -433,7 +443,7 @@ export default function RosterPage() {
                   }`}
                 >
                   <span className="w-12 text-xs font-semibold uppercase tracking-wide text-ink-500">
-                    {role}
+                    {roleFor(i)}
                   </span>
                   {slots[i] ? (
                     <>
@@ -452,8 +462,24 @@ export default function RosterPage() {
                       </span>
                       <button
                         onClick={() =>
-                          setSlots(slots.map((s, j) => (j === i ? null : s)))
+                          /* Clearing a GROWN slot removes the row; the classic
+                             five always stay so the party shape is visible. */
+                          i >= ROSTER_SLOTS.length
+                            ? setSlots(slots.filter((_, j) => j !== i))
+                            : setSlots(slots.map((s, j) => (j === i ? null : s)))
                         }
+                        className="text-ink-600 hover:text-red-300"
+                      >
+                        ✕
+                      </button>
+                    </>
+                  ) : i >= ROSTER_SLOTS.length ? (
+                    <>
+                      <span className="flex-1 px-2 text-sm text-ink-600">
+                        empty — draft from the left
+                      </span>
+                      <button
+                        onClick={() => setSlots(slots.filter((_, j) => j !== i))}
                         className="text-ink-600 hover:text-red-300"
                       >
                         ✕
@@ -466,6 +492,14 @@ export default function RosterPage() {
                   )}
                 </div>
               ))}
+              {slots.length < MAX_SLOTS && (
+                <button
+                  onClick={() => setSlots([...slots, null])}
+                  className="w-full rounded-xl border border-dashed border-ink-700 px-3 py-2 text-sm text-ink-500 transition hover:border-iris-500/50 hover:text-iris-300"
+                >
+                  + add DPS slot ({slots.length}/{MAX_SLOTS})
+                </button>
+              )}
               <p className="text-xs text-ink-600">
                 Drag a filled slot onto another to swap roles.
               </p>

@@ -1,0 +1,40 @@
+{
+  "about": "Tag-and-abandon: on the Magisters' Terrace Kael'thas approach (tr-20260804-153254-2), a party flickering ready/not-ready let TryBetweenPullsRest launch a fresh 35-38yd escort window on every debounce tick while the blocking-trash rung stood down on the same gate. The tank covered 97yd inside a 'waiting on Toogo' yield and walked through the Sunblade Mage Guard pack (96772/96794) it had voted LEEROY on at 20.1yd. The pack then held the party in combat from behind. The scenario starts the party at the logged y=14.8, on the tank's line, 25yd short of the pack. From the Leeroy verdict on, it roots the hunter three times so the party spread trips PartyMaxSpread (tightened to 10), which reproduces the readiness flicker. Fixed in 96ca4211 (S1513): the debounce rides out only a glide already in flight.",
+  "schema": 1,
+  "geometry": {
+    "map": 585,
+    "dungeon": "mgt",
+    "heroic": false,
+    "region": { "center": [160.1, 40.2, -19.9], "radius": 60.0 },
+    "objective": 24664,
+    "objectiveName": "Kael'thas Sunstrider"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [96772, 96794]
+      }
+    }
+  },
+  "party": {
+    "comp": "warrior-prot,priest-holy,mage-frost,rogue-combat,hunter-mm",
+    "level": 70,
+    "start": [159.0, 14.8, -21.4, 1.528],
+    "react": "fast",
+    "seedTarget": false
+  },
+  "settings": {
+    "PullSetting": 2,
+    "PartyMaxSpread": 10
+  },
+  "injections": [
+    { "when": { "event": "verdict:Leeroy" }, "do": { "root": "slot:4", "durationMs": 1500 }, "sweep": true },
+    { "when": { "event": "verdict:Leeroy", "delayMs": 3000 }, "do": { "root": "slot:4", "durationMs": 1500 } },
+    { "when": { "event": "verdict:Leeroy", "delayMs": 6000 }, "do": { "root": "slot:4", "durationMs": 1500 } }
+  ],
+  "goal": { "kill": "pack:target", "timeoutS": 90 },
+  "expect": {
+    "oracles": { "O1": "pass", "O5": "pass", "O6": "pass", "O10": "pass" },
+    "knownFailure": "fixed:96ca4211"
+  }
+}

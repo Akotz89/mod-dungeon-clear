@@ -1,0 +1,48 @@
+{
+  "about": "Stale combat holder behind the route. In tr-20260804-153254-2 (reproduced in tr-20260804-032756-89), Sunblade Mage Guard 96772 tagged the party, stopped, and held two members combat-flagged from 68-69yd BEHIND them at 100% HP. Instanced mobs never leash. The blocking-trash scan only looks forward, and the phantom-combat hatch stood down because a reachable holder read as legitimate. The tank shuttled y=83<->112 for 8 minutes. The scenario starts the party at the logged freeze point (148.5, 112.1, -16.3), which is 73yd from the holder, and keeps that real distance on purpose. It aggroes the guard onto a DPS and roots it so it never closes. Fixed in 96ca4211 (S1513): a holder only counts as prosecuting the fight if it is inside DC_ENGAGE_RANGE or closing, so the hatch clears the stale flag (StuckCombatTimeout tightened to 5s). The goal is not required, because the fixed behaviour drops the flag rather than walking back to kill the guard.",
+  "schema": 1,
+  "geometry": {
+    "map": 585,
+    "dungeon": "mgt",
+    "heroic": false,
+    "region": { "center": [154.0, 76.0, -18.0], "radius": 70.0 },
+    "objective": 24664,
+    "objectiveName": "Kael'thas Sunstrider"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [96772]
+      }
+    }
+  },
+  "party": {
+    "comp": "warrior-prot,priest-holy,mage-frost,rogue-combat,hunter-mm",
+    "level": 70,
+    "start": [148.5, 112.1, -16.3, -1.411],
+    "react": "fast",
+    "seedTarget": false
+  },
+  "settings": {
+    "PullSetting": 2,
+    "StuckCombatTimeout": 5
+  },
+  "injections": [
+    { "when": { "atMs": 1500 }, "do": { "aggro": "pack:target", "on": "dps" } },
+    // Sunblade Mage Guard is root/stun immune (CreatureImmunitiesId -233), so the
+    // default Frost Nova root never held and the guard walked up to the party in
+    // both runs of lb-20261003-155828-1. 42716 Self Root Forever carries no
+    // mechanic and so bypasses the immunity.
+    { "when": { "atMs": 1700 }, "do": { "root": "pack:target", "spell": 42716, "durationMs": 120000 } }
+  ],
+  "goal": { "kill": "pack:target", "timeoutS": 60 },
+  "expect": {
+    "oracles": {
+      "O1": { "unattendedS": 10, "expect": "pass" },
+      "O5": "pass",
+      "O6": "pass",
+      "O10": { "requireGoal": false, "expect": "pass" }
+    },
+    "knownFailure": "fixed:96ca4211"
+  }
+}

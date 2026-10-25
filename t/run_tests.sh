@@ -25,9 +25,14 @@ cmake --build build --target dungeon_clear_tests -j$(nproc)
 # Run the DungeonClear test cases. The binary is the module's standalone suite,
 # so this covers the DungeonClear* fixtures plus the Dc* suites (the approach
 # regressions and the replay harness round-trip/fixture runner).
+#
+# Per-dungeon suites are named after their dungeon and so match NONE of those
+# patterns — they have to be listed by name or they are silently skipped. The
+# route probes among them skip themselves unless DC_PROBE_MMAPS names a dir with
+# mmaps/ for the map, so listing one costs nothing when the navmesh is absent.
 echo "Running unit tests..."
 cd "${BUILD_DIR}"
-./dungeon_clear_tests --gtest_filter='*DungeonClear*:Dc*:RoomAggro*:BossRoster*:DungeonEvent*:EventBuilder*'
+./dungeon_clear_tests --gtest_filter='*DungeonClear*:Dc*:RoomAggro*:BossRoster*:DungeonEvent*:EventBuilder*:CullingOfStratholme*:TrialOfTheChampion*:Oculus*:BlackMorassRouteProbe*'
 
 echo "----------------------------------------------------------"
 echo "Tests completed successfully!"

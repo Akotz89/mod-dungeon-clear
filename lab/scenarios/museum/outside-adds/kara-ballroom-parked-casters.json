@@ -1,0 +1,41 @@
+{
+  "about": "Outside adds from parked range-mode casters (tr-20260926-151320-21): the ballroom Phantom Attendant pull (16406, here 135134-135137 + Retainer 135286 + the Servant 135163 whose path circles them) was predicted 15 and observed 36. The extra packs were Phantom Guest flank clusters 25-45yd from camp. SmartAI range mode parks every Guest at ~25yd, and each in-combat creature re-calls assistance every 3s within 10yd, so a parked caster keeps recruiting its idle neighbours and they park too. The Guest clusters SW/S of the Attendants and the east Valet are kept as flank packs. The west cluster (pulled earlier in that run) is hidden, so the start is the real ramp-top tank position from tr-20261001-155033-49. A/B candidate: feat/caster-chain-pulls (534fefc5 DcLosFight tether + PredictRangedMode, f7e4b59e), unmerged; on that branch O7/O1 should turn U. Memory: dc-parked-casters-recruit-via-assistance.",
+  "schema": 1,
+  "geometry": {
+    "map": 532,
+    "dungeon": "kara",
+    "heroic": false,
+    "region": { "center": [-10965.0, -1975.0, 80.1], "radius": 60.0 },
+    "objective": 15687,
+    "objectiveName": "Moroes"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [135134, 135135, 135136, 135137, 135286, 135163],
+        "guests-south": [135271, 135272, 135273, 135274, 135275, 135276, 135277, 135278],
+        "guests-sw": [135179, 135180, 135181, 135182, 135183, 135184, 135185, 135186],
+        "valet-east": [135170]
+      }
+    }
+  },
+  "party": {
+    "comp": "druid-bear,paladin-prot,priest-disc,shaman-resto,warlock-affli,mage-fire,warrior-arms,rogue-as,hunter-surv,warlock-destro",
+    "level": 70,
+    "start": [-10989.7, -1962.9, 80.6, -0.164],
+    "react": "fast",
+    "seedTarget": true
+  },
+  "settings": {
+    "PullSetting": 2
+  },
+  "goal": { "kill": "pack:target", "timeoutS": 120 },
+  "expect": {
+    "oracles": {
+      "O7": { "outsideMax": 0, "expect": "fail" },
+      "O1": "fail",
+      "O10": "fail"
+    },
+    "knownFailure": "open:tr-20260926-151320-21 Attendant pull pred 15 obs 36 (A/B feat/caster-chain-pulls)"
+  }
+}

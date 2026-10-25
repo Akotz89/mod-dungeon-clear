@@ -1,0 +1,40 @@
+{
+  "about": "Human players: the puppet (rogue, slot 2) runs past the tank into the Utgarde Keep Ironhelm pair (126047/126048, the uk-leeroy calibration pack) 500ms after the tank commits a forced-Advanced pull, and fights there. A human pull in front of the camp should become the tank's fight. The tank leaves the camp plan and owns the mobs on the human (O1), and the bots do not leave the human fighting alone (O9). Expected failure from code, never run with a human: DcLeaderSignal.cpp AnyGroupMemberInCombat excludes the human leader, so the human's fight arms no party assist. Start = the instance entrance (areatrigger 4745 target), 62yd from 126047. lb-20261003-155828-1 run 1 was a false unexpected-pass: staged at Marrah's spawn spot 34yd from the pair, the Ironhelms aggroed the DK tank at 29yd on its first step (Idle>Returning, no Forming), so no commit event fired and the puppet's runAhead never ran.",
+  "schema": 1,
+  "geometry": {
+    "map": 574,
+    "dungeon": "uk",
+    "heroic": false,
+    "region": { "center": [200.0, -70.0, 20.0], "radius": 60.0 },
+    "objective": 24201,
+    "objectiveName": "Skarvold & Dalronn"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [126047, 126048]
+      }
+    }
+  },
+  "party": {
+    "comp": "deathknight-blood,shaman-resto,rogue-combat,warlock-demo,mage-fire",
+    "level": 70,
+    "start": [153.79, -86.55, 12.55, 0.304],
+    "react": "fast",
+    "seedTarget": true,
+    "human": { "slot": 2, "script": "humans/runs-ahead-of-tank" }
+  },
+  "settings": {
+    "PullSetting": 2,
+    "PullForceAdvanced": 1
+  },
+  "goal": { "kill": "pack:target", "timeoutS": 90 },
+  "expect": {
+    "oracles": {
+      "O9": "fail",
+      "O1": "fail",
+      "O10": "fail"
+    },
+    "knownFailure": "open:DcLeaderSignal.cpp AnyGroupMemberInCombat never counts the human (pull-lab plan s3 human-runs-ahead-of-tank)"
+  }
+}

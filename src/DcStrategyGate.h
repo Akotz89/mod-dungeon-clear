@@ -63,7 +63,7 @@ namespace DcStrategyGate
     // STRATEGY_TYPE_NONCOMBAT, "dungeon clear combat" is STRATEGY_TYPE_COMBAT),
     // but nothing enforces that: both live in Ctx::sharedStrategyContexts, which
     // both engines consult, so `co +dungeon clear` (or the same name pasted into
-    // AiPlayerbot.CombatStrategies) instantiates the non-combat strategy inside
+    // Playerbots.CombatStrategies) instantiates the non-combat strategy inside
     // the COMBAT engine. That is never correct, in a dungeon or out of one, and
     // it is not a state this module can produce on its own.
     //
@@ -115,6 +115,13 @@ namespace DcStrategyGate
     // tick (login/map-change hooks and the world OnUpdate all qualify) — never
     // from a DC trigger/action.
     void Reconcile(Player* bot);
+
+    // One-shot consumable defaults applied when a bot enters (or logs in on) a
+    // dungeon/raid map: `food` everywhere, `worldbuff` in raids. Install-only and
+    // deliberately NOT part of Reconcile() — the sweep would otherwise undo any
+    // manual `nc -food` / `nc -worldbuff` within one interval. Call only from the
+    // login / map-changed hooks.
+    void ApplyEntryDefaults(Player* bot);
 
     // Re-assert the invariant for every online bot. Cheap per bot; call on a
     // throttled cadence from the world tick. This is the correctness net for the

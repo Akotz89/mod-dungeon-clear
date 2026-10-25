@@ -7,12 +7,15 @@
 #define _PLAYERBOT_DCREZRECOVERY_H
 
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "ObjectGuid.h"
 
 #include "Ai/Dungeon/DungeonClear/Util/DcRezDecision.h"
 
 class Player;
+class SpellInfo;
 
 // Engine glue for post-combat party resurrection (see DcRezDecision.h for the
 // kernel semantics). This is the only place the feature touches game objects:
@@ -35,6 +38,16 @@ namespace DcRezRecovery
     // DungeonClear.PostCombatRez, per-run override -> conf -> default.
     bool Enabled(Player* bot);
 
+    // A non-passive resurrect spell (SPELL_EFFECT_RESURRECT / _RESURRECT_NEW)
+    // that `p` knows and that is off cooldown right now, or nullptr. The
+    // rezzer test for classes beyond the ten stock ones: servers with custom
+    // classes give those classes their own resurrects, which a class switch
+    // cannot know. Prefers a spell with no recovery time over a cooldown-gated
+    // battle rez. The spellbook scan is cached per player for 60s (it is read
+    // for every member on every evaluation); the cooldown is checked live on
+    // every call.
+    SpellInfo const* KnownResurrectSpell(Player const* p);
+
     // The kernel verdict resolved to live identities. rezzer/target are only
     // meaningful for Hold outcomes; deadName always names the first same-map
     // corpse (for disable messages).
@@ -46,7 +59,16 @@ namespace DcRezRecovery
         std::string rezzerName;
         std::string targetName;
         std::string deadName = "Someone";
+        // Parallel pairing, resolved to GUIDs (see DcRezDecision::Result::pairs).
+        // Consumed on RAID runs only — each paired rezzer walks to its own
+        // corpse; 5-mans keep the single rezzer/target above.
+        std::vector<std::pair<ObjectGuid, ObjectGuid>> pairs;
     };
+
+    // The corpse `bot` is assigned to raise under `plan`, or Empty when it is
+    // not an elected rezzer. Honors the map scoping above: the single election
+    // everywhere, plus the parallel pairs on a raid map.
+    ObjectGuid PairedTargetFor(Plan const& plan, Player* bot);
 
     // Evaluate recovery for `bot`'s run. Callable by ANY member every tick
     // (leader and followers compute the same deterministic answer); maintains
@@ -87,6 +109,14 @@ namespace DcRezRecovery
     // recovery clock or fire an announcement. Cheap-early-outs on class before
     // it evaluates anything, because only a living rez class is ever elected.
     bool IsElectedRezzer(Player* bot);
+
+    // RAID full-wipe recovery: revive every same-map BOT member at the
+    // instance entrance (dungeon-catalogue coords), drop the lost fight's
+    // combat/threat/targets, reset the owner's approach cursors, and leave the
+    // run ENABLED to continue from the entrance. Humans are never revived or
+    // relocated. False when no entrance row exists for the map (the caller
+    // falls back to the classic disable).
+    bool RegroupAtEntrance(Player* bot);
 
     // "Neko is coming to resurrect Bib." / "Waiting for you to resurrect
     // Bib." — one status-panel sentence for the current recovery, empty when

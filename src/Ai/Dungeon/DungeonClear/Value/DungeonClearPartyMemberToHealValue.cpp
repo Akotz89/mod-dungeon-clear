@@ -9,6 +9,7 @@
 #include "Playerbots.h"
 
 #include "Ai/Dungeon/DungeonClear/Util/DcLeaderSignal.h"
+#include "Util/DcPlayerbotsConfig.h"
 
 Unit* DungeonClearPartyMemberToHealValue::Calculate()
 {
@@ -25,7 +26,7 @@ Unit* DungeonClearPartyMemberToHealValue::Calculate()
     // heal-candidate radius (healDistance * 2) and in line of sight. A target the
     // healer cannot actually cast on must never be surfaced (the reposition mover
     // — DungeonClearHealTargetValue — walks the healer back into range/LOS).
-    if (bot->GetDistance2d(escortee) >= sPlayerbotAIConfig.healDistance * 2.0f ||
+    if (bot->GetDistance2d(escortee) >= DC_PB_CONFIG(HealDistance, healDistance) * 2.0f ||
         !bot->IsWithinLOSInMap(escortee))
         return stock;
 

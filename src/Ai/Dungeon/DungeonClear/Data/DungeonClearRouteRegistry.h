@@ -20,10 +20,13 @@
 // shares the geometry, and routes are authored under normal); a full miss
 // simply means anchor-free chunking is used for that boss.
 //
-// Registration mirrors the other DungeonClear data registries: each dungeon
-// drops a self-contained `Overrides/Routes/<DungeonName>Route.cpp` file that
-// constructs a static `Register` instance whose constructor calls Register().
-// Adding or removing a route never edits any existing file.
+// Registration mirrors the other DungeonClear data registries: the dungeon's
+// route lives with the rest of its clear data in Data/Events/<Dungeon>Events.cpp
+// as a Register<Dungeon>Route() appender, declared in DungeonEventTables.h and
+// called from SeedAuthoredRoutes() in the .cpp. The call is EXPLICIT on purpose
+// — a self-registering static in a TU nothing references is stripped from the
+// module static lib, taking its route with it. Adding a route is one appender
+// plus one line in the seed.
 class DungeonClearRouteRegistry
 {
 public:

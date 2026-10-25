@@ -1,0 +1,38 @@
+{
+  "about": "Party stands (assist dead band): a 6-mob Shattered Halls pack with three Sharpshooters pulled by LOS-break around a corner (snapshot tr-20260922-192712-28#6, a real LOS pull). The camp-assist trigger stood down on a bare 28.5yd GetRange(\"spell\") test while the action and stock reach spell use spellRange + combat reach (~31.7yd), so a ranged follower parked in that band was driven by nobody (issue #18 reporter trace: both casters pinned at 29-31yd). Fixed on master by 3d85fa94 (same patch as the unmerged fix/assist-trigger-range-deadband b7cc196d). The party starts 15yd up the corridor from the real tank spot.",
+  "schema": 1,
+  "source": { "snapshot": "tr-20260922-192712-28#6" },
+  "geometry": {
+    "map": 540,
+    "dungeon": "shattered-halls",
+    "heroic": false,
+    "region": { "center": [69.1, 210.0, -13.2], "radius": 60.0 },
+    "objective": 16807,
+    "objectiveName": "Grand Warlock Nethekurse"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [151029, 151030, 151031, 151032, 151033, 151034],
+        "near": [151035, 151042]
+      }
+    }
+  },
+  "party": {
+    "comp": "warrior-prot,priest-disc,mage-fire,warlock-affli,hunter-mm",
+    "level": 70,
+    "start": [70.5, 181.3, -13.2, 1.583],
+    "react": "fast",
+    "seedTarget": true
+  },
+  "settings": {
+    "PullSetting": 2,
+    "PullForceAdvanced": 1,
+    "PullRangedLosBreak": 1
+  },
+  "goal": { "kill": "pack:target", "timeoutS": 120 },
+  "expect": {
+    "oracles": { "O1": "pass", "O4": "pass", "O5": "pass" },
+    "knownFailure": "fixed:3d85fa94"
+  }
+}

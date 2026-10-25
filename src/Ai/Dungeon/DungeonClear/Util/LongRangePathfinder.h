@@ -69,12 +69,15 @@ public:
     // WORKER-SAFE. Pure navmesh A* + smoothing against `mesh`, from
     // (sx,sy,sz) to (tx,ty,tz). `mapId` selects the route-cost discouragements
     // (any DcNavPenaltyRegistry no-go volumes on that map); it reads only the
-    // registry table, no live game state. `mesh` must be kept
+    // registry table, no live game state. `runWing` (DcRunWing::FenceWing,
+    // resolved on the map thread and passed by value) arms the wing-tagged rows
+    // that keep the run out of the other wing of a split map. `mesh` must be kept
     // alive by the caller for the duration of the call (hold its shared_ptr). No
     // Player*/Map*/VMAP access — must not, and cannot, touch live game state.
     static RawResult BuildCoreFromMesh(dtNavMesh const* mesh, uint32 mapId,
                                        float sx, float sy, float sz,
-                                       float tx, float ty, float tz);
+                                       float tx, float ty, float tz,
+                                       std::string const& runWing = {});
 
     // MAP-THREAD ONLY. Turns a RawResult into the final route: refines each
     // point's Z (Player::UpdateAllowedPositionZ), centers the corridor off

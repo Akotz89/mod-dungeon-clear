@@ -12,6 +12,8 @@
 
 #include "gtest/gtest.h"
 
+#include <cmath>
+
 #include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
 
 namespace
@@ -197,4 +199,149 @@ TEST(DcHopDirectionTest, HeadingRotatesWithTheRoute)
     EXPECT_TRUE(Behind(0.0f, -10.0f, 0.0f, 1.0f));   // route heads +Y
     EXPECT_FALSE(Behind(0.0f, 10.0f, 0.0f, 1.0f));
     EXPECT_TRUE(Behind(7.0f, 7.0f, -1.0f, -1.0f));   // route heads -X-Y
+}
+
+// ===========================================================================
+// Ramp arrival: PointIsReached / PointIsVerticallyStranded — the pure core of
+// NextHop's cursor-advance test.
+//
+// The bug they close (tr-20260818-073620-14, Blackrock Spire, the ramp below
+// Overlord Wyrmthalak): the arrival test was a single 3D radius of 3.0yd.
+// Recast rasterizes an incline into discrete plateaus, so a route point on a
+// ramp floats above the collision floor the bot actually stands on — measured
+// at 3.1yd there (navmesh Z 78.74 at (-55,-366), real floor Z 75.6). The bot
+// walked to the point in plan view, arrived directly underneath it, and read
+// 3.1 > 3.0: the cursor could never advance. The tank paced a 5yd box for nine
+// minutes while posStuck -> resnap -> rebuild -> re-anchor -> off-line rejoin
+// cycled 444 times.
+//
+// Splitting the axes makes a ramp arrival decidable: horizontal answers "am I
+// there", vertical only rejects a point on another storey.
+// ===========================================================================
+
+namespace
+{
+    bool Reached(float botZ, G3D::Vector3 const& p, float botX = 0.0f, float botY = 0.0f)
+    {
+        return DungeonPathFollower::PointIsReached(botX, botY, botZ, p);
+    }
+
+    bool Stranded(float botZ, G3D::Vector3 const& p, float botX = 0.0f, float botY = 0.0f)
+    {
+        return DungeonPathFollower::PointIsVerticallyStranded(botX, botY, botZ, p);
+    }
+}
+
+// The exact live geometry. Bot on the ramp floor at Z 75.6, route point on the
+// navmesh plateau 3.1yd above it and 0.4yd away in plan view. Under the old 3D
+// radius this read 3.13yd — unreached, forever.
+TEST(DcRampArrivalTest, StandingUnderARampPointCountsAsReached)
+{
+    G3D::Vector3 const navPoint(0.4f, 0.0f, 78.7f);
+    EXPECT_TRUE(Reached(75.6f, navPoint));
+    EXPECT_FALSE(Stranded(75.6f, navPoint));
+
+    // Pin the regression itself: the old 3D test rejected this point.
+    float const dx = 0.4f, dz = 78.7f - 75.6f;
+    EXPECT_GT(std::sqrt(dx * dx + dz * dz), DungeonPathFollower::POINT_REACHED);
+}
+
+// Horizontal distance still governs arrival — a point down the corridor is not
+// reached just because it is level with the bot.
+TEST(DcRampArrivalTest, HorizontalDistanceStillGovernsArrival)
+{
+    EXPECT_FALSE(Reached(70.0f, G3D::Vector3(0.0f, 0.0f, 70.0f), /*botX*/ 8.0f));
+    EXPECT_TRUE(Reached(70.0f, G3D::Vector3(0.0f, 0.0f, 70.0f), /*botX*/ 2.0f));
+    // Exactly on the horizontal limit counts as reached (closed interval).
+    EXPECT_TRUE(Reached(70.0f, G3D::Vector3(0.0f, 0.0f, 70.0f),
+                        /*botX*/ DungeonPathFollower::POINT_REACHED));
+}
+
+// The guard the vertical band exists for: a point on another storey directly
+// overhead must NOT be swallowed as "reached".
+TEST(DcRampArrivalTest, PointOnAnotherStoreyIsNotReached)
+{
+    G3D::Vector3 const upstairs(1.0f, 0.0f, 70.0f + 12.0f);
+    EXPECT_FALSE(Reached(70.0f, upstairs));
+    EXPECT_TRUE(Stranded(70.0f, upstairs));   // and it is named as stranded
+}
+
+// Stranded is strictly the "arrived in plan view but off the floor" case — a
+// point the bot simply has not walked to yet is never stranded, however far
+// below/above it sits.
+TEST(DcRampArrivalTest, DistantPointIsNeverStranded)
+{
+    EXPECT_FALSE(Stranded(70.0f, G3D::Vector3(0.0f, 0.0f, 90.0f), /*botX*/ 20.0f));
+    EXPECT_FALSE(Reached(70.0f, G3D::Vector3(0.0f, 0.0f, 90.0f), /*botX*/ 20.0f));
+}
+
+// Reached and Stranded partition the plan-view-arrived case: exactly one holds.
+TEST(DcRampArrivalTest, ReachedAndStrandedArePartitionedWhenArrivedInPlanView)
+{
+    for (float dz = 0.0f; dz <= 14.0f; dz += 0.5f)
+    {
+        G3D::Vector3 const p(1.0f, 0.0f, 70.0f + dz);
+        EXPECT_NE(Reached(70.0f, p), Stranded(70.0f, p)) << "dz=" << dz;
+    }
+}
+
+// A ramp's whole plateau band must be walkable, not just the one live sample:
+// every float up to the vertical tolerance resolves as reached.
+TEST(DcRampArrivalTest, WholeNavmeshFloatBandIsReachable)
+{
+    for (float dz = 0.0f; dz <= DungeonPathFollower::POINT_REACHED_Z; dz += 0.25f)
+    {
+        EXPECT_TRUE(Reached(70.0f, G3D::Vector3(1.0f, 0.0f, 70.0f + dz))) << "above dz=" << dz;
+        EXPECT_TRUE(Reached(70.0f, G3D::Vector3(1.0f, 0.0f, 70.0f - dz))) << "below dz=" << dz;
+    }
+}
+
+// --- the opening-leg screen --------------------------------------------------
+//
+// window[0] is the bot's live position and window[1] the cursor point, so the
+// first segment is a straight line the route never vouched for. DropOpeningLeg
+// is that screen's whole policy: which ticks pay for a probe, and what condemns
+// a leg once probed.
+
+// The band gate. On the corridor the opening leg runs ALONG the route, so no
+// probe runs and nothing is dropped — this is the hot path.
+TEST(DcSplineWindowTest, OpeningLegIsNotScreenedOnTheCorridor)
+{
+    EXPECT_FALSE(DungeonPathFollower::DropOpeningLeg(10, /*deviation*/ 1.0f,
+                                                     /*releaseBand*/ 3.0f, true, true));
+    // Even a leg that WOULD fail both probes is left alone inside the band: the
+    // caller never probes there, so these flags are the caller's defaults.
+    EXPECT_FALSE(DungeonPathFollower::DropOpeningLeg(10, 3.0f, 3.0f, false, false));
+}
+
+// A chord through a WALL. This is the case the screen originally shipped for —
+// BWL tr-20260830-115416-5, the anchor 16->18 hairpin, five seconds inside rock.
+TEST(DcSplineWindowTest, OpeningLegBlockedByGeometryIsDropped)
+{
+    EXPECT_TRUE(DungeonPathFollower::DropOpeningLeg(10, /*deviation*/ 7.2f, 3.0f,
+                                                    /*losClear*/ false, /*onMesh*/ false));
+}
+
+// THE REGRESSION. A chord over an open VOID: nothing is built across a hole, so
+// the VMAP sightline is perfectly clean and only the navmesh probe objects.
+// Before LegIsOnMesh this combination screened as safe and the window survived —
+// Gundrak tr-20260831-174013-100, 202yd walked for 0.98yd of net progress.
+TEST(DcSplineWindowTest, OpeningLegOverAVoidIsDroppedDespiteCleanLos)
+{
+    EXPECT_TRUE(DungeonPathFollower::DropOpeningLeg(10, /*deviation*/ 7.23f, 3.0f,
+                                                    /*losClear*/ true, /*onMesh*/ false));
+}
+
+// Both probes clean, off the corridor: a legitimate rejoin chord. Keep it.
+TEST(DcSplineWindowTest, OpeningLegThatIsWalkableAndClearSurvives)
+{
+    EXPECT_FALSE(DungeonPathFollower::DropOpeningLeg(10, 7.23f, 3.0f, true, true));
+}
+
+// A sub-2-point window has no opening leg to screen; the caller already falls
+// back to per-point movement, and reading window[1] there would be out of range.
+TEST(DcSplineWindowTest, OpeningLegScreenIgnoresADegenerateWindow)
+{
+    EXPECT_FALSE(DungeonPathFollower::DropOpeningLeg(0, 50.0f, 3.0f, false, false));
+    EXPECT_FALSE(DungeonPathFollower::DropOpeningLeg(1, 50.0f, 3.0f, false, false));
 }

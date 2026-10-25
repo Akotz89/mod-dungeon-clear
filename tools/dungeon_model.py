@@ -31,6 +31,9 @@ Examples:
   # room-trash 'sphere=' and skirt 'r=' log lines for the run you are debugging).
   python3 tools/dungeon_model.py --map 109 --around 5710 --boss --aggro 27 --pad 6
 
+  # Just the spawn layout: same boss room, no rings drawn over the packs.
+  python3 tools/dungeon_model.py --map 109 --around 5710 --boss --no-rings
+
 DB defaults match the other tools (mysql CLI: 127.0.0.1 / acore / acore /
 acore_world); override with --host/--user/--pass/--db.
 
@@ -295,6 +298,9 @@ def main():
     ap.add_argument("--room", type=float, default=90.0,
                     help="RoomAggroRegistry room radius (default 90)")
     ap.add_argument("--rings", help="extra comma rings to draw, e.g. '15,40'")
+    ap.add_argument("--no-rings", action="store_true",
+                    help="don't draw any rings on the map (the --boss dead-band "
+                         "report is still printed)")
     ap.add_argument("--gos", action="store_true", help="include gameobjects (+)")
     ap.add_argument("--all-factions", action="store_true",
                     help="keep friendly/neutral filler factions too")
@@ -352,6 +358,8 @@ def main():
         rings = [args.aggro, args.aggro + args.pad, args.room]
     if args.rings:
         rings += [float(v) for v in args.rings.split(",")]
+    if args.no_rings:
+        rings = []
 
     packs = label_packs(cluster(region, args.eps, args.ztol), center)
 
@@ -406,7 +414,8 @@ def main():
             print(f"  ✓ no spawns in the {excl:.0f}-{skirt:.0f}yd dead band.")
 
     print()
-    print("  legend: @ centre/boss   a..z trash pack   + gameobject   . ring")
+    print("  legend: @ centre/boss   a..z trash pack   + gameobject"
+          + ("   . ring" if rings else ""))
 
 
 if __name__ == "__main__":

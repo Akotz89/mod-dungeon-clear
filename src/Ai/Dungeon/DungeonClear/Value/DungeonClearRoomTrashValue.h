@@ -7,6 +7,7 @@
 #define _PLAYERBOT_DUNGEONCLEARROOMTRASHVALUE_H
 
 #include "Value.h"
+#include "Ai/Dungeon/DungeonClear/Util/DungeonClearMath.h"
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 class PlayerbotAI;
@@ -41,8 +42,7 @@ private:
     // No-progress give-up bookkeeping (see Calculate). bossEntry detects a boss
     // change so the latch self-resets across bosses/runs without external wiring.
     uint32 trackedBoss = 0;
-    uint32 lastRemaining = 0;
-    uint32 lastProgressMs = 0;
+    DungeonClearMath::RoomClearClock clock;
     bool   gaveUp = false;
     bool   noteSent = false;
     // Last kept-count we emitted the exclusion-breakdown diagnostic for; the log

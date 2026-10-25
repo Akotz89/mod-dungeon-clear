@@ -85,6 +85,50 @@ struct RoomAggroBoss
     // so the camp must stand well clear of her (skirtRadius 40) or killing Pack B in
     // her wake wakes the boss. 0 => use the computed sphere alone (every other row).
     float  skirtRadius{0.0f};
+
+    // Optional absolute world-XY box every advanced-pull camp must stand inside
+    // while this boss's room is being pre-cleared. The skirt pushes the camp away
+    // from the boss, and the drag walks it back along the trail, i.e. out of the
+    // door the tank came in by. For a boss whose script evades when an add leaves
+    // the room, or whose room door opens onto other packs, that walk must stop
+    // short of the room's edge. Moroes is the case: his guests must stay at
+    // x >= -11028, y >= -1955, and the south door leads to the Phantom
+    // Attendants' corridor (tr-20260926-174359-2). hasCampBox == false (every
+    // other row) leaves camp placement unbounded.
+    bool   hasCampBox{false};
+    float  campMinX{0.0f};
+    float  campMaxX{0.0f};
+    float  campMinY{0.0f};
+    float  campMaxY{0.0f};
+
+    // Optional: room trash on another level counts whenever ANY route reaches it,
+    // however long. The default reach filter (DcEngageGeometry::IsLevelReachable)
+    // also drops an off-level mob whose route is a long detour against the straight
+    // line — right for a gallery the boss's pull never touches, wrong for a boss
+    // whose engage wakes the whole room. Emperor Dagran Thaurissan is the case: two
+    // side balconies 7yd above the throne-room floor hold 21 Senators, Ambassadors,
+    // Dragoons and Captains, reached by ramps at mid-room. From under a balcony the
+    // route is ~75yd against ~20yd straight, so the filter dropped whichever balcony
+    // the tank stood beneath (the room-trash "reach=" count swung 0..11 as it moved),
+    // and his CallForHelp(VISIBLE_RANGE) brought every survivor into the boss fight
+    // (tr-20261018-230400-9: all 21 on one member, four dead). Set, the off-level
+    // packs are also pulled LAST (DungeonClearMath::RoomTrashPickDistance), so the
+    // floor around a ramp is clear before the tank climbs it. false (every other
+    // row) keeps the detour filter.
+    bool   detourReachable{false};
+
+    // Optional (yd): room trash standing within this distance of the boss is pulled
+    // LAST, behind every other pack, off-level and lane-refused ones included
+    // (DungeonClearMath::RoomTrashPickDistance, PickRoomTrashIndex). For a boss whose wake brings the
+    // whole room, the packs flanking him are the pulls most likely to wake him —
+    // their lanes run at him and their fights carry onto his steps — so the rest of
+    // the room must already be dead when they go. Emperor Dagran Thaurissan is the
+    // case: the floor beside the throne 18-30yd out (an Ambassador at 29.9yd, a
+    // Senator at 28.6yd, the planted Dragoon between) sorted ahead of both balconies
+    // under the off-level-last order, and every one of eight wipes in
+    // sk-20261019-003633 was a wake there with 16-21 balcony mobs still alive to
+    // answer his CallForHelp. 0 (every other row) = no boss-side ordering.
+    float  bossSideLastRadius{0.0f};
 };
 
 class RoomAggroRegistry
@@ -108,6 +152,11 @@ public:
     // boss has no Y band (then every Y qualifies). Mirrors the script's own
     // ROOM_EXIT < Y < ROOM_ENTERANCE guard. Pure — unit-testable.
     static bool InRoomBand(RoomAggroBoss const& boss, float worldY);
+
+    // True when (worldX, worldY) is inside the boss's camp box, or the boss has
+    // no camp box (then every point qualifies). Inclusive bounds. Pure —
+    // unit-testable.
+    static bool InCampBox(RoomAggroBoss const& boss, float worldX, float worldY);
 
     // Pure geometric membership predicate for one candidate creature, factored
     // out of DungeonClearRoomTrashValue so it can be tested without a live map.

@@ -30,9 +30,13 @@
 //      combat flag — a hostile area aura sets that flag with nothing aggroed, and
 //      keying on it made this failsafe permanently inert exactly when the run
 //      needed it (see DcCombatFlag).
-//   2. At least one BOT member must be stranded beyond maxSpread of the tank
-//      (PartyMaxSpread — the module's canonical "out of range"). A human is never
-//      relocated (player agency); dead members are the rez recovery's job.
+//   2. At least one BOT member must be stranded beyond maxSpread of the tank.
+//      That threshold is NOT simply PartyMaxSpread: the glue passes whatever the
+//      tank's advance gate is really enforcing (see RescueSpread below), because
+//      a rescue looser than the gate it exists to unblock is a permanent stall.
+//      A camp-anchored gate adds its own test beside it — past the gate's spread
+//      of the CAMP (see IsStranded). A human is never relocated (player agency); dead members are the rez
+//      recovery's job.
 //
 // Extracted engine-free so it is unit-testable in isolation, mirroring
 // DcRezDecision / DcSmartRestDecision. Header-only; nothing here touches a
@@ -40,6 +44,42 @@
 
 namespace DcStrandedDecision
 {
+    // The distance past which this failsafe calls a member STRANDED.
+    //
+    // This used to be PartyMaxSpread alone, and that opened a DEAD BAND against
+    // the gate the rescue exists to unblock. GetSpreadGate does not always
+    // enforce the setting: on a SEALED-ENCOUNTER final approach it overrides it
+    // with the row's musterSpread (10yd on all three rows) measured against the
+    // TANK, because the boss's room locks the instant the fight starts and the
+    // party has to cross the threshold with the tank. A straggler in
+    // (musterSpread, PartyMaxSpread] then fails the advance gate while sitting
+    // inside the rescue's own threshold: the tank yields "party not ready — out
+    // of range" forever and the rescue never looks at it.
+    //
+    // Live (tr-20260831-164201-61, Gundrak heroic): nine of ten objectives done,
+    // party healthy and out of combat, healer 24.5yd from the tank on Gal'darah's
+    // approach. Gate 10 (SealedEncounterRegistry row 604/29306), setting 25 —
+    // 10 < 24.5 <= 25. 3174 consecutive party-not-ready yields, ~300/minute for
+    // ten minutes, then the 600s no-progress watchdog killed a run that was one
+    // boss from finishing.
+    //
+    // MIN, never max, and only when the gate is TANK-ANCHORED. Taking the min
+    // means this can only ever become STRICTER than the old behaviour, never
+    // laxer: a waived gate (100000 while a pull maneuver holds) and the ordinary
+    // tank-anchored gate (== the setting) both leave it exactly where it was.
+    // And the anchor test is load-bearing, not tidy — in pull mode the gate is
+    // measured from the CAMP while this rescue measures from the TANK, so
+    // borrowing that radius would compare a distance to one origin against a
+    // radius sized for another and could yank a member who is correctly set at
+    // its camp. Same lesson as the party-gate ring: match the ORIGIN and the
+    // RADIUS, or match neither.
+    inline float RescueSpread(float partySpread, float leaderGateSpread, bool gateIsTankAnchored)
+    {
+        if (!gateIsTankAnchored || leaderGateSpread <= 0.0f)
+            return partySpread;
+        return leaderGateSpread < partySpread ? leaderGateSpread : partySpread;
+    }
+
     // One same-map group member, snapshotted by the glue.
     struct Member
     {
@@ -48,6 +88,7 @@ namespace DcStrandedDecision
         bool  onMap = false;       // same map/instance as the tank
         bool  isTank = false;      // the reference we teleport TO; never itself moved
         float distToTank = 0.0f;   // tank->GetDistance(member)
+        float distToGate = -1.0f;  // member->GetDistance(camp) when the gate is camp-anchored; < 0 = n/a
     };
 
     struct Inputs
@@ -57,7 +98,8 @@ namespace DcStrandedDecision
         std::uint32_t lastProgressMs = 0;         // clock; 0 = unarmed (no verdict yet)
         std::uint32_t noProgressTimeoutMs = 60000;   // StrandedRecoveryNoProgressSecs * 1000
         bool          partyEngaged = false;      // a real fight (not the bare flag)
-        float         maxSpread = 25.0f;          // PartyMaxSpread: the out-of-range threshold
+        float         maxSpread = 25.0f;          // out-of-range threshold; see RescueSpread
+        float         gateSpread = 0.0f;          // camp-anchored gate's own spread; 0 = no camp test
     };
 
     struct Result
@@ -65,6 +107,29 @@ namespace DcStrandedDecision
         bool             recover = false;   // teleport the strays this tick
         std::vector<int> strandedIdx;       // members to teleport (indices into the snapshot)
     };
+
+    // One member's stranded test, shared by Decide and the glue's Recover so the
+    // two can never disagree about who is stranded.
+    //
+    // Two origins, each with its OWN radius — never one origin's distance against
+    // the other's radius (see RescueSpread). Past maxSpread of the tank is the
+    // original test. Past gateSpread of the CAMP is the camp-anchored gate's own
+    // test, mirrored: in pull mode the advance gate holds the tank until every
+    // member is within its spread of the camp, so a member out past that but still
+    // inside maxSpread of the tank failed the gate forever while this rescue read
+    // it as in range. Live (sk-20261019-003633, Emperor's throne room, three runs):
+    // the camp 14yd from the tank — far too close for the stale-camp fallback —
+    // and the member 29.6-40yd from it but 14-23yd from the tank, its walk back to
+    // the camp refused (no route off a balcony) or latched RAN AWAY; the tank held
+    // "Waiting on Zesh (out of range)" until the 900s watchdog. The teleport lands
+    // the member at the tank, which a live camp keeps within its standoff of the
+    // camp, and Recover then re-anchors the camp onto walked ground.
+    inline bool IsStranded(float distToTank, float distToGate, float maxSpread, float gateSpread)
+    {
+        if (distToTank > maxSpread)
+            return true;
+        return gateSpread > 0.0f && distToGate >= 0.0f && distToGate > gateSpread;
+    }
 
     // The verdict. Returns recover=false (no strays) whenever the feature is off,
     // the party is in combat, the clock is unarmed / disabled, or the no-progress
@@ -90,7 +155,7 @@ namespace DcStrandedDecision
             Member const& m = members[i];
             if (m.isTank || !m.isBot || !m.isAlive || !m.onMap)
                 continue;
-            if (m.distToTank > in.maxSpread)
+            if (IsStranded(m.distToTank, m.distToGate, in.maxSpread, in.gateSpread))
                 r.strandedIdx.push_back(static_cast<int>(i));
         }
         r.recover = !r.strandedIdx.empty();

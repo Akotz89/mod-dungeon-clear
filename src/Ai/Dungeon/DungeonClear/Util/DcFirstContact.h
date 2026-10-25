@@ -6,6 +6,7 @@
 #ifndef _PLAYERBOT_DCFIRSTCONTACT_H
 #define _PLAYERBOT_DCFIRSTCONTACT_H
 
+class Creature;
 class Player;
 class Unit;
 
@@ -39,6 +40,16 @@ namespace DcFirstContact
     // Record and log the enemy that put `bot` into combat. Silently ignores anyone
     // outside an active, unpaused DC run in a dungeon.
     void OnEnterCombat(Player* bot, Unit* enemy);
+
+    // The other half: a creature that engages a run member while the party is
+    // ALREADY fighting. OnEnterCombat is 0->1 only, so an add that walks into a
+    // running fight leaves no line at all — tr-20260926-174359-2's Phantom
+    // Attendants joined the Moroes fight from the next room and nothing recorded
+    // where they came from. Logs the creature's position and spawn distance, the
+    // member it engaged and from how far, whether it had LOS to them, and the
+    // tank / camp positions, so the join can be attributed (proximity, a mob
+    // dragged past its room, or an assist call) instead of guessed.
+    void OnCreatureEngage(Creature* creature, Unit* target);
 }
 
 #endif  // _PLAYERBOT_DCFIRSTCONTACT_H

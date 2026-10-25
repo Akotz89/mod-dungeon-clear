@@ -10,6 +10,7 @@
 using DcStrandedDecision::Decide;
 using DcStrandedDecision::Inputs;
 using DcStrandedDecision::Member;
+using DcStrandedDecision::RescueSpread;
 using DcStrandedDecision::Result;
 
 namespace
@@ -208,4 +209,138 @@ TEST(DcStrandedRecoveryTest, RangeThresholdIsStrictlyGreater)
 
     Strand(party, 2, 25.01f);         // just past it: stranded
     EXPECT_TRUE(Decide(in, party).recover);
+}
+
+// --- the anchor may be a CORPSE ---------------------------------------------
+
+// When the tank dies, the glue keeps running this failsafe but re-anchors it on
+// the run owner's BODY: the survivors' only way out of a wipe is a rez, a rez is
+// cast at the corpse, and a rescue that gathers them anywhere else leaves the run
+// exactly as stuck. So the kernel must not treat a dead tank row as a reason to
+// stand down — it is the reference point, not a participant.
+//
+// Gundrak tp-20260830-231921-1: five runs wiped on Slad'ran, survivors parked
+// 122yd from the corpse, every one killed by the 600s no-progress watchdog.
+TEST(DcStrandedRecoveryTest, ADeadTankAnchorStillStrandsTheSurvivors)
+{
+    std::vector<Member> party = BaseParty();
+    party[0].isAlive = false;      // the anchor is a corpse
+    Strand(party, 2, 122.0f);      // ...and a survivor is 122yd out
+
+    Result const r = Decide(StaleInputs(), party);
+
+    EXPECT_TRUE(r.recover);
+    ASSERT_EQ(r.strandedIdx.size(), 1u);
+    EXPECT_EQ(r.strandedIdx[0], 2);
+}
+
+// The corpse is never itself a stray, however far the party has drifted from it:
+// isTank is skipped before any distance test, so a dead anchor can never be
+// selected for a teleport to itself.
+TEST(DcStrandedRecoveryTest, TheAnchorIsNeverTeleportedEvenWhenDead)
+{
+    std::vector<Member> party = BaseParty();
+    party[0].isAlive = false;
+    party[0].distToTank = 900.0f;  // nonsense distance; isTank must win regardless
+    Strand(party, 1, 122.0f);
+
+    Result const r = Decide(StaleInputs(), party);
+
+    ASSERT_EQ(r.strandedIdx.size(), 1u);
+    EXPECT_EQ(r.strandedIdx[0], 1);
+}
+
+// --- the rescue threshold tracks the LEADER's live gate ----------------------
+//
+// RescueSpread is what closed the sealed-encounter dead band: the advance gate
+// tightens to a row's musterSpread on a boss's final approach while this
+// failsafe was still measuring against the raw PartyMaxSpread, so a straggler
+// between the two was blocked by the gate and invisible to the rescue.
+// tr-20260831-164201-61: healer 24.5yd out, gate 10, setting 25, 3174
+// party-not-ready yields, run killed one boss from the end.
+
+// The regression itself. 10 < 24.5 <= 25 was a permanent stall; it must now
+// resolve to a rescue.
+TEST(DcStrandedRecoveryTest, SealedApproachGateClosesTheDeadBand)
+{
+    float const spread = RescueSpread(/*partySpread*/ 25.0f, /*leaderGateSpread*/ 10.0f,
+                                      /*gateIsTankAnchored*/ true);
+    EXPECT_FLOAT_EQ(spread, 10.0f);
+
+    Inputs in = StaleInputs();
+    in.maxSpread = spread;
+    std::vector<Member> party = BaseParty();
+    Strand(party, 2, 24.5f);          // Zyaly: inside the old threshold, outside the gate
+    EXPECT_TRUE(Decide(in, party).recover);
+
+    // ...and the pre-fix threshold is exactly what made it invisible.
+    in.maxSpread = 25.0f;
+    EXPECT_FALSE(Decide(in, party).recover);
+}
+
+// MIN, never max: a gate that is LOOSER than the setting must not loosen the
+// rescue. The waived gate (a pull maneuver holding the party at camp) is the
+// live case — 100000 there — and it has to leave the threshold at 25.
+TEST(DcStrandedRecoveryTest, RescueSpreadNeverLoosensPastTheSetting)
+{
+    EXPECT_FLOAT_EQ(RescueSpread(25.0f, 100000.0f, true), 25.0f);
+    EXPECT_FLOAT_EQ(RescueSpread(25.0f, 40.0f, true), 25.0f);
+    EXPECT_FLOAT_EQ(RescueSpread(25.0f, 25.0f, true), 25.0f);   // the ordinary gate
+}
+
+// A CAMP-anchored gate is measured from a different origin than this rescue
+// (which measures from the tank), so its radius must be ignored outright rather
+// than borrowed — otherwise a member correctly set at its camp gets yanked.
+TEST(DcStrandedRecoveryTest, CampAnchoredGateIsNotBorrowed)
+{
+    EXPECT_FLOAT_EQ(RescueSpread(25.0f, 10.0f, /*gateIsTankAnchored*/ false), 25.0f);
+
+    Inputs in = StaleInputs();
+    in.maxSpread = RescueSpread(25.0f, 10.0f, false);
+    std::vector<Member> party = BaseParty();
+    Strand(party, 2, 18.0f);          // set at a camp 18yd behind the tank
+    EXPECT_FALSE(Decide(in, party).recover);
+}
+
+// sk-20261019-003633 (Emperor's throne room, three runs): a camp-anchored gate
+// held the tank on a member 29.6-40yd from the camp while it stood 14-23yd from
+// the tank, so the tank-only test never saw it. The camp test, with the camp's
+// own radius, does.
+TEST(DcStrandedRecoveryTest, PastTheCampSpreadIsStrandedWhileNearTheTank)
+{
+    Inputs in = StaleInputs();
+    in.gateSpread = 25.0f;
+    std::vector<Member> party = BaseParty();
+    for (Member& m : party)
+        m.distToGate = 10.0f;            // everyone set at the camp...
+    Strand(party, 2, 14.2f);
+    party[2].distToGate = 29.6f;         // ...but Zesh, up on the balcony
+
+    Result const r = Decide(in, party);
+    ASSERT_TRUE(r.recover);
+    ASSERT_EQ(r.strandedIdx.size(), 1u);
+    EXPECT_EQ(r.strandedIdx[0], 2);
+}
+
+// The camp test is the gate's own test, nothing stricter: inside its spread of
+// the camp nobody is yanked, and a tank-anchored gate (no camp distance) never
+// takes the camp branch at all.
+TEST(DcStrandedRecoveryTest, CampTestUsesOnlyTheCampsOwnRadius)
+{
+    using DcStrandedDecision::IsStranded;
+    EXPECT_FALSE(IsStranded(14.0f, 25.0f, 25.0f, 25.0f));   // on the camp's edge
+    EXPECT_TRUE(IsStranded(14.0f, 25.1f, 25.0f, 25.0f));
+    EXPECT_FALSE(IsStranded(14.0f, -1.0f, 25.0f, 25.0f));   // no camp distance
+    EXPECT_FALSE(IsStranded(14.0f, 40.0f, 25.0f, 0.0f));    // tank-anchored gate
+    EXPECT_TRUE(IsStranded(26.0f, 5.0f, 25.0f, 25.0f));     // the tank test still holds
+    // A waived gate (100000 while a pull maneuver holds) waives the camp test too.
+    EXPECT_FALSE(IsStranded(14.0f, 60.0f, 25.0f, 100000.0f));
+}
+
+// Degenerate gate readings fall back to the setting rather than to zero — a 0
+// threshold would strand-and-teleport the entire party every timeout.
+TEST(DcStrandedRecoveryTest, RescueSpreadIgnoresANonPositiveGate)
+{
+    EXPECT_FLOAT_EQ(RescueSpread(25.0f, 0.0f, true), 25.0f);
+    EXPECT_FLOAT_EQ(RescueSpread(25.0f, -1.0f, true), 25.0f);
 }

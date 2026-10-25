@@ -4,6 +4,8 @@
  */
 
 #include "DcPullPlanner.h"
+
+#include "Ai/Dungeon/DungeonClear/Util/DcFormation.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 
 #include "DungeonClearUtil.h"   // DC_PULL_* macros + DcTargeting::GetPullTarget (until DcTargeting moves)
@@ -58,10 +60,12 @@
 #include "Timer.h"
 #include "World.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
+#include "Ai/Dungeon/DungeonClear/Data/RoomAggroRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcEngageGeometry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcPullDecision.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcPullDecisionIo.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcLabTap.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
 #include "Ai/Dungeon/DungeonClear/Util/NavmeshSnap.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearLiveBossValue.h"
@@ -110,12 +114,21 @@ namespace
     // LegIsHot rejects a clean camp whose drag-back route walks the tank and the
     // pack straight through one on the way. Cheap on maps with no rows (one
     // registry bool), so it sits beside CampBlockedByDoor at every site.
-    bool CampInHazard(Player* bot, Position const& c)
+    //
+    // Takes a SAMPLED hazard world rather than resolving one per call: the caller
+    // asks this about every breadcrumb it walks back over and again about every
+    // shrinking projection fallback, and the unsampled entry points cost three
+    // AiObjectContext value lookups plus an ObjectAccessor resolution per guid
+    // EACH — twice over, once for the point and once for the leg. The sample is
+    // taken once at the top of the search; nothing inside it can move an emitter.
+    bool CampInHazard(Player* bot, DcHazard::LiveSet const& live, Position const& c)
     {
         if (!bot)
             return false;
-        return DcHazard::PointIsHot(bot, c.GetPositionX(), c.GetPositionY(), c.GetPositionZ()) ||
-               DcHazard::LegIsHot(bot, c.GetPositionX(), c.GetPositionY(), c.GetPositionZ());
+        return DcHazard::PointIsHot(live, c.GetPositionX(), c.GetPositionY(), c.GetPositionZ()) ||
+               DcHazard::SegmentIsHot(live,
+                                      bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(),
+                                      c.GetPositionX(), c.GetPositionY(), c.GetPositionZ());
     }
 
     // True when a candidate camp sits on — or the walk to it crosses — the
@@ -142,15 +155,39 @@ Position DcPullPlanner::ComputeCampSlot(Player* bot, Position const& camp)
     // Deterministic per-bot offset so the slot is identical every tick: MoveTo
     // dedups an unchanging destination, so the follower glides to one spot and
     // parks there instead of re-pathing to a fresh random point each tick (which
-    // would read as a nervous shuffle). Spread the party with the golden angle so
-    // even a handful of bots fan out evenly around the anchor rather than
-    // overlapping, and pick a 1-2yd radius for the requested gentle variance.
+    // would read as a nervous shuffle). Golden-angle fan, sized by DcFormation:
+    // the ring radius grows with the same-map population and roles split onto
+    // concentric rings (melee in, ranged, healers out), so a 25-40 member camp
+    // is a formation instead of 39 bodies on the old fixed 1-2yd circle. A
+    // 5-man census resolves to (nearly) that old circle — the ring floor keeps
+    // small parties tight.
     uint32 const seed = static_cast<uint32>(bot->GetGUID().GetCounter());
-    float const angle = static_cast<float>(seed) * 2.39996323f;  // golden angle (rad)
-    float const radius = 1.0f + static_cast<float>(seed % 101) / 100.0f;  // [1.0, 2.0]
+    uint32 meleeCount = 0, rangedCount = 0, healerCount = 0;
+    if (Group* group = bot->GetGroup())
+    {
+        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+        {
+            Player* member = ref->GetSource();
+            if (!member || member->GetMapId() != bot->GetMapId())
+                continue;
+            if (PlayerbotAI::IsHeal(member))
+                ++healerCount;
+            else if (PlayerbotAI::IsRanged(member))
+                ++rangedCount;
+            else
+                ++meleeCount;
+        }
+    }
+    DcFormation::RoleRings const rings =
+        DcFormation::ComputeRoleRings(meleeCount, rangedCount, healerCount,
+                                      /*baseRadius*/ 1.0f);
+    float const ringRadius = PlayerbotAI::IsHeal(bot)     ? rings.healer
+                             : PlayerbotAI::IsRanged(bot) ? rings.ranged
+                                                          : rings.melee;
+    DcFormation::Offset const off = DcFormation::SlotOffset(seed, ringRadius);
 
-    float const fx = camp.GetPositionX() + radius * std::cos(angle);
-    float const fy = camp.GetPositionY() + radius * std::sin(angle);
+    float const fx = camp.GetPositionX() + off.dx;
+    float const fy = camp.GetPositionY() + off.dy;
     float const fz = camp.GetPositionZ();
 
     // Route the fuzzed point through the navmesh. PathGenerator clamps an
@@ -168,7 +205,11 @@ Position DcPullPlanner::ComputeCampSlot(Player* bot, Position const& camp)
 
     G3D::Vector3 const end = gen.GetActualEndPosition();
     Position const slot(end.x, end.y, end.z, camp.GetOrientation());
-    if (camp.GetExactDist(&slot) > 3.0f)
+    // Reject a snap that dragged the slot well past its intended ring (wedged
+    // against geometry). The tolerance follows the ring: the healer arc of a
+    // 25-man legitimately parks ~10yd out, which the old fixed 3yd cap — sized
+    // for the 1-2yd fan — would have rejected wholesale.
+    if (camp.GetExactDist(&slot) > ringRadius + 2.0f)
         return camp;
 
     // The anchor was screened for hazards when it was chosen, but this fan-out
@@ -571,11 +612,6 @@ void DcPullPlanner::UpdateDynamicPullMode(PlayerbotAI* botAI, AiObjectContext* c
     DcPullContext& pull = context->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
     bool const curBool = context->GetValue<bool>(DcKey::PullMode)->Get();
 
-    // Never flip the verdict mid-engagement: in combat or any non-Idle pull phase
-    // the standing decision is latched until the fight resolves.
-    if (bot->IsInCombat() || pull.phase != DcPullPhase::Idle)
-        return;
-
     auto apply = [&](bool want, DcPullDecisionCode decision)
     {
         pull.decision = decision;
@@ -618,7 +654,87 @@ void DcPullPlanner::UpdateDynamicPullMode(PlayerbotAI* botAI, AiObjectContext* c
     {
         if (DcSettings::GetBool(bot, "RecordDecisions"))
             DcPullDecisionIo::Record(bot->GetGUID().GetRawValue(), getMSTime(), obs, v);
+        DcLabTap::Verdict(bot->GetGUID().GetRawValue(), DcPullDecisionIo::VerdictName(v),
+                          pull.predictedCount, pull.predictedCeiling);
     };
+
+    // UNCLASSIFIED AGGRO ON A SWEEP MAP -> ADVANCED, so the maneuver's Idle branch
+    // drags it to a fresh camp instead of the walk-in engage fighting it where it
+    // bit. Between packs Dynamic answers "no target" with the bool OFF, and with
+    // the bool off the pull ACTION is not live — the "unplanned aggro while
+    // scouting -> fresh camp" branch (DcPullActions, first combat tick at Idle)
+    // lives inside it. So an aggro the scan never sized became a Leeroy in place.
+    // On a sweep map that is the bug by the registry's own definition: every
+    // fight spot is inside a neighbour's reach.
+    //
+    // Live: tr-20260927-003140-1, Karazhan ballroom. The planned pull worked and
+    // died at camp; 00:38:51 `pull released: mode off`; the route rejoin put the
+    // tank 20yd beside the residual half of the same cluster (corridor band 18yd,
+    // Phantom Guest aggro 22yd), 00:39:01 first contact with `camp none` ->
+    // engage-trash walk-in INTO the formation -> the rest of the room, a
+    // Skeletal Waiter and the north formation followed. Both sibling runs lost
+    // Moroes the same way one room on.
+    //
+    // `decision == None` is the whole discriminator: a standing LEEROY is a pack
+    // the classifier sized and chose to walk in on, and that choice stands. Only
+    // an aggro nobody sized is answered with the safe direction. Sweep maps only,
+    // for the reason TargetInsideBystanderPack is: elsewhere an unplanned aggro
+    // is a lone patrol, and dragging it costs the full FSM for nothing.
+    //
+    // The aggressor is latched as the pack so the sticky target value hands it to
+    // the action and the harness splits a per-pull record on decisionSeq. No
+    // estimate exists for it — zeroed rather than left over from the last pack,
+    // so the pull table shows an unplanned pull as one.
+    //
+    // Never a boss or his summoned add: that fight is the at-boss path's, the same
+    // rule GetPullTarget's boss veto enforces. tr-20260927-094926-4: the raid
+    // muster released Maiden's pull, her combat flag landed at Idle with no
+    // verdict, and this gate turned the boss engagement into a trash drag-back.
+    if (bot->IsInCombat() && pull.phase == DcPullPhase::Idle)
+    {
+        auto const isBoss = [&](Unit const* u)
+        {
+            return u && (DcTargeting::IsDungeonBossEntry(context, u->GetEntry()) ||
+                         DcTargeting::IsBossSummon(u));
+        };
+        Unit* aggressor = bot->GetVictim();
+        bool bossInFight = isBoss(aggressor);
+        for (Unit* a : bot->getAttackers())
+        {
+            if (!a || !a->IsAlive())
+                continue;
+            bossInFight = bossInFight || isBoss(a);
+            if (!aggressor ||
+                bot->GetExactDist2d(a) < bot->GetExactDist2d(aggressor))
+                aggressor = a;
+        }
+        if (DungeonClearMath::ShouldAdvanceUnclassifiedAggro(
+                /*inCombat*/ true, /*phaseIdle*/ true, curBool,
+                pull.decision != DcPullDecisionCode::None,
+                DcEngageGeometry::EnRouteSweepApplies(bot), bossInFight))
+        {
+            pull.decisionTarget      = aggressor ? aggressor->GetGUID() : ObjectGuid::Empty;
+            pull.decisionTargetEntry = aggressor ? aggressor->GetEntry() : 0u;
+            pull.decisionSince       = getMSTime();
+            pull.targetLostSince     = 0;
+            ++pull.decisionSeq;
+            pull.predictedThirds = 0;
+            pull.predictedCount  = 0;
+            DC_PULL_INFO("[DC:{}] dynamic: unclassified aggro on a sweep map — {} (entry {}) "
+                         "at {:.1f}yd bit the scout leg with no verdict -> ADVANCED, the "
+                         "maneuver drags it to a fresh camp", bot->GetName(),
+                         aggressor ? aggressor->GetName() : std::string("-"),
+                         aggressor ? aggressor->GetEntry() : 0u,
+                         aggressor ? bot->GetExactDist2d(aggressor) : 0.0f);
+            apply(true, DcPullDecisionCode::Advanced);
+        }
+        return;
+    }
+
+    // Never flip the verdict mid-engagement: any non-Idle pull phase keeps the
+    // standing decision latched until the fight resolves.
+    if (pull.phase != DcPullPhase::Idle)
+        return;
 
     Unit* target = DcTargeting::GetPullTarget(botAI);
     if (!target)
@@ -912,6 +1028,46 @@ std::optional<Position> DcPullPlanner::ComputeSafeCamp(PlayerbotAI* botAI, Unit*
                                     VMAP::ModelIgnoreFlags::Nothing, LINEOFSIGHT_CHECK_VMAP);
     };
 
+    // Resolve the live hazard world once, for the same reason the hostiles below
+    // are resolved once: CampInHazard is asked about every breadcrumb this search
+    // walks back over and about every projection fallback it shrinks through, and
+    // an unsampled ask costs three value lookups and a guid resolution per emitter
+    // — twice, for the point and the leg. Nothing below moves an emitter.
+    DcHazard::LiveSet const live = DcHazard::Sample(bot);
+
+    // Room camp box (RoomAggroBoss::hasCampBox), resolved once like the hazards:
+    // while that boss's room is pre-cleared, no candidate outside it may become
+    // the camp. When nothing inside qualifies, the search falls through to its
+    // last resort, the tank's own spot.
+    RoomAggroBoss const* const campBox = DcTargeting::ActiveRoomCampBox(bot, ctx);
+
+    // Nor may the camp stand inside the sleeping room-aggro boss's sphere, plus the
+    // party's margin: the camp is where the pack is fought, and a fight there wakes
+    // him. Live (sk-20261019-105358, two of fifteen fatal Emperor wakes): the
+    // ranged-pack search took a camp 13yd and 18.5yd from the throne — its LOS
+    // fallback keeps poor clearance on purpose, and nothing else knew of him.
+    Creature* sleeper = nullptr;
+    float sleeperKeep = 0.0f;
+    // Cheap gates first (registry Find) — every pull in every dungeon gets here.
+    if (std::optional<DungeonBossInfo> const next =
+            ctx->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)->Get())
+        if (RoomAggroRegistry::Find(bot->GetMapId(), next->entry) &&
+            DcTargeting::IsRoomClearActive(bot, ctx))
+            if (Creature* const boss = DcTargeting::GetLiveBoss(bot, ctx, next->entry))
+                if (!boss->IsInCombat())
+                {
+                    sleeper = boss;
+                    sleeperKeep = std::max(DcEngageGeometry::RoomAggroSphereRadius(bot, boss),
+                                           DcTargeting::ActiveRoomSkirt(bot, ctx)) +
+                                  DcSettings::GetFloat(bot, "RoomAggroPartyMargin");
+                }
+    auto campOffLimits = [campBox, sleeper, sleeperKeep](Position const& p) -> bool
+    {
+        if (campBox && !RoomAggroRegistry::InCampBox(*campBox, p.GetPositionX(), p.GetPositionY()))
+            return true;
+        return sleeper && sleeper->GetExactDist2d(&p) < sleeperKeep;
+    };
+
     // Resolve the other-pack hostiles once (alive, hostile, not the target, not a
     // packmate). Same candidate set the pull / trash scans use.
     GuidVector const& farTargets =
@@ -996,8 +1152,8 @@ std::optional<Position> DcPullPlanner::ComputeSafeCamp(PlayerbotAI* botAI, Unit*
             // dungeon's first pull the oldest crumbs are ALL over the line, so
             // short-circuiting here is the difference between rejecting them for
             // free and paying a path build apiece to reject them anyway.
-            if (CampOverZoneLine(bot, c) || !IsNavReachable(bot, c) ||
-                CampBlockedByDoor(bot, c) || CampInHazard(bot, c))
+            if (campOffLimits(c) || CampOverZoneLine(bot, c) || !IsNavReachable(bot, c) ||
+                CampBlockedByDoor(bot, c) || CampInHazard(bot, live, c))
                 return true;
             float const clear = clearanceAt(c);
             float const drag = tankPos.GetExactDist(&c);
@@ -1075,8 +1231,9 @@ std::optional<Position> DcPullPlanner::ComputeSafeCamp(PlayerbotAI* botAI, Unit*
                 DungeonPathFollower::PointBehind(bot, path, follower, setback))
         {
             Position cand(back->x, back->y, back->z);
-            if (IsNavReachable(bot, cand) && !CampBlockedByDoor(bot, cand) &&
-                !CampInHazard(bot, cand) && !CampOverZoneLine(bot, cand))
+            if (!campOffLimits(cand) && IsNavReachable(bot, cand) &&
+                !CampBlockedByDoor(bot, cand) && !CampInHazard(bot, live, cand) &&
+                !CampOverZoneLine(bot, cand))
             {
                 clearanceOut = clearanceAt(cand);
                 dragOut = tankPos.GetExactDist(&cand);
@@ -1126,8 +1283,9 @@ std::optional<Position> DcPullPlanner::ComputeSafeCamp(PlayerbotAI* botAI, Unit*
             // but on the far side of a wall / on another level. Only keep it if a
             // complete generated path reaches it, so the move never straight-lines
             // through the geometry in between — and never across/into a shut door.
-            if (!IsNavReachable(bot, cand) || CampBlockedByDoor(bot, cand) ||
-                CampInHazard(bot, cand) || CampOverZoneLine(bot, cand))
+            if (campOffLimits(cand) || !IsNavReachable(bot, cand) ||
+                CampBlockedByDoor(bot, cand) || CampInHazard(bot, live, cand) ||
+                CampOverZoneLine(bot, cand))
                 continue;
             float const c = clearanceAt(cand);
             float const drag = tankPos.GetExactDist(&cand);
@@ -1150,6 +1308,102 @@ std::optional<Position> DcPullPlanner::ComputeSafeCamp(PlayerbotAI* botAI, Unit*
     dragOut = bestDrag;
     return best;
 }
+std::optional<DcPullPlanner::RoomClearLane> DcPullPlanner::ComputeRoomClearLane(
+    PlayerbotAI* botAI, Unit* target, Unit* boss, float bossRadius, float standDist,
+    float setback, float safeRadius, bool requireClean)
+{
+    if (!botAI || !target || !boss)
+        return std::nullopt;
+    Player* bot = botAI->GetBot();
+    if (!bot)
+        return std::nullopt;
+    AiObjectContext* ctx = botAI->GetAiObjectContext();
+
+    // Packmates come along anyway (ComputeSafeCamp's kPackRadius); every other
+    // live hostile on the pack's floor is a disc the lane keeps safeRadius from.
+    constexpr float kPackRadius = 12.0f;
+    // A snapped point may slide this far off the ideal line before the bearing
+    // is treated as walled off.
+    constexpr float kMaxSnapShift = 3.0f;
+    // Candidates path-validated before giving up; the ranking is cheap, the
+    // validation is two path builds per bearing.
+    constexpr std::size_t kMaxValidated = 8;
+
+    std::vector<DungeonClearMath::LaneKeepAway> keepAways;
+    keepAways.push_back({boss->GetPositionX(), boss->GetPositionY(), bossRadius});
+
+    GuidVector const& farTargets = ctx->GetValue<GuidVector>(DcKey::FarTargets)->Get();
+    GuidVector const& possibleTargets =
+        ctx->GetValue<GuidVector>(DcKey::Stock::PossibleTargets)->Get();
+    GuidVector const& candidates = farTargets.empty() ? possibleTargets : farTargets;
+    for (ObjectGuid guid : candidates)
+    {
+        Unit* u = ObjectAccessor::GetUnit(*bot, guid);
+        if (!u || !u->IsAlive() || u == target || u == boss || !bot->IsHostileTo(u))
+            continue;
+        if (std::fabs(u->GetPositionZ() - target->GetPositionZ()) > DC_Z_LEVEL_TOLERANCE)
+            continue;
+        if (u->GetExactDist2d(target) <= kPackRadius)
+            continue;
+        keepAways.push_back({u->GetPositionX(), u->GetPositionY(), safeRadius});
+    }
+
+    RoomAggroBoss const* const box = DcTargeting::ActiveRoomCampBox(bot, ctx);
+    std::vector<DungeonClearMath::StraightPullLane> const lanes =
+        DungeonClearMath::RankStraightPullLanes(
+            target->GetPositionX(), target->GetPositionY(), bot->GetPositionX(),
+            bot->GetPositionY(), standDist, setback, setback * 0.5f, keepAways,
+            box != nullptr, box ? box->campMinX : 0.0f, box ? box->campMaxX : 0.0f,
+            box ? box->campMinY : 0.0f, box ? box->campMaxY : 0.0f);
+
+    float const tz = target->GetPositionZ();
+    auto snapOnFloor = [&](float x, float y) -> std::optional<Position>
+    {
+        NavmeshSnap::Result const snap = NavmeshSnap::Snap(bot, x, y, tz, kMaxSnapShift);
+        if (!snap.ok || std::fabs(snap.z - tz) > DC_Z_LEVEL_TOLERANCE)
+            return std::nullopt;
+        float const dx = snap.x - x;
+        float const dy = snap.y - y;
+        if (dx * dx + dy * dy > kMaxSnapShift * kMaxSnapShift)
+            return std::nullopt;
+        return Position(snap.x, snap.y, snap.z, 0.0f);
+    };
+
+    DcHazard::LiveSet const live = DcHazard::Sample(bot);
+    std::size_t tried = 0;
+    for (DungeonClearMath::StraightPullLane const& lane : lanes)
+    {
+        // Skipped, not a stop: the ranking charges for the walk, so a clean lane
+        // can sit behind an unclean one that is merely closer.
+        if (requireClean && lane.margin < 0.0f)
+            continue;
+        if (tried++ >= kMaxValidated)
+            break;
+        std::optional<Position> stand = snapOnFloor(lane.standX, lane.standY);
+        if (!stand || !IsNavReachable(bot, *stand))
+            continue;
+        if (!target->IsWithinLOS(stand->GetPositionX(), stand->GetPositionY(),
+                                 stand->GetPositionZ() + 2.0f,
+                                 VMAP::ModelIgnoreFlags::Nothing, LINEOFSIGHT_CHECK_VMAP))
+            continue;
+        std::optional<Position> camp = snapOnFloor(lane.campX, lane.campY);
+        if (!camp)
+            continue;
+        if (box && !RoomAggroRegistry::InCampBox(*box, camp->GetPositionX(),
+                                                 camp->GetPositionY()))
+            continue;
+        if (CampOverZoneLine(bot, *camp) || !IsNavReachable(bot, *camp) ||
+            CampBlockedByDoor(bot, *camp) || CampInHazard(bot, live, *camp))
+            continue;
+
+        float const face = stand->GetAngle(target);
+        stand->SetOrientation(face);
+        camp->SetOrientation(face);
+        return RoomClearLane{*stand, *camp, lane.margin};
+    }
+    return std::nullopt;
+}
+
 std::optional<Position> DcPullPlanner::ComputeTrailCamp(PlayerbotAI* botAI,
                                                            float setback, float maxDrag)
 {

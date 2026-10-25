@@ -1,0 +1,118 @@
+{
+  "about": "Outside adds: Scarlet Monastery Library gallery pull that brought 8 mobs where the governor predicted 5 \u2014 neighbouring packs kept as 'near'. Calibration: sm-lib pull #3 of tr-20260922-185150-2 \u2014 predicted 5, observed 8 (over, outside); target 4287#40049. Party starts at pull #2's tank position so the walk-in is part of the test.",
+  "schema": 1,
+  "source": {
+    "snapshot": "tr-20260922-185150-2#3",
+    "joined": [
+      40063,
+      40059,
+      40060,
+      40049,
+      40053,
+      40054,
+      40078,
+      40079,
+      40047,
+      40080,
+      40081,
+      40082
+    ],
+    "outsideJoined": [
+      40047,
+      40053,
+      40054,
+      40059,
+      40060,
+      40063,
+      40078,
+      40079,
+      40080,
+      40081,
+      40082
+    ],
+    "predicted": 5,
+    "observed": 8
+  },
+  "geometry": {
+    "map": 189,
+    "dungeon": "sm-lib",
+    "heroic": false,
+    "region": {
+      "center": [
+        203.7,
+        -268.7,
+        19.3
+      ],
+      "radius": 60.0
+    },
+    "objective": 3974,
+    "objectiveName": "Houndmaster Loksey"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [
+          40049
+        ],
+        "near": [
+          40045,
+          40047,
+          40048,
+          40050,
+          40051,
+          40052,
+          40053,
+          40054,
+          40055,
+          40059,
+          40060,
+          40063,
+          40073,
+          40074,
+          40075,
+          40076,
+          40077,
+          40078,
+          40079,
+          40080,
+          40081,
+          40082,
+          40083
+        ]
+      }
+    }
+  },
+  "party": {
+    "comp": "druid-bear,paladin-holy,warrior-arms,warlock-affli,hunter-mm",
+    "level": 35,
+    // Snapshot start (199.9,-238.4) sat 18.5yd from kept Gallant 40063 (lvl 33 vs
+    // party 35): it aggroed at t=0 in both runs of lb-20261003-155828-1, before DC
+    // made any decision, so O2/O6/O7 scored a fight the party never chose. Start
+    // instead where the tank stood for the previous pull (#2 of the same run),
+    // ~40yd from every kept mob, and let DC walk the approach that over-pulled.
+    "start": [
+      220.5,
+      -228.7,
+      18.5,
+      -1.968
+    ],
+    "react": "fast",
+    "seedTarget": false
+  },
+  "settings": {
+    "PullSetting": 2
+  },
+  "goal": {
+    "kill": "pack:target",
+    "timeoutS": 90
+  },
+  "expect": {
+    "oracles": {
+      "O7": {
+        "joinersMax": 1,
+        "expect": "fail"
+      }
+    },
+    "knownFailure": "open:snapshot tr-20260922-185150-2#3"
+  }
+}

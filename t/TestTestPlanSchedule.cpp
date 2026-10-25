@@ -257,8 +257,8 @@ TEST(DcTestPlanDriverWaitTest, ZeroCapDisablesWaiting)
 // ---- Harness cap defaults --------------------------------------------------------
 //
 // The test harness deliberately imposes no ceiling of its own: how many runs
-// and plans the box can field is a property of the box (AiPlayerbot.MaxAddedBots,
-// the addclass pool, CPU), and those refuse an over-budget start by name. A
+// and plans the box can field is a property of the box (the addclass pool, CPU),
+// and the pool refuses an over-budget start by name. A
 // harness-local cap only ever refused starts the machine could have served, so
 // all three ship at 0 = unlimited. These guards fail if a default drifts back to
 // a positive number — the operator opts a cap back in via the conf, not the code.

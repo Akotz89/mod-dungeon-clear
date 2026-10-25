@@ -11,6 +11,7 @@
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcLeaderSignal.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
+#include "Ai/Dungeon/DungeonClear/Util/DungeonClearTuning.h"
 
 #include "CombatManager.h"
 #include "Creature.h"
@@ -124,4 +125,118 @@ void DcFirstContact::OnEnterCombat(Player* bot, Unit* enemy)
                  "{:.1f}yd with no pull in flight — {} other member(s) already "
                  "in combat", bot->GetName(), enemy->GetName(), entry,
                  bot->GetExactDist(enemy), alreadyFighting);
+
+    // REMOTE AGGRO — combat established with something nobody can see, let alone
+    // reach. Its own WARN because the INFO line above cannot be found by anyone
+    // who does not already suspect it: the distance is one field of eleven, the
+    // line is one of 285 in a bad run, and nothing about the shape says "this is
+    // the thing that ends the run in ninety seconds".
+    //
+    // It ALWAYS means something is wrong. Nothing legitimate starts a fight from
+    // beyond DC_ENGAGEMENT_RADIUS — mob spell reach tops out near 40yd — so a
+    // contact out here is one of exactly three things, and the two extra fields
+    // separate them:
+    //
+    //   * homeDist ~0 and far  -> aggro through geometry. The creature has not
+    //     moved; something let it see us through a floor. BWL's approach is the
+    //     worked example: anchors 5-12 are the ceiling of the upper suppression
+    //     room, and in tr-20260830-142049-6 five holders contacted at 132.6-151.6yd
+    //     while 0.0-4.6yd from their spawns, then walked 199.4yd into the raid.
+    //   * homeDist large and far -> already being towed; somebody else's fight
+    //     has been dragged onto us.
+    //   * a BOSS at any distance -> a combat pulse. BossAI::_JustEngagedWith sets
+    //     SetCombatPulseDelay(5) and DoZoneInCombat re-flags every player within
+    //     250yd every five seconds, so the whole raid contacts it at once from
+    //     wherever it happens to be standing.
+    //
+    // Threshold is DC_ENGAGEMENT_RADIUS itself, so this line and the flag test
+    // agree on where "a fight" stops: everything this WARNs about is, by
+    // construction, combat the rest of the module has already written off as
+    // geometry — and that is exactly why nothing else reports it.
+    if (bot->GetExactDist(enemy) > DC_ENGAGEMENT_RADIUS)
+        LOG_WARN("playerbots.dungeonclear",
+                 "[DC:{}] REMOTE AGGRO: {}{} (entry {}) opened combat from {:.1f}yd — "
+                 "it is {} from its spawn, so it {} — {} other member(s) already in combat",
+                 bot->GetName(), enemy->GetName(), isObjective ? " [OBJECTIVE]" : "", entry,
+                 bot->GetExactDist(enemy),
+                 homeDist >= 0.0f ? Acore::StringFormat("{:.1f}yd", homeDist)
+                                  : std::string("n/a"),
+                 homeDist >= 0.0f && homeDist < 5.0f
+                     ? "reached us through geometry, not on foot"
+                     : "is being towed",
+                 alreadyFighting);
+}
+
+void DcFirstContact::OnCreatureEngage(Creature* creature, Unit* target)
+{
+    if (!creature || !target)
+        return;
+
+    // Realm-wide hook: cheapest gates first.
+    Map const* map = creature->GetMap();
+    if (!map || !map->IsDungeon())
+        return;
+    Player* bot = target->GetCharmerOrOwnerPlayerOrPlayerItself();
+    if (!bot)
+        return;
+    PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
+    if (!botAI)
+        return;
+    Player* owner = DcLeaderSignal::FindRunOwner(bot);
+    PlayerbotAI* ownerAI = owner ? GET_PLAYERBOT_AI(owner) : nullptr;
+    if (!ownerAI)
+        return;
+    DcRunState const& run = DcRun::Of(ownerAI);
+    if (!run.enabled || run.paused)
+        return;
+
+    // A fresh fight is OnEnterCombat's line; only a join into a running one is
+    // missing from the record.
+    uint32 const alreadyFighting = CountPartyAlreadyInCombat(bot) + (bot->IsInCombat() ? 1 : 0);
+    if (alreadyFighting == 0)
+        return;
+
+    Position const home = creature->GetHomePosition();
+    float const homeDist = creature->GetDistance(home);
+
+    // Nearest living party member: the one most likely to have walked into it.
+    Player* nearest = nullptr;
+    float nearestDist = 0.0f;
+    if (Group* group = bot->GetGroup())
+        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+        {
+            Player* m = ref->GetSource();
+            if (!m || !m->IsAlive() || m->GetMapId() != creature->GetMapId())
+                continue;
+            float const d = creature->GetExactDist(m);
+            if (!nearest || d < nearestDist)
+            {
+                nearest = m;
+                nearestDist = d;
+            }
+        }
+
+    std::string campText = "none";
+    if (AiObjectContext* ownerCtx = ownerAI->GetAiObjectContext())
+    {
+        DcPullContext const& pull =
+            ownerCtx->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+        if (pull.HasCamp())
+            campText = Acore::StringFormat("({:.1f},{:.1f},{:.1f}) {:.1f}yd off",
+                                           pull.camp.GetPositionX(), pull.camp.GetPositionY(),
+                                           pull.camp.GetPositionZ(),
+                                           creature->GetExactDist(&pull.camp));
+    }
+
+    DC_PULL_INFO("[DC:{}] late joiner: {} (entry {}) engaged {} at {:.1f}yd (LOS {}) | "
+                 "mob ({:.1f},{:.1f},{:.1f}) {:.1f}yd from spawn ({:.1f},{:.1f},{:.1f}) | "
+                 "nearest member {} {:.1f}yd | tank {} ({:.1f},{:.1f},{:.1f}) | camp {} | "
+                 "party fighting: {}",
+                 bot->GetName(), creature->GetName(), creature->GetEntry(), target->GetName(),
+                 creature->GetExactDist(target), creature->IsWithinLOSInMap(target) ? "y" : "n",
+                 creature->GetPositionX(), creature->GetPositionY(), creature->GetPositionZ(),
+                 homeDist, home.GetPositionX(), home.GetPositionY(), home.GetPositionZ(),
+                 nearest ? nearest->GetName() : std::string("-"), nearestDist,
+                 owner->GetName(), owner->GetPositionX(), owner->GetPositionY(),
+                 owner->GetPositionZ(), campText, alreadyFighting);
 }

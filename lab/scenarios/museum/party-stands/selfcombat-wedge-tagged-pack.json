@@ -1,0 +1,42 @@
+{
+  "about": "Party stands (self-combat wedge): the assist arms on ANY group member's combat flag (PartyCombatLatch), and the camp-assist seed then does SetInCombatWith on its target, so a follower becomes its own 'groupmate in combat' and re-arms the latch forever against a pack that never fights back (issue #18; 512 laps of 'assisting -> seeded -> silent tick' in the reporter's log). A 3-mob Halls of Lightning pack (snapshot tr-20260922-185337-10#23) is tagged and dragged; at aggroConfirmed one mob is turned onto a DPS (the combat blip), then the pack is evaded home and the tank's combat dropped, leaving a tagged-and-abandoned pack at home. The regroup mute half was fixed by 5bace3da; the seed's one-sided SetInCombatWith (DcFollowerActions.cpp) and the flag-only latch are unchanged. The blip lands on the healer: on dps2 (the affliction warlock) its DoTs kept the evaded Tactician in combat and the pack re-engaged 1.4s later, so no tagged-and-abandoned pack ever formed (lb-20261003-155828-1 run -54).",
+  "schema": 1,
+  "source": { "snapshot": "tr-20260922-185337-10#23" },
+  "geometry": {
+    "map": 602,
+    "dungeon": "hol",
+    "heroic": false,
+    "region": { "center": [1085.0, -172.0, 56.7], "radius": 60.0 },
+    "objective": 28923,
+    "objectiveName": "Loken"
+  },
+  "actors": {
+    "native": {
+      "packs": {
+        "target": [126911, 126928, 126929],
+        "near": [126903, 126909, 126910, 126912, 126930, 126931]
+      }
+    }
+  },
+  "party": {
+    "comp": "paladin-prot,priest-holy,mage-frost,warlock-affli,hunter-mm",
+    "level": 80,
+    "start": [1051.1, -151.6, 61.2, -0.468],
+    "react": "fast",
+    "seedTarget": true
+  },
+  "settings": {
+    "PullSetting": 2,
+    "PullForceAdvanced": 1
+  },
+  "injections": [
+    { "when": { "event": "aggroConfirmed", "delayMs": 0 }, "do": { "aggro": "spawn:126929", "on": "heal" } },
+    { "when": { "event": "aggroConfirmed", "delayMs": 600 }, "do": { "evade": "pack:target" } },
+    { "when": { "event": "aggroConfirmed", "delayMs": 700 }, "do": { "dropCombat": "tank" } }
+  ],
+  "goal": { "kill": "pack:target", "timeoutS": 120 },
+  "expect": {
+    "oracles": { "O4": "fail", "O5": "fail" },
+    "knownFailure": "open:#18 (memory dc-assist-selfcombat-wedge, fix-order item 2: seed SetInCombatWith without real threat)"
+  }
+}

@@ -3,6 +3,8 @@
  * and/or modify it under version 3 of the License, or (at your option), any later version.
  */
 
+#include <cmath>
+
 #include "gtest/gtest.h"
 #include "Ai/Dungeon/DungeonClear/Data/RoomAggroRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcEngageGeometry.h"
@@ -105,11 +107,112 @@ TEST(RoomAggroRegistryTest, MechanarCapacitusHasNoRoomAggroEntry)
     EXPECT_EQ(RoomAggroRegistry::Find(554, 19219), nullptr);
 }
 
+// Gilnid (Deadmines, 36) is flagged NOT because he force-pulls his room — his whole
+// script is a Molten Metal cast, a yell and a door — but because the goblin foundry
+// cannot be decomposed into packs: 19 level-18 ELITES standing 7.1-57.6yd from him,
+// 17 of which chain together at a same-level elite's ~20yd aggro radius. The pull
+// governor's 6yd-spread / 10yd-assist windows read that as "estimated 2" and Leeroy
+// the room, then Gilnid joins the pile (tp-20260815-171416-1: 5 of 20 runs wiped
+// there, status alternating boss/trash every 1-2s). radius 60 covers all 19; 50
+// would strand the three western-most at 52.0 / 55.3 / 57.6yd.
+TEST(RoomAggroRegistryTest, DeadminesGilnidPreClearsTheFoundry)
+{
+    RoomAggroBoss const* gilnid = RoomAggroRegistry::Find(36, 1763);
+    ASSERT_NE(gilnid, nullptr);
+    EXPECT_FLOAT_EQ(gilnid->radius, 60.0f);
+    // Any hostile in the room — the foundry is a mixed Craftsman/Engineer floor and
+    // the safe over-approximation is the documented default for a row like this.
+    EXPECT_TRUE(gilnid->memberEntries.empty());
+    EXPECT_FALSE(gilnid->hasYBand);
+    // No overrides: the computed boss sphere already excludes the two Craftsmen at
+    // 7.1/9.2yd (they come with the boss) and admits everything past it as trash.
+    EXPECT_FLOAT_EQ(gilnid->pullOutRadius, 0.0f);
+    EXPECT_FLOAT_EQ(gilnid->skirtRadius, 0.0f);
+    EXPECT_FLOAT_EQ(RoomAggroRegistry::SkirtOverride(36, 1763), 0.0f);
+    // The room members are room, not bosses.
+    EXPECT_EQ(RoomAggroRegistry::Find(36, 1731), nullptr);  // Goblin Craftsman
+    EXPECT_EQ(RoomAggroRegistry::Find(36, 622), nullptr);   // Goblin Engineer
+}
+
+// Emperor Dagran Thaurissan (BRD, 230): CallForHelp(VISIBLE_RANGE) wakes the whole
+// throne room, its two side balconies included, so a balcony pack counts however
+// long its ramp walk is. Every other row keeps the near-direct reach filter.
+TEST(RoomAggroRegistryTest, BrdEmperorCountsTheBalconies)
+{
+    RoomAggroBoss const* emperor = RoomAggroRegistry::Find(230, 9019);
+    ASSERT_NE(emperor, nullptr);
+    EXPECT_FLOAT_EQ(emperor->radius, 166.0f);
+    EXPECT_TRUE(emperor->memberEntries.empty());
+    EXPECT_TRUE(emperor->detourReachable);
+    // The throne-side floor (<= 29.9yd) goes last; the balconies (>= 39.6yd) do not.
+    EXPECT_GT(emperor->bossSideLastRadius, 29.9f);
+    EXPECT_LT(emperor->bossSideLastRadius, 39.6f);
+    EXPECT_FLOAT_EQ(emperor->pullOutRadius, 0.0f);
+    EXPECT_FLOAT_EQ(emperor->skirtRadius, 0.0f);
+    EXPECT_FALSE(emperor->hasCampBox);
+
+    RoomAggroBoss const* gilnid = RoomAggroRegistry::Find(36, 1763);
+    ASSERT_NE(gilnid, nullptr);
+    EXPECT_FALSE(gilnid->detourReachable);
+    EXPECT_FLOAT_EQ(gilnid->bossSideLastRadius, 0.0f);
+}
+
 // Nethermancer Sepethrea (Mechanar, 554) IS a room-aggro boss: her chamber holds
 // three elite trash groups pre-cleared and dragged back toward the entrance before
 // the pull. radius 70 covers the farthest (Pack A ~67yd); pullOutRadius 14 shrinks
 // the room-trash exclusion so Pack B — parked ~17yd out, inside her ~28yd real
 // aggro sphere — is KEPT as clearable trash instead of coming with the boss.
+// Gundrak Slad'ran. Every entry in this room reads hostile, so the whitelist is
+// not about the neutral-member bypass here -- it exists to keep two non-threats
+// OUT: the 86 level-1 Fanged Pit Vipers (neutral faction 7, they never aggro on
+// proximity, and sweeping them went badly live) and the Drakkari Frenzy that sit
+// inside the radius but ~20yd DOWN in the moat, which the party cannot walk to.
+TEST(RoomAggroRegistryTest, GundrakSladranClearsTheSnakePit)
+{
+    RoomAggroBoss const* sladran = RoomAggroRegistry::Find(604, 29304);
+    ASSERT_NE(sladran, nullptr);
+    EXPECT_FLOAT_EQ(sladran->radius, 75.0f);
+
+    // The room is the nine elites, and nothing else.
+    EXPECT_EQ(sladran->memberEntries, (std::vector<uint32>{29774, 29768}));
+    EXPECT_TRUE(RoomAggroRegistry::IsMemberEntry(*sladran, 29774));   // Spitting Cobra
+    EXPECT_TRUE(RoomAggroRegistry::IsMemberEntry(*sladran, 29768));   // Unyielding Constrictor
+    EXPECT_FALSE(RoomAggroRegistry::IsMemberEntry(*sladran, 29630));  // Fanged Pit Viper — ignored
+    EXPECT_FALSE(RoomAggroRegistry::IsMemberEntry(*sladran, 29834));  // Drakkari Frenzy — in the moat
+    EXPECT_FALSE(RoomAggroRegistry::IsMemberEntry(*sladran, 29682));  // Slad'ran Summon Target
+    EXPECT_FALSE(RoomAggroRegistry::IsMemberEntry(*sladran, 13321));  // Frog
+
+    // No Y band and no overrides — the room is a plain radius sphere.
+    EXPECT_FALSE(sladran->hasYBand);
+    EXPECT_FLOAT_EQ(sladran->pullOutRadius, 0.0f);
+    EXPECT_FLOAT_EQ(sladran->skirtRadius, 0.0f);
+    EXPECT_FLOAT_EQ(RoomAggroRegistry::SkirtOverride(604, 29304), 0.0f);
+
+    float const sphere = 28.0f;  // ~aggro + reaches + margin + padding
+
+    // The radius is sized off the PATROL envelope, not the spawn rows: constrictor
+    // guid 127014 walks path 1270140 out to 69.9yd. A radius cut to the 62.0yd
+    // farthest SPAWN would drop it at the far end of its path and call the room
+    // clear while it was still walking back.
+    EXPECT_TRUE(RoomAggroRegistry::IsRoomTrash(*sladran, 29768, 69.9f, sphere));
+
+    // ...and still stops short of the next room's mobs of the same two entries.
+    EXPECT_FALSE(RoomAggroRegistry::IsRoomTrash(*sladran, 29774, 79.5f, sphere));
+    EXPECT_FALSE(RoomAggroRegistry::IsRoomTrash(*sladran, 29768, 88.9f, sphere));
+
+    // A pit viper is not room trash at any distance, even well inside the radius.
+    EXPECT_FALSE(RoomAggroRegistry::IsRoomTrash(*sladran, 29630, 40.0f, sphere));
+
+    // The closest Spitting Cobra (26.9yd) falls inside the boss sphere and comes
+    // with the pull; the closest Constrictor (29.9yd) is clearable room trash.
+    EXPECT_FALSE(RoomAggroRegistry::IsRoomTrash(*sladran, 29774, 26.9f, sphere));
+    EXPECT_TRUE(RoomAggroRegistry::IsRoomTrash(*sladran, 29768, 29.9f, sphere));
+
+    // Only Slad'ran is flagged on 604; the room entries are room, not bosses.
+    EXPECT_EQ(RoomAggroRegistry::Find(604, 29630), nullptr);
+    EXPECT_EQ(RoomAggroRegistry::Find(604, 29774), nullptr);
+}
+
 TEST(RoomAggroRegistryTest, MechanarSepethreaHasPullOutRoom)
 {
     RoomAggroBoss const* sep = RoomAggroRegistry::Find(554, 19221);
@@ -334,4 +437,75 @@ TEST(DcEnRouteAvoidTest, PackTheTankIsStandingInIsStillRounded)
     // "already inside, nothing to avoid" and carry on through.
     std::vector<Sphere> const s{At(3.f, 0.f, 10.f)};
     EXPECT_EQ(DcEngageGeometry::FirstViolatedSphere(0.f, 0.f, 50.f, 0.f, s), 0);
+}
+
+// --- Karazhan (532) — Moroes' Banquet Hall ---------------------------------
+
+TEST(RoomAggroRegistryTest, KarazhanMoroesClearsTheBanquetHall)
+{
+    RoomAggroBoss const* m = RoomAggroRegistry::Find(532, 15687);
+    ASSERT_NE(m, nullptr);
+    EXPECT_GE(m->radius, 56.4f);  // the far south formation
+    EXPECT_FLOAT_EQ(RoomAggroRegistry::SkirtOverride(532, 15687), 32.0f);
+
+    // A Phantom Guest in the closest (east) formation, 21.1yd out, is trash:
+    // the pull-out radius keeps it clearable instead of "comes with the boss".
+    EXPECT_TRUE(RoomAggroRegistry::IsRoomTrash(*m, 16409, 21.1f, m->pullOutRadius));
+    // Stewards and Waiters are trash too.
+    EXPECT_TRUE(RoomAggroRegistry::IsRoomTrash(*m, 16414, 45.5f, m->pullOutRadius));
+    EXPECT_TRUE(RoomAggroRegistry::IsRoomTrash(*m, 16415, 36.5f, m->pullOutRadius));
+    // Moroes' own summoned guests are never trash, wherever they stand.
+    for (uint32 guest : {17007u, 19872u, 19873u, 19874u, 19875u, 19876u})
+    {
+        EXPECT_FALSE(RoomAggroRegistry::IsRoomTrash(*m, guest, 5.0f, m->pullOutRadius)) << guest;
+        EXPECT_FALSE(RoomAggroRegistry::IsRoomTrash(*m, guest, 30.0f, m->pullOutRadius)) << guest;
+    }
+    // A Phantom Guest glued to the dais comes with the boss.
+    EXPECT_FALSE(RoomAggroRegistry::IsRoomTrash(*m, 16409, 5.0f, m->pullOutRadius));
+    // Other entries in range (16459, Wanton Hostess) are not the room's.
+    EXPECT_FALSE(RoomAggroRegistry::IsRoomTrash(*m, 16459, 30.0f, m->pullOutRadius));
+    // The summoned guests stand 4-7yd off him, inside the pull-out radius.
+    EXPECT_GT(m->pullOutRadius, 7.0f);
+    EXPECT_LT(m->pullOutRadius, 21.1f);
+}
+
+// A row without a camp box never bounds the camp.
+TEST(RoomAggroRegistryTest, NoCampBoxAdmitsAnyPoint)
+{
+    RoomAggroBoss const* b = RoomAggroRegistry::Find(557, 18341);  // Pandemonius
+    ASSERT_NE(b, nullptr);
+    EXPECT_FALSE(b->hasCampBox);
+    EXPECT_TRUE(RoomAggroRegistry::InCampBox(*b, -1.0e6f, 1.0e6f));
+}
+
+// Moroes' camp box keeps the pull camp inside the Banquet Hall. Without it the
+// skirt-widened drag walked camps back onto the south door line, next to the
+// Phantom Attendants' corridor (tr-20260926-174359-2).
+TEST(RoomAggroRegistryTest, KarazhanMoroesCampStaysInTheHall)
+{
+    RoomAggroBoss const* m = RoomAggroRegistry::Find(532, 15687);
+    ASSERT_NE(m, nullptr);
+    ASSERT_TRUE(m->hasCampBox);
+
+    // Inside his script's evade box (x >= -11028, y >= -1955) with room to
+    // spare for the fanned-out camp.
+    EXPECT_GE(m->campMinX, -11028.0f + 15.0f);
+    EXPECT_GE(m->campMinY, -1955.0f + 15.0f);
+
+    // The camps that run placed: planned on the door line, and the fresh camp
+    // the Moroes fight was dragged to.
+    EXPECT_FALSE(RoomAggroRegistry::InCampBox(*m, -10973.3f, -1955.1f));
+    EXPECT_FALSE(RoomAggroRegistry::InCampBox(*m, -10975.2f, -1954.1f));
+    EXPECT_FALSE(RoomAggroRegistry::InCampBox(*m, -10973.1f, -1957.2f));
+    EXPECT_FALSE(RoomAggroRegistry::InCampBox(*m, -10971.2f, -1943.3f));
+    // The Phantom Attendants' spawn south of the door is outside too.
+    EXPECT_FALSE(RoomAggroRegistry::InCampBox(*m, -10956.9f, -1971.5f));
+
+    // The dais and a south-hall spot 32yd+ off Moroes (the skirt) are inside, so
+    // the camp search still has ground that clears his skirt.
+    float const mx = -10982.7f, my = -1877.9f;
+    EXPECT_TRUE(RoomAggroRegistry::InCampBox(*m, mx, my));
+    float const cx = -10975.0f, cy = -1935.0f;
+    EXPECT_TRUE(RoomAggroRegistry::InCampBox(*m, cx, cy));
+    EXPECT_GE(std::hypot(cx - mx, cy - my), RoomAggroRegistry::SkirtOverride(532, 15687));
 }
