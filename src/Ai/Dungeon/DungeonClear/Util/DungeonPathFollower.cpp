@@ -465,7 +465,7 @@ namespace
             if (!p.has_value())
                 return;
             float const d2 = Dist3DSq(px, py, pz, *p);
-            if (d2 > radius2)
+            if (!std::isfinite(d2) || d2 > radius2)
                 return;  // out of snap range — never a valid pick
             candidates.push_back(Candidate{seg, pt, *p, d2,
                                            static_cast<uint64>(seg) * 100000ULL + pt});
@@ -485,7 +485,7 @@ namespace
         std::sort(candidates.begin(), candidates.end(),
                   [](Candidate const& a, Candidate const& b)
                   {
-                      if (std::fabs(a.dist2 - b.dist2) > 1e-5f)
+                      if (a.dist2 != b.dist2)
                           return a.dist2 < b.dist2;
                       return a.flatIdx > b.flatIdx;  // forward bias on ties
                   });
