@@ -137,8 +137,12 @@ namespace
             if (!ai)
                 return;
             AiObjectContext* ctx = ai->GetAiObjectContext();
-            ctx->GetValue<std::vector<DungeonBossInfo>>(DcKey::DungeonBosses)->Reset();
-            ctx->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)->Reset();
+            if (!ctx)
+                return;
+            if (auto bosses = ctx->GetValue<std::vector<DungeonBossInfo>>(DcKey::DungeonBosses))
+                bosses->Reset();
+            if (auto next = ctx->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss))
+                next->Reset();
         };
         Group* group = ref->GetGroup();
         if (!group)
@@ -257,4 +261,20 @@ void DcRunWing::ClearFallback(Player* bot)
     Latch& latch = DcRun::Of(holderAI).runWing;
     if (latch.source == Source::Fallback || !Holds(latch, bot->GetMap() ? bot->GetMap()->GetInstanceId() : 0))
         latch = Latch{};
+}
+
+DcRunWing::Snapshot DcRunWing::Capture(Player* bot)
+{
+    Player* holder = LatchHolder(bot);
+    PlayerbotAI* ai = holder ? GET_PLAYERBOT_AI(holder) : nullptr;
+    return ai && ai->GetAiObjectContext() ? Snapshot{holder, DcRun::Of(ai).runWing} : Snapshot{};
+}
+
+void DcRunWing::Restore(Snapshot const& snapshot)
+{
+    PlayerbotAI* ai = snapshot.holder ? GET_PLAYERBOT_AI(snapshot.holder) : nullptr;
+    if (!ai || !ai->GetAiObjectContext())
+        return;
+    DcRun::Of(ai).runWing = snapshot.latch;
+    RefreshPartyBossLists(snapshot.holder);
 }

@@ -1,0 +1,50 @@
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <type_traits>
+#include <unordered_set>
+#include <cassert>
+#include "Ai/Dungeon/DungeonClear/DcRunState.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
+struct Dummy { void Reset(){} }; using DcPullContext=Dummy; using DcApproachState=Dummy; using DungeonFollowerState=Dummy; using DungeonClearSwimState=Dummy;
+namespace ChunkedPathfinder {using Result=Dummy;}
+template<class T> struct Value {std::remove_reference_t<T> data{}; auto& Get(){return data;} void Set(std::remove_reference_t<T> const& v){data=v;} void Reset(){data={};}};
+struct Context {Value<DcRunState&> run; bool unavailable=false; std::map<std::string,std::shared_ptr<void>> values; template<class T> Value<T>* GetValue(char const* k){if constexpr(std::is_same_v<T,DcRunState&>) return &run; else { if (unavailable && std::string(k)==DcKey::PullSetting) return nullptr; auto& v=values[std::string(k)+typeid(T).name()];if(!v)v=std::make_shared<Value<T>>();return static_cast<Value<T>*>(v.get());}}}; using AiObjectContext=Context;
+struct Player; struct PlayerbotAI {Context* ctx; bool HasStrategy(char const*,int){return false;} void ChangeStrategy(char const*,int){} Context* GetAiObjectContext(){return ctx;} template<class...T>void DoSpecificAction(T...){} }; using AI=PlayerbotAI;
+struct Map {bool dungeon=true, raid=false; bool IsDungeon(){return dungeon;} bool IsRaid(){return raid;}};
+struct Player {AI* ai; Map map; bool world=true, teleport=false; Map* GetMap(){return &map;} bool IsInWorld(){return world;} bool IsBeingTeleported(){return teleport;} ObjectGuid GetGUID(){return ObjectGuid(1);} };
+#define GET_PLAYERBOT_AI(p) ((p)?(p)->ai:nullptr)
+#define AI_VALUE(T,key) (context->GetValue<T>(key)->Get())
+namespace DcRun {DcRunState& Of(Context* c){return c->run.data;} DcRunState& Of(AI* ai){return Of(ai->ctx);} }
+struct DcLeaderSignal { static bool IsDungeonClearLeader(Player*){return true;} };
+namespace DcStatusPublisher {template<class...T>void MarkActiveTank(T...){} template<class...T>void SendAddonMessage(T...){} }
+bool dead=false; bool AnyPartyMemberDead(Player*){return dead;} namespace DcRezRecovery {bool CanRecover(Player*){return false;}}
+void ResetPullTransient(Context*){} void ApplyPullSetting(Player*,Context*,uint32){}
+constexpr int BOT_STATE_NON_COMBAT=0,BOT_STATE_COMBAT=1;
+struct Event {std::string param; std::string getParam(){return param;}};
+bool IsAuthorized(Player*,Event const&){return true;} void DcRefuse(AI*,Player*,std::string const&){} std::string FirstDeadName(Player*){return "dead";}
+struct DungeonWing {std::string name;}; DungeonWing wing{"UBRS"};
+Player* chosenHolder=nullptr; int refreshCount=0; Player* refreshed=nullptr; Player* LatchHolder(Player* bot){return chosenHolder ? chosenHolder : bot;} void RefreshPartyBossLists(Player* holder){++refreshCount;refreshed=holder;}
+// CAPTURE_BODY
+// RESTORE_BODY
+bool PickRunWing(AI*,Player* p,std::string const& token,DungeonWing const*& out){ if(token=="invalid")return false; if(token=="ubrs"){p->ai->ctx->run.data.runWing={7,"ubrs",DcRunWing::Source::Explicit};out=&wing;} return true; }
+namespace DungeonClearControl {
+// ENABLE_BODY
+}
+struct DcOnAction {Player* bot;AI* botAI;Context* context;bool Execute(Event);};
+// ON_BODY
+static void seed(Context& c){auto& r=c.run.data;r.enabled=false;r.waitedBossGuid=ObjectGuid(77);r.sealedMusterSince=123;r.paused=true;r.pauseReason="old";r.runWing={7,"lbrs",DcRunWing::Source::Lfg};c.GetValue<uint32>(DcKey::PullSetting)->Set(2);c.GetValue<std::unordered_set<uint32>&>(DcKey::ClearedAnchors)->Get().insert(99);}
+static void preserved(Context& c){auto& r=c.run.data;assert(!r.enabled);assert(r.waitedBossGuid==ObjectGuid(77));assert(r.sealedMusterSince==123);assert(r.pauseReason=="old");assert(r.runWing.token=="lbrs");assert(c.GetValue<uint32>(DcKey::PullSetting)->Get()==2);assert(c.GetValue<std::unordered_set<uint32>&>(DcKey::ClearedAnchors)->Get().count(99));}
+int main(){Context c;AI ai{&c};Player p{&ai};DcOnAction on{&p,&ai,&c}; auto* bosses=c.GetValue<std::vector<DungeonBossInfo>>(DcKey::DungeonBosses);bosses->data.push_back(DungeonBossInfo{});
+ Context other; AI otherAI{&other}; Player otherPlayer{&otherAI}; other.run.data.runWing={4,"prior",DcRunWing::Source::Lfg}; chosenHolder=&otherPlayer; auto captured=DcRunWing::Capture(&p);assert(captured.holder==&otherPlayer);other.run.data.runWing={7,"new",DcRunWing::Source::Explicit};DcRunWing::Restore(captured);assert(other.run.data.runWing.token=="prior" && other.run.data.runWing.source==DcRunWing::Source::Lfg);assert(refreshCount==1 && refreshed==&otherPlayer);chosenHolder=nullptr;
+ seed(c);assert(!on.Execute(Event{"invalid"}));preserved(c);
+ p.world=false;assert(!on.Execute(Event{"ubrs"}));preserved(c);p.world=true;
+ p.teleport=true;assert(!on.Execute(Event{"ubrs"}));preserved(c);p.teleport=false;
+ p.map.dungeon=false;assert(!on.Execute(Event{"ubrs"}));preserved(c);p.map.dungeon=true;
+ dead=true;assert(!on.Execute(Event{"ubrs"}));preserved(c);dead=false;
+ bosses->data.clear();assert(!on.Execute(Event{"ubrs"}));preserved(c);bosses->data.push_back(DungeonBossInfo{});
+ c.unavailable=true;assert(!on.Execute(Event{"ubrs"}));c.unavailable=false;preserved(c);
+ seed(c);assert(DungeonClearControl::EnableClearOnLeader(&p));assert(c.run.data.enabled && c.run.data.waitedBossGuid.IsEmpty() && c.run.data.sealedMusterSince==0);
+ seed(c);p.map.raid=true;assert(on.Execute(Event{"ubrs"}));auto& r=c.run.data;assert(r.enabled && r.raidRun && !r.paused && r.waitedBossGuid.IsEmpty() && r.sealedMusterSince==0);assert(r.runWing.token=="ubrs");assert(c.GetValue<std::unordered_set<uint32>&>(DcKey::ClearedAnchors)->Get().empty());assert(c.GetValue<uint32>(DcKey::PullSetting)->Get()==2);
+}
