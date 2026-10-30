@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the actual nearest-visible selector with small geometry doubles."""
 from pathlib import Path
+import os
 import subprocess
 import tempfile
 
@@ -17,10 +18,12 @@ def definition(source, signature):
 
 
 module = Path(__file__).resolve().parents[1]
-guard = next((p / 'scripts/wow-build-host-guard' for p in module.parents
+project_root = os.environ.get('WOW_PROJECT_ROOT')
+roots = [Path(project_root)] if project_root else module.parents
+guard = next((p / 'scripts/wow-build-host-guard' for p in roots
               if (p / 'scripts/wow-build-host-guard').is_file()), None)
 if guard is None:
-    raise SystemExit('WoW build-host guard not found in an ancestor')
+    raise SystemExit('WoW build-host guard not found; set WOW_PROJECT_ROOT')
 subprocess.run([str(guard)], check=True)
 source = (module / 'src/Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.cpp').read_text()
 names = ('std::optional<G3D::Vector3> PointAt(', 'struct FlatIndex',
