@@ -281,9 +281,10 @@ namespace DungeonClearControl
 
         // Reset transient state and enable. Keep this in lockstep with the real
         // DcOnAction path below: DcRun owns enabled/paused/selectedBoss now.
+        DcRun::Of(context).Reset();
         DcRun::Of(context).enabled = true;
+        DcRun::Of(context).raidRun = leader->GetMap()->IsRaid();
         DcStatusPublisher::MarkActiveTank(leader->GetGUID());
-        DcRun::Of(context).OnResume();
         ResetPullTransient(context);
         ApplyPullSetting(leader, context, context->GetValue<uint32>(DcKey::PullSetting)->Get());
         DcRun::Of(context).selectedBossEntry = 0u;
@@ -346,6 +347,9 @@ namespace DungeonClearControl
             return false;
 
         return EnableClearOnLeader(leader);
+    }
+}
+
 namespace
 {
     // "lbrs, ubrs" — the wing tokens a player can name on `layout`.
@@ -425,41 +429,39 @@ bool DcOnAction::Execute(Event event)
             botAI->ChangeStrategy("+dungeon clear combat", BOT_STATE_COMBAT);
         return true;
     }
-    if (!DungeonClearControl::EnableClearOnLeader(bot))
+    if (!context || !bot->GetMap() || !bot->GetMap()->IsDungeon() ||
+        !bot->IsInWorld() || bot->IsBeingTeleported())
     {
-        // EnableClearOnLeader only fails on the shared pre-gates; surface the
-        // same player-facing errors `dc on` always emitted for each one.
-        if (!bot->GetMap() || !bot->GetMap()->IsDungeon() ||
-            !bot->IsInWorld() || bot->IsBeingTeleported())
-            DcRefuse(botAI, bot, "Not in a dungeon.");
-        else if (AI_VALUE(std::vector<DungeonBossInfo>, DcKey::DungeonBosses).empty())
-            DcRefuse(botAI, bot, "No bosses found for this map.");
-        else if (AnyPartyMemberDead(bot) && !DcRezRecovery::CanRecover(bot))
-            DcRefuse(botAI, bot, FirstDeadName(bot) + " is dead — rez and try again.");
-        else
-            DcRefuse(botAI, bot, "Not in a dungeon.");
+        DcRefuse(botAI, bot, "Not in a dungeon.");
+        return false;
+    }
+    if (AnyPartyMemberDead(bot) && !DcRezRecovery::CanRecover(bot))
+    {
+        DcRefuse(botAI, bot, FirstDeadName(bot) + " is dead — rez and try again.");
         return false;
     }
 
     // Wing choice first: on Blackrock Spire it decides which boss list the
     // emptiness check below (and the whole run) sees.
+    DcRunWing::Snapshot const wingBefore = DcRunWing::Capture(bot);
     DungeonWing const* runWing = nullptr;
     if (!PickRunWing(botAI, bot, event.getParam(), runWing))
         return false;
 
-    auto const& bosses = AI_VALUE(std::vector<DungeonBossInfo>, DcKey::DungeonBosses);
-    if (bosses.empty())
+    auto bosses = context->GetValue<std::vector<DungeonBossInfo>>(DcKey::DungeonBosses);
+    if (!bosses || bosses->Get().empty())
     {
+        DcRunWing::Restore(wingBefore);
         DcRefuse(botAI, bot, "No bosses found for this map.");
         return false;
     }
 
-    // A corpse only refuses enabling when the post-combat rez flow can't
-    // recover it (feature off, or no living rez class) — otherwise the run
-    // starts and the recovery immediately holds it while the rez happens.
-    if (AnyPartyMemberDead(bot) && !DcRezRecovery::CanRecover(bot))
+    if (!context->GetValue<DcPullContext&>(DcKey::PullContext) ||
+        !context->GetValue<uint32>(DcKey::PullSetting) ||
+        !context->GetValue<bool>(DcKey::PullMode))
     {
-        DcRefuse(botAI, bot, FirstDeadName(bot) + " is dead — rez and try again.");
+        DcRunWing::Restore(wingBefore);
+        DcRefuse(botAI, bot, "Not in a dungeon.");
         return false;
     }
 
@@ -475,6 +477,7 @@ bool DcOnAction::Execute(Event event)
         botAI->ChangeStrategy("+dungeon clear combat", BOT_STATE_COMBAT);
 
     // Reset transient state and enable.
+    DcRun::Of(context).Reset();
     DcRun::Of(context).enabled = true;
     // Raid runs flip the non-interference contract (boss stand-down; see
     // DcRunState). Map::IsDungeon() was verified above, so this is the honest

@@ -53,6 +53,12 @@ namespace DcRunWing
         Source source = Source::None;
     };
 
+    struct Snapshot
+    {
+        Player* holder = nullptr;
+        Latch latch;
+    };
+
     char const* SourceName(Source source);
 
     // ---- pure kernels (gtest-pinned) ----------------------------------------
@@ -116,6 +122,9 @@ namespace DcRunWing
     // ShouldReplace allows, and refresh every party bot's boss list so the new
     // wing takes effect this tick. Returns whether the latch now names `wing`.
     bool Set(Player* bot, DungeonWing const& wing, Source source);
+
+    Snapshot Capture(Player* bot);
+    void Restore(Snapshot const& snapshot);
 
     // Drop a Fallback latch (never an Explicit/Lfg one) so the next Resolve
     // re-reads where the party stands. `dc on` calls it before latching afresh.
